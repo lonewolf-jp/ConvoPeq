@@ -35,12 +35,16 @@
                                 // mechanism 検証に直接使用する（production 経路と同一 API）
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include "eqprocessor/EQProcessor.h"
+#include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EpochDomain.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
@@ -522,6 +526,111 @@ static bool checkCoeffCacheKeyContract()
     return ok;
 }
 
+
+// -----------------------------------------------------------------------------
+// 入力検証（#4 / #5 / #7）の回帰
+//   非有限値は拒否し、有限値は係数生成と同じ静的範囲へ正規化する。
+// -----------------------------------------------------------------------------
+static bool checkInputValidationContract()
+{
+    bool ok = true;
+    const auto expect = [&ok](bool condition, const char* name)
+    {
+        if (!condition)
+        {
+            std::fprintf(stderr, "FAIL: %s\n", name);
+            ok = false;
+        }
+    };
+
+    EQProcessor eq;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    const float freq0 = eq.getBandParams(0).frequency;
+    eq.setBandFrequency(0, nan);
+    expect(eq.getBandParams(0).frequency == freq0, "freq NaN rejected");
+    eq.setBandFrequency(0, inf);
+    expect(eq.getBandParams(0).frequency == freq0, "freq Inf rejected");
+    eq.setBandFrequency(0, 1.0e9f);
+    expect(eq.getBandParams(0).frequency == EQProcessor::DSP_MAX_FREQ, "freq upper clamp");
+    eq.setBandFrequency(0, 1.0f);
+    expect(eq.getBandParams(0).frequency == EQProcessor::DSP_MIN_FREQ, "freq lower clamp");
+
+    const float gain0 = eq.getBandParams(0).gain;
+    eq.setBandGain(0, nan);
+    expect(eq.getBandParams(0).gain == gain0, "gain NaN rejected");
+    eq.setBandGain(0, 100.0f);
+    expect(eq.getBandParams(0).gain == EQProcessor::DSP_MAX_GAIN_DB, "gain upper clamp");
+    eq.setBandGain(0, -100.0f);
+    expect(eq.getBandParams(0).gain == EQProcessor::DSP_MIN_GAIN_DB, "gain lower clamp");
+
+    eq.setBandQ(0, 0.0f);
+    expect(eq.getBandParams(0).q == EQProcessor::DSP_MIN_Q, "q lower clamp");
+    eq.setBandQ(0, nan);
+    expect(eq.getBandParams(0).q == EQProcessor::DSP_MIN_Q, "q NaN rejected");
+
+    const float saturation0 = eq.getNonlinearSaturation();
+    eq.setNonlinearSaturation(nan);
+    expect(eq.getNonlinearSaturation() == saturation0, "saturation NaN rejected");
+    eq.setNonlinearSaturation(inf);
+    expect(eq.getNonlinearSaturation() == saturation0, "saturation Inf rejected");
+
+    eq.setFilterStructure(EQProcessor::FilterStructure::Parallel);
+    eq.setFilterStructure(static_cast<EQProcessor::FilterStructure>(7));
+    expect(eq.getFilterStructure() == EQProcessor::FilterStructure::Parallel,
+           "invalid filter structure rejected");
+    eq.setFilterStructure(EQProcessor::FilterStructure::Serial);
+    expect(eq.getFilterStructure() == EQProcessor::FilterStructure::Serial,
+           "valid filter structure accepted");
+
+    if (ok)
+        std::printf("STG11-D14: input validation contract PASS\n");
+    return ok;
+}
+
+// -----------------------------------------------------------------------------
+// 位相アンラップ（#2）の回帰
+//   上方向・下方向の双方で、補正量が累積することを確認する。
+// -----------------------------------------------------------------------------
+static bool checkUnwrapContract()
+{
+    bool ok = true;
+    const auto expect = [&ok](bool condition, const char* name)
+    {
+        if (!condition)
+        {
+            std::fprintf(stderr, "FAIL: %s\n", name);
+            ok = false;
+        }
+    };
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    const double tol = 1.0e-9;
+
+    {
+        std::vector<double> phase { 3.0, 3.1, -3.1, -3.0, -2.9 };
+        ConvolverProcessorInternal::unwrapPhaseRadians(phase.data(), static_cast<int>(phase.size()));
+        expect(std::abs(phase[2] - (-3.1 + twoPi)) < tol, "upward wrap corrected");
+        expect(phase[3] > phase[2] && phase[4] > phase[3], "upward phase remains continuous");
+    }
+    {
+        std::vector<double> phase { -3.0, -3.1, 3.1, 3.0, 2.9 };
+        ConvolverProcessorInternal::unwrapPhaseRadians(phase.data(), static_cast<int>(phase.size()));
+        expect(std::abs(phase[2] - (3.1 - twoPi)) < tol, "downward wrap corrected");
+        expect(phase[3] < phase[2] && phase[4] < phase[3], "downward phase remains continuous");
+    }
+    {
+        std::vector<double> phase { 0.0, 0.5, 1.0, 1.5 };
+        const auto original = phase;
+        ConvolverProcessorInternal::unwrapPhaseRadians(phase.data(), static_cast<int>(phase.size()));
+        expect(phase == original, "continuous phase unchanged");
+    }
+
+    if (ok)
+        std::printf("STG11-D15: phase unwrap contract PASS\n");
+    return ok;
+}
+
 int runSTG11EQRetireTests()
 {
     bool ok = true;
@@ -558,6 +667,16 @@ int runSTG11EQRetireTests()
     if (!checkCoeffCacheKeyContract())
     {
         std::fprintf(stderr, "FAIL: D13 coefficient cache key contract\n");
+        ok = false;
+    }
+    if (!checkInputValidationContract())
+    {
+        std::fprintf(stderr, "FAIL: D14 input validation contract\n");
+        ok = false;
+    }
+    if (!checkUnwrapContract())
+    {
+        std::fprintf(stderr, "FAIL: D15 phase unwrap contract\n");
         ok = false;
     }
     if (ok)

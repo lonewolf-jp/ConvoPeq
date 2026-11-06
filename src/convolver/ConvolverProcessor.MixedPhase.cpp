@@ -279,17 +279,11 @@ juce::AudioBuffer<double> ConvolverProcessor::convertToMixedPhaseAllpass(Convolv
             if (DftiComputeForward(dfti.handle, minimumSpec.get()) != DFTI_NO_ERROR) return {};
 
             std::vector<double> phiMinUnwrapped(static_cast<size_t>(complexSize));
-            phiMinUnwrapped[0] = std::atan2(minimumSpec.get()[0].imag, minimumSpec.get()[0].real);
-            for (int k = 1; k < complexSize; ++k)
-            {
-                const double raw = std::atan2(minimumSpec.get()[k].imag, minimumSpec.get()[k].real);
-                const double delta = raw - phiMinUnwrapped[static_cast<size_t>(k - 1)];
-                if (delta > juce::MathConstants<double>::pi)
-                    phiMinUnwrapped[static_cast<size_t>(k)] = phiMinUnwrapped[static_cast<size_t>(k - 1)]
-                                                           + delta - 2.0 * juce::MathConstants<double>::pi;
-                else
-                    phiMinUnwrapped[static_cast<size_t>(k)] = phiMinUnwrapped[static_cast<size_t>(k - 1)] + delta;
-            }
+            for (int k = 0; k < complexSize; ++k)
+                phiMinUnwrapped[static_cast<size_t>(k)] = std::atan2(minimumSpec.get()[k].imag,
+                                                                     minimumSpec.get()[k].real);
+            // 両方向の補正と補正量の累積を備えた共通実装へ委譲する。
+            unwrapPhaseRadians(phiMinUnwrapped.data(), complexSize);
 
             std::vector<bool> phaseValid(static_cast<size_t>(complexSize), true);
             for (int k = 0; k < complexSize; ++k)

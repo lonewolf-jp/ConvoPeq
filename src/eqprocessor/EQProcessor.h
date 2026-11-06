@@ -30,7 +30,6 @@
 #include <memory>
 #include <cmath>
 #include <cstring>
-#include <limits>
 #include <mutex>
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"

@@ -334,12 +334,16 @@ void ConvolverProcessor::setState(const juce::ValueTree& v)
             if (hasSavedAutoLength)
             {
                 const float autoLength = static_cast<float>(v.getProperty ("autoDetectedIRLength"));
-                const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
-                                                             getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)), // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
-                                                             autoLength);
+                // STG-11-D8: 非有限値は格納しない（jlimit は NaN を素通しするため）。
+                if (std::isfinite(autoLength))
                 {
-                    const juce::ScopedLock lock(pendingOverrideLock);
-                    pendingOverride.autoDetectedIRLengthSec = clampedAutoLength;
+                    const float clampedAutoLength = juce::jlimit(IR_LENGTH_MIN_SEC,
+                                                                 getMaximumAllowedIRLengthSec(convo::consumeAtomic(currentSampleRate, std::memory_order_acquire)), // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
+                                                                 autoLength);
+                    {
+                        const juce::ScopedLock lock(pendingOverrideLock);
+                        pendingOverride.autoDetectedIRLengthSec = clampedAutoLength;
+                    }
                 }
             }
 

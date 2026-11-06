@@ -1317,6 +1317,11 @@ public:
     //----------------------------------------------------------
     ConvolverProcessor& getConvolverProcessor() { return uiConvolverProcessor; }
     [[nodiscard]] const ConvolverProcessor& getConvolverProcessor() const { return uiConvolverProcessor; }
+
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+    // テスト専用: 係数キャッシュの衝突スロットでキー照合と退避を検証する。
+    bool debugRunEqCacheCollisionProbe() { return eqCacheManager.debugRunCollisionProbe(); }
+#endif
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
     [[nodiscard]] const ThreadAffinityManager& getAffinityManager() const noexcept { return affinityManager; }
@@ -2236,6 +2241,10 @@ private:
                                   double sampleRate,
                                   int maxBlockSize,
                                   uint64_t generation);
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+        // テスト専用: 別キーのキャッシュを同一ハッシュへ置き、誤ヒットしないことを検証する。
+        bool debugRunCollisionProbe();
+#endif
         // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
         //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
         //     DSPHandlePin keeps the cache entry alive for the lease duration.

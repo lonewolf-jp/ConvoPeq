@@ -2908,6 +2908,7 @@ bool checkSTG61LoadFailureReported()
     if (!ok)
         return false;
     std::printf("ConvolverStateRoundTripTests: PASS (STG-6-D1 failure reported, state preserved)\n");
+
     return true;
 }
 
@@ -3141,6 +3142,56 @@ static bool checkWork92A3FftFailurePath()
     return ok;
 }
 
+
+// -----------------------------------------------------------------------------
+// D8: setState の手動オーバーライド分岐が非有限の autoDetectedIRLength を格納しない
+// -----------------------------------------------------------------------------
+bool checkD8AutoLengthRejectsNonFinite()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[D8] harness start failed\n");
+        return false;
+    }
+
+    ConvolverProcessor& conv = h.engine().getConvolverProcessor();
+    conv.setIRLengthManualOverride(false);
+    conv.applyAutoDetectedIRLength(0.5f);
+    const float before = conv.getAutoDetectedIRLength();
+
+    juce::ValueTree v("Convolver");
+    v.setProperty("autoDetectedIRLength", std::numeric_limits<double>::quiet_NaN(), nullptr);
+    v.setProperty("irLengthManualOverride", true, nullptr);
+    conv.setState(v);
+
+    const float after = conv.getAutoDetectedIRLength();
+    const bool ok = (after == before);
+    std::printf("[D8] autoDetected NaN rejection: %s (before=%.3f after=%.3f)\n",
+                ok ? "PASS" : "FAIL", static_cast<double>(before), static_cast<double>(after));
+    return ok;
+}
+
+
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+// -----------------------------------------------------------------------------
+// #1: 同一ハッシュへ別キーのキャッシュを置き、誤ヒットせず退避することを検証する
+// -----------------------------------------------------------------------------
+bool checkEqCacheCollisionProbe()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[#1] harness start failed\n");
+        return false;
+    }
+
+    const bool ok = h.engine().debugRunEqCacheCollisionProbe();
+    std::printf("[#1] coefficient cache collision probe: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+#endif
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -3313,6 +3364,18 @@ int runConvolverStateRoundTripTests()
         std::fprintf(stderr, "FAIL: checkWork92A3FftFailurePath (work92 A-3)\n");
         stg2ok = false;
     }
+    if (!checkD8AutoLengthRejectsNonFinite())
+    {
+        std::fprintf(stderr, "FAIL: checkD8AutoLengthRejectsNonFinite\n");
+        return 1;
+    }
+#if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
+    if (!checkEqCacheCollisionProbe())
+    {
+        std::fprintf(stderr, "FAIL: checkEqCacheCollisionProbe\n");
+        return 1;
+    }
+#endif
     if (!stg2ok)
         return 1;
     return 0;
