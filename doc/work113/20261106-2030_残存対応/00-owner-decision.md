@@ -30,7 +30,7 @@
 |---|---|---|
 | #9 | 修正し、PR #159 を `48c9b726` としてマージした | `report.md` §2 |
 | #1 残存 A | 保留を維持し、再審査条件を記録 | `06-issue1a-hold.md` |
-| #1 残存 B | 設計案に基づき実装・テスト追加（PR 未マージ） | `02-issue1b-design.md` |
+| #1 残存 B | 設計案に基づき実装・テスト追加し、PR #163 を `7faf9fa9` としてマージした | `02-issue1b-design.md` |
 | #12 | 変更なし | `01-residual-register.md` §3 |
 | N1 | Issue #158 として起票 | `05-n1-issue-record.md` |
 | TSan | 運用を継続（追加実行なし） | `01-residual-register.md` §6 |

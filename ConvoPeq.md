@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-06 22:03:10
+> Generated: 2026-11-07 01:40:48
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -4888,6 +4888,40 @@ bool AudioEngine::EQCacheManager::debugRunCollisionProbe()
         && EQProcessor::cacheKeyMatches(*cacheB, keyB)
         && cacheB->paramsHash != hashB;
 }
+
+bool AudioEngine::EQCacheManager::debugRunDisabledBandKeyProbe()
+{
+    convo::EQParameters a;
+    a.bands[7].enabled = false;
+    a.bands[7].frequency = 35.0f;
+    a.bands[7].gain = 9.0f;
+    a.bands[7].q = 2.5f;
+
+    convo::EQParameters b = a;
+    b.bands[7].frequency = 8000.0f;
+    b.bands[7].gain = -12.0f;
+    b.bands[7].q = 0.5f;
+
+    const auto keyA = EQProcessor::makeCacheKey(a, 48000.0, 512);
+    const auto keyB = EQProcessor::makeCacheKey(b, 48000.0, 512);
+    if (!(keyA == keyB))
+        return false;
+    if (EQProcessor::hashCacheKey(keyA) != EQProcessor::hashCacheKey(keyB))
+        return false;
+
+    EQCoeffCache* cacheA = getOrCreate(a, 48000.0, 512, 1u);
+    if (cacheA == nullptr || !EQProcessor::cacheKeyMatches(*cacheA, keyA))
+        return false;
+
+    EQCoeffCache* cacheB = getOrCreate(b, 48000.0, 512, 2u);
+    if (cacheB == nullptr || cacheB != cacheA)
+        return false;
+
+    convo::EQParameters c = a;
+    c.bands[7].enabled = true;
+    EQCoeffCache* cacheC = getOrCreate(c, 48000.0, 512, 3u);
+    return cacheC != nullptr && cacheC != cacheA;
+}
 #endif
 
 // ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
@@ -7993,6 +8027,8 @@ public:
 #if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
     // テスト専用: 係数キャッシュの衝突スロットでキー照合と退避を検証する。
     bool debugRunEqCacheCollisionProbe() { return eqCacheManager.debugRunCollisionProbe(); }
+    // テスト専用: 無効バンドのキー正規化で同一キャッシュが再利用されることを検証する。
+    bool debugRunEqDisabledBandKeyProbe() { return eqCacheManager.debugRunDisabledBandKeyProbe(); }
 #endif
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
@@ -8916,6 +8952,8 @@ private:
 #if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
         // テスト専用: 別キーのキャッシュを同一ハッシュへ置き、誤ヒットしないことを検証する。
         bool debugRunCollisionProbe();
+        // テスト専用: 無効バンドの値だけが異なる 2 設定で同一キャッシュが返ることを検証する。
+        bool debugRunDisabledBandKeyProbe();
 #endif
         // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
         //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
@@ -72890,15 +72928,27 @@ inline EQCoeffKey EQProcessor::makeCacheKey(const convo::EQParameters& params,
     for (int i = 0; i < NUM_BANDS; ++i)
     {
         const auto& band = params.bands[i];
-        float frequency = band.frequency;
-        if (frequencyRangeValid)
-            frequency = juce::jlimit(DSP_MIN_FREQ, maxFrequency, frequency);
-        const float gain = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, band.gain);
-        const float q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, band.q);
+        if (band.enabled)
+        {
+            float frequency = band.frequency;
+            if (frequencyRangeValid)
+                frequency = juce::jlimit(DSP_MIN_FREQ, maxFrequency, frequency);
+            const float gain = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, band.gain);
+            const float q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, band.q);
 
-        key.frequencyBits[static_cast<std::size_t>(i)] = canonicalFloatBits(frequency);
-        key.gainBits[static_cast<std::size_t>(i)] = canonicalFloatBits(gain);
-        key.qBits[static_cast<std::size_t>(i)] = canonicalFloatBits(q);
+            key.frequencyBits[static_cast<std::size_t>(i)] = canonicalFloatBits(frequency);
+            key.gainBits[static_cast<std::size_t>(i)] = canonicalFloatBits(gain);
+            key.qBits[static_cast<std::size_t>(i)] = canonicalFloatBits(q);
+        }
+        else
+        {
+            // 無効バンドの値は係数にも処理にも使われない（createCoeffCache はバイパス、
+            // 処理側は bandActive を先に確認する）。キーでは 0 に正規化し、同じ有効設定が
+            // 同じキャッシュを再利用できるようにする。
+            key.frequencyBits[static_cast<std::size_t>(i)] = 0u;
+            key.gainBits[static_cast<std::size_t>(i)] = 0u;
+            key.qBits[static_cast<std::size_t>(i)] = 0u;
+        }
         key.enabled[static_cast<std::size_t>(i)] = band.enabled ? 1u : 0u;
         key.type[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.type);
         key.channelMode[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.channelMode);
@@ -98725,6 +98775,23 @@ bool checkEqCacheCollisionProbe()
     std::printf("[#1] coefficient cache collision probe: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
+
+// -----------------------------------------------------------------------------
+// #1B: 無効バンドの値だけが異なる 2 設定で同一キャッシュが再利用されることを検証する
+// -----------------------------------------------------------------------------
+bool checkEqCacheDisabledBandKeyProbe()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[#1B] harness start failed\n");
+        return false;
+    }
+
+    const bool ok = h.engine().debugRunEqDisabledBandKeyProbe();
+    std::printf("[#1B] disabled-band key normalisation probe: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
 #endif
 
 int runConvolverStateRoundTripTests()
@@ -98908,6 +98975,11 @@ int runConvolverStateRoundTripTests()
     if (!checkEqCacheCollisionProbe())
     {
         std::fprintf(stderr, "FAIL: checkEqCacheCollisionProbe\n");
+        return 1;
+    }
+    if (!checkEqCacheDisabledBandKeyProbe())
+    {
+        std::fprintf(stderr, "FAIL: checkEqCacheDisabledBandKeyProbe\n");
         return 1;
     }
 #endif
@@ -114117,6 +114189,56 @@ static bool checkCoeffCacheKeyContract()
     convo::EQParameters agcChanged = base;
     agcChanged.agcEnabled = true;
     expect(!(keyOf(agcChanged) == keyOf(base)), "agc is part of the key");
+
+    // #1B: 無効バンドの値はキーから正規化される（係数にも処理にも使われないため）。
+    convo::EQParameters disabledA = base;
+    disabledA.bands[7].enabled = false;
+    disabledA.bands[7].frequency = 35.0f;
+    disabledA.bands[7].gain = 9.0f;
+    disabledA.bands[7].q = 2.5f;
+
+    convo::EQParameters disabledB = disabledA;
+    disabledB.bands[7].frequency = 8000.0f;
+    disabledB.bands[7].gain = -12.0f;
+    disabledB.bands[7].q = 0.5f;
+
+    expect(keyOf(disabledA) == keyOf(disabledB),
+           "disabled band values are normalised out of the key");
+    expect(hashOf(keyOf(disabledA)) == hashOf(keyOf(disabledB)),
+           "disabled band values are normalised out of the hash");
+
+    convo::EQParameters disabledNonFinite = disabledA;
+    disabledNonFinite.bands[7].frequency = std::numeric_limits<float>::quiet_NaN();
+    disabledNonFinite.bands[7].gain = std::numeric_limits<float>::infinity();
+    disabledNonFinite.bands[7].q = -std::numeric_limits<float>::infinity();
+    expect(keyOf(disabledNonFinite) == keyOf(disabledA),
+           "non-finite values in a disabled band keep the key stable");
+
+    convo::EQParameters reenabled = disabledA;
+    reenabled.bands[7].enabled = true;
+    expect(!(keyOf(reenabled) == keyOf(disabledA)), "re-enabling a band changes the key");
+
+    convo::EQParameters enabledChanged = base;
+    enabledChanged.bands[7].gain = 3.0f;
+    expect(!(keyOf(enabledChanged) == keyOf(base)), "enabled band values remain part of the key");
+
+    std::unique_ptr<EQCoeffCache> disabledCache(EQProcessor::createCoeffCache(disabledA, sr, block, 3u));
+    std::unique_ptr<EQCoeffCache> disabledCacheB(EQProcessor::createCoeffCache(disabledB, sr, block, 4u));
+    if (disabledCache != nullptr && disabledCacheB != nullptr)
+    {
+        expect(EQProcessor::cacheKeyMatches(*disabledCache, keyOf(disabledB)),
+               "cache built from one disabled-band setting matches the equivalent key");
+        bool sameDisabledCoeffs = true;
+        for (int i = 0; i < EQProcessor::NUM_BANDS; ++i)
+        {
+            const auto& a = disabledCache->coeffs[i];
+            const auto& b = disabledCacheB->coeffs[i];
+            sameDisabledCoeffs = sameDisabledCoeffs
+                && a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3
+                && a.m0 == b.m0 && a.m1 == b.m1 && a.m2 == b.m2;
+        }
+        expect(sameDisabledCoeffs, "disabled band values do not change the coefficients");
+    }
 
     std::unique_ptr<EQCoeffCache> cache(EQProcessor::createCoeffCache(plusGain, sr, block, 1u));
     expect(cache != nullptr, "createCoeffCache returns a cache");
