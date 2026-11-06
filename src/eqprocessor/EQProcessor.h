@@ -28,6 +28,9 @@
 #include <array>
 #include <vector>
 #include <memory>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include "core/EQParameters.h"
 #include "core/EpochDomain.h"
@@ -119,6 +122,29 @@ struct EQCoeffsBiquad
 // CPU/メモリ効率を向上させる不変キャッシュ
 // ライフサイクル管理は DSPHandleRuntime が担当する。
 //--------------------------------------------------------------
+//--------------------------------------------------------------
+// EQCoeffKey: 係数キャッシュの同一性判定キー
+//   float は符号を保持した canonical bits（±0 は 0、NaN は単一表現）で持つ。
+//   係数生成に影響する値だけを含み、比較とハッシュの両方で同じ表現を使う。
+//--------------------------------------------------------------
+struct EQCoeffKey
+{
+    std::array<std::uint32_t, 20> frequencyBits {};
+    std::array<std::uint32_t, 20> gainBits {};
+    std::array<std::uint32_t, 20> qBits {};
+    std::array<std::uint8_t, 20> enabled {};
+    std::array<std::uint8_t, 20> type {};
+    std::array<std::uint8_t, 20> channelMode {};
+    std::uint32_t totalGainBits = 0;
+    std::uint32_t saturationBits = 0;
+    std::uint8_t agcEnabled = 0;
+    std::uint8_t filterStructure = 0;
+    std::uint64_t sampleRateBits = 0;
+    std::int32_t maxBlockSize = 0;
+
+    bool operator==(const EQCoeffKey&) const noexcept = default;
+};
+
 #pragma warning(push)
 #pragma warning(disable : 4324) // C4324を抑制 - struct padding due to alignment
 struct alignas(64) EQCoeffCache
@@ -130,6 +156,7 @@ struct alignas(64) EQCoeffCache
 
     // メタデータ
     uint64_t paramsHash = 0;             // パラメータハッシュ値
+    EQCoeffKey key {};                   // 係数生成に用いたパラメータの正規化キー
     double sampleRate = 0.0;             // サンプリングレート
     int maxBlockSize = 0;                // 最大ブロックサイズ
     uint64_t generation = 0;             // 世代番号
@@ -314,6 +341,15 @@ public:
         double sampleRate,
         int maxBlockSize,
         uint64_t generation) noexcept;
+
+    // 係数キャッシュの同一性判定（符号保持・±0/NaN 正規化）
+    static std::uint32_t canonicalFloatBits(float value) noexcept;
+    static EQCoeffKey makeCacheKey(const convo::EQParameters& params,
+                                   double sampleRate,
+                                   int maxBlockSize) noexcept;
+    static std::uint64_t hashCacheKey(const EQCoeffKey& key) noexcept;
+    static bool cacheKeyMatches(const EQCoeffCache& cache, const EQCoeffKey& key) noexcept;
+    static std::uint64_t probeCacheHash(std::uint64_t baseHash, int probe) noexcept;
 
     //----------------------------------------------------------
     // パラメータ読み取り (UIスレッドで表示に使用)
@@ -818,3 +854,106 @@ private:
     std::uint64_t rtSeenAgcResetSerial = 0;    // Audio Thread 専有（Non-RT 書込禁止）
 
 };
+
+//--------------------------------------------------------------
+// 係数キャッシュ・キーの実装（header-only: 単体テストから直接検証できる）
+//--------------------------------------------------------------
+inline std::uint32_t EQProcessor::canonicalFloatBits(float value) noexcept
+{
+    // すべての NaN を単一表現へ寄せ、±0 を 0 に揃える。それ以外は符号を含めて保持する。
+    if (std::isnan(value))
+        return 0x7FC00000u;
+    if (value == 0.0f)
+        return 0u;
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+inline EQCoeffKey EQProcessor::makeCacheKey(const convo::EQParameters& params,
+                                            double sampleRate,
+                                            int maxBlockSize) noexcept
+{
+    EQCoeffKey key;
+    const float nyquist = static_cast<float>(sampleRate * 0.5);
+    const float maxFrequency = (std::min)(DSP_MAX_FREQ, nyquist * DSP_MAX_FREQ_NYQUIST_RATIO);
+    const bool frequencyRangeValid = std::isfinite(maxFrequency) && maxFrequency >= DSP_MIN_FREQ;
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        const auto& band = params.bands[i];
+        float frequency = band.frequency;
+        if (frequencyRangeValid)
+            frequency = juce::jlimit(DSP_MIN_FREQ, maxFrequency, frequency);
+        const float gain = juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, band.gain);
+        const float q = juce::jlimit(DSP_MIN_Q, DSP_MAX_Q, band.q);
+
+        key.frequencyBits[static_cast<std::size_t>(i)] = canonicalFloatBits(frequency);
+        key.gainBits[static_cast<std::size_t>(i)] = canonicalFloatBits(gain);
+        key.qBits[static_cast<std::size_t>(i)] = canonicalFloatBits(q);
+        key.enabled[static_cast<std::size_t>(i)] = band.enabled ? 1u : 0u;
+        key.type[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.type);
+        key.channelMode[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(band.channelMode);
+    }
+
+    key.totalGainBits = canonicalFloatBits(juce::jlimit(DSP_MIN_GAIN_DB, DSP_MAX_GAIN_DB, params.totalGainDb));
+    key.saturationBits = canonicalFloatBits(juce::jlimit(0.0f, 1.0f, params.nonlinearSaturation));
+    key.agcEnabled = params.agcEnabled ? 1u : 0u;
+    key.filterStructure = static_cast<std::uint8_t>(params.filterStructure);
+
+    if (std::isnan(sampleRate))
+        key.sampleRateBits = 0x7FF8000000000000ull;
+    else if (sampleRate == 0.0)
+        key.sampleRateBits = 0ull;
+    else
+        std::memcpy(&key.sampleRateBits, &sampleRate, sizeof(key.sampleRateBits));
+
+    key.maxBlockSize = maxBlockSize;
+    return key;
+}
+
+inline std::uint64_t EQProcessor::hashCacheKey(const EQCoeffKey& key) noexcept
+{
+    std::uint64_t hash = 0x9E3779B97F4A7C15ull;
+    const auto mix = [&hash](std::uint64_t value) noexcept
+    {
+        hash ^= value + 0x9E3779B97F4A7C15ull + (hash << 6) + (hash >> 2);
+    };
+
+    for (int i = 0; i < NUM_BANDS; ++i)
+    {
+        const auto index = static_cast<std::size_t>(i);
+        mix(key.frequencyBits[index]);
+        mix(key.gainBits[index]);
+        mix(key.qBits[index]);
+        mix(key.enabled[index]);
+        mix(key.type[index]);
+        mix(key.channelMode[index]);
+    }
+
+    mix(key.totalGainBits);
+    mix(key.saturationBits);
+    mix(key.agcEnabled);
+    mix(key.filterStructure);
+    mix(key.sampleRateBits);
+    mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.maxBlockSize)));
+
+    // 0 は「キャッシュなし」の番兵として使われるため避ける。
+    return hash != 0ull ? hash : 1ull;
+}
+
+inline bool EQProcessor::cacheKeyMatches(const EQCoeffCache& cache, const EQCoeffKey& key) noexcept
+{
+    return cache.key == key;
+}
+
+inline std::uint64_t EQProcessor::probeCacheHash(std::uint64_t baseHash, int probe) noexcept
+{
+    std::uint64_t hash = baseHash + 0x9E3779B97F4A7C15ull * static_cast<std::uint64_t>(probe + 1);
+    hash ^= hash >> 30;
+    hash *= 0xBF58476D1CE4E5B9ull;
+    hash ^= hash >> 27;
+    hash *= 0x94D049BB133111EBull;
+    hash ^= hash >> 31;
+    return hash != 0ull ? hash : 1ull;
+}

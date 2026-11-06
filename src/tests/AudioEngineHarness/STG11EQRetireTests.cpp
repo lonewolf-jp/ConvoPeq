@@ -398,6 +398,130 @@ static bool checkTD10SetterAccounting()
     return true;
 }
 
+
+// -----------------------------------------------------------------------------
+// STG11-D13: 係数キャッシュの同一性判定（#1 符号衝突の回帰）
+//   ・符号だけ異なるゲイン／totalGain を区別する
+//   ・クランプ後に同値となる入力は同一キーにする
+//   ・sampleRate / maxBlockSize の差を区別する
+//   ・ハッシュ一致でもキーが違えばキャッシュヒットさせない
+// -----------------------------------------------------------------------------
+static bool checkCoeffCacheKeyContract()
+{
+    bool ok = true;
+    const auto expect = [&ok](bool condition, const char* name)
+    {
+        if (!condition)
+        {
+            std::fprintf(stderr, "FAIL: %s\n", name);
+            ok = false;
+        }
+    };
+
+    constexpr double sr = 48000.0;
+    constexpr int block = 512;
+
+    const convo::EQParameters base;
+    const auto keyOf = [sr, block](const convo::EQParameters& p) { return EQProcessor::makeCacheKey(p, sr, block); };
+    const auto hashOf = [](const EQCoeffKey& k) { return EQProcessor::hashCacheKey(k); };
+
+    expect(keyOf(base) == keyOf(base), "identical params produce identical key");
+    expect(hashOf(keyOf(base)) == hashOf(keyOf(base)), "identical params produce identical hash");
+
+    convo::EQParameters plusGain = base;
+    plusGain.bands[0].gain = 6.0f;
+    convo::EQParameters minusGain = base;
+    minusGain.bands[0].gain = -6.0f;
+    expect(!(keyOf(plusGain) == keyOf(minusGain)), "gain sign is part of the key");
+    expect(hashOf(keyOf(plusGain)) != hashOf(keyOf(minusGain)), "gain sign is part of the hash");
+
+    convo::EQParameters plusTotal = base;
+    plusTotal.totalGainDb = 12.0f;
+    convo::EQParameters minusTotal = base;
+    minusTotal.totalGainDb = -12.0f;
+    expect(!(keyOf(plusTotal) == keyOf(minusTotal)), "total gain sign is part of the key");
+    expect(hashOf(keyOf(plusTotal)) != hashOf(keyOf(minusTotal)), "total gain sign is part of the hash");
+
+    convo::EQParameters freqLow = base;
+    freqLow.bands[0].frequency = 10.0f;
+    convo::EQParameters freqMin = base;
+    freqMin.bands[0].frequency = 20.0f;
+    expect(keyOf(freqLow) == keyOf(freqMin), "frequency clamp is canonical");
+
+    convo::EQParameters gainHigh = base;
+    gainHigh.bands[0].gain = 100.0f;
+    convo::EQParameters gainMax = base;
+    gainMax.bands[0].gain = 48.0f;
+    expect(keyOf(gainHigh) == keyOf(gainMax), "gain clamp is canonical");
+
+    convo::EQParameters qZero = base;
+    qZero.bands[0].q = 0.0f;
+    convo::EQParameters qMin = base;
+    qMin.bands[0].q = 0.01f;
+    expect(keyOf(qZero) == keyOf(qMin), "q clamp is canonical");
+
+    expect(hashOf(EQProcessor::makeCacheKey(base, sr, block))
+               != hashOf(EQProcessor::makeCacheKey(base, 44100.0, block)),
+           "sample rate is part of the hash");
+    expect(hashOf(EQProcessor::makeCacheKey(base, sr, block))
+               != hashOf(EQProcessor::makeCacheKey(base, sr, 1024)),
+           "block size is part of the hash");
+
+    convo::EQParameters enabledOff = base;
+    enabledOff.bands[3].enabled = false;
+    expect(!(keyOf(enabledOff) == keyOf(base)), "enabled is part of the key");
+
+    convo::EQParameters typeChanged = base;
+    typeChanged.bands[3].type = 4;
+    expect(!(keyOf(typeChanged) == keyOf(base)), "type is part of the key");
+
+    convo::EQParameters channelChanged = base;
+    channelChanged.bands[3].channelMode = 2;
+    expect(!(keyOf(channelChanged) == keyOf(base)), "channel mode is part of the key");
+
+    convo::EQParameters saturationChanged = base;
+    saturationChanged.nonlinearSaturation = 0.9f;
+    expect(!(keyOf(saturationChanged) == keyOf(base)), "saturation is part of the key");
+
+    convo::EQParameters structureChanged = base;
+    structureChanged.filterStructure = 1;
+    expect(!(keyOf(structureChanged) == keyOf(base)), "filter structure is part of the key");
+
+    convo::EQParameters agcChanged = base;
+    agcChanged.agcEnabled = true;
+    expect(!(keyOf(agcChanged) == keyOf(base)), "agc is part of the key");
+
+    std::unique_ptr<EQCoeffCache> cache(EQProcessor::createCoeffCache(plusGain, sr, block, 1u));
+    expect(cache != nullptr, "createCoeffCache returns a cache");
+    if (cache != nullptr)
+    {
+        const auto plusKey = keyOf(plusGain);
+        const auto minusKey = keyOf(minusGain);
+        expect(EQProcessor::cacheKeyMatches(*cache, plusKey), "cache matches the key it was built from");
+        expect(!EQProcessor::cacheKeyMatches(*cache, minusKey), "cache rejects a different key with the same hash slot");
+        expect(cache->paramsHash == hashOf(plusKey), "cache stores the canonical hash");
+    }
+
+    std::unique_ptr<EQCoeffCache> cacheAgain(EQProcessor::createCoeffCache(plusGain, sr, block, 2u));
+    if (cache != nullptr && cacheAgain != nullptr)
+    {
+        bool sameCoefficients = true;
+        for (int i = 0; i < EQProcessor::NUM_BANDS; ++i)
+        {
+            const auto& a = cache->coeffs[i];
+            const auto& b = cacheAgain->coeffs[i];
+            sameCoefficients = sameCoefficients
+                && a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3
+                && a.m0 == b.m0 && a.m1 == b.m1 && a.m2 == b.m2;
+        }
+        expect(sameCoefficients, "coefficient generation is deterministic");
+    }
+
+    if (ok)
+        std::printf("STG11-D13: coefficient cache key contract PASS\n");
+    return ok;
+}
+
 int runSTG11EQRetireTests()
 {
     bool ok = true;
@@ -429,6 +553,11 @@ int runSTG11EQRetireTests()
     if (!checkTD14bReclaimGatedOnlyOnBoundProvider())
     {
         std::fprintf(stderr, "FAIL: TD1-4b bound-provider gating\n");
+        ok = false;
+    }
+    if (!checkCoeffCacheKeyContract())
+    {
+        std::fprintf(stderr, "FAIL: D13 coefficient cache key contract\n");
         ok = false;
     }
     if (ok)

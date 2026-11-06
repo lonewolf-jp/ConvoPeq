@@ -55,25 +55,36 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 {
     using convo::isr::DSPHandle;
 
-    // ★ BUG-047: computeParamsHash に sampleRate/maxBlockSize を含めて、
-    //            sampleRate 変更時に古い係数キャッシュがヒットしないようにする。
-    const uint64_t hash = EQProcessor::computeParamsHash(params, sampleRate, maxBlockSize);
-    const CacheMap* currentMap = loadMap();
-    if (currentMap == nullptr)
-        return nullptr;
+    // 係数生成と同じクランプ規約を通したキーで同一性を判定する。
+    const EQCoeffKey key = EQProcessor::makeCacheKey(params, sampleRate, maxBlockSize);
+    uint64_t hash = EQProcessor::hashCacheKey(key);
 
-    auto it = currentMap->map.find(hash);
-    if (it != currentMap->map.end())
+    // ロックなしのヒット探索。ハッシュが一致してもキーが違う場合は別ハッシュへ退避する。
+    for (int probe = 0; probe < 32; ++probe)
     {
-        // ★ P0-2: DSPHandle → resolve() でポインタ取得
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+            return nullptr;
+
+        const auto it = currentMap->map.find(hash);
+        if (it == currentMap->map.end())
+            break;
+
         const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
-        return static_cast<EQCoeffCache*>(resolved.instance);
+        auto* existing = static_cast<EQCoeffCache*>(resolved.instance);
+        if (existing != nullptr && EQProcessor::cacheKeyMatches(*existing, key))
+            return existing;
+
+        hash = EQProcessor::probeCacheHash(hash, probe);
     }
 
     // ★ P0-2: キャッシュミス — 新規作成
     EQCoeffCache* cache = EQProcessor::createCoeffCache(params, sampleRate, maxBlockSize, generation);
     if (cache == nullptr)
         return nullptr;
+
+    cache->key = key;
+    cache->paramsHash = hash;
 
     // ★ P0-2: DSPHandleRuntime に登録
     const DSPHandle handle = owner.dspHandleRuntime_.create(cache);
@@ -87,52 +98,66 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     drainDeferredMapsUnderLock();
 
-    // Lock取得中に他スレッドが同じハッシュを追加した可能性を再確認
-    currentMap = loadMap();
-    if (currentMap == nullptr)
+    for (int probe = 0; probe < 32; ++probe)
     {
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        return nullptr;
-    }
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+        {
+            // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return nullptr;
+        }
 
-    it = currentMap->map.find(hash);
-    if (it != currentMap->map.end())
-    {
-        // 先に追加されたキャッシュを採用し、新規作成分を破棄
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+        const auto it = currentMap->map.find(hash);
+        if (it != currentMap->map.end())
+        {
+            const auto resolved = owner.dspHandleRuntime_.resolve(it->second);
+            auto* existing = static_cast<EQCoeffCache*>(resolved.instance);
+            if (existing != nullptr && EQProcessor::cacheKeyMatches(*existing, key))
+            {
+                // 先に追加された同一キャッシュを採用し、新規作成分を破棄
+                owner.invalidateHandleBeforeDestroy(cache);
+                delete cache;
+                return existing;
+            }
+
+            hash = EQProcessor::probeCacheHash(hash, probe);
+            cache->paramsHash = hash;
+            continue;
+        }
+
+        std::unique_ptr<CacheMap> newMap;
+        try
+        {
+            newMap = std::make_unique<CacheMap>(*currentMap);
+            newMap->map.emplace(hash, handle);
+        }
+        catch (const std::bad_alloc&)
+        {
+            // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return nullptr;
+        }
+        catch (...)
+        {
+            // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return nullptr;
+        }
+
+        storeNewMap(newMap.release());
+
+        const auto resolved = owner.dspHandleRuntime_.resolve(handle);
         return static_cast<EQCoeffCache*>(resolved.instance);
     }
 
-    std::unique_ptr<CacheMap> newMap;
-    try
-    {
-        newMap = std::make_unique<CacheMap>(*currentMap);
-        newMap->map.emplace(hash, handle);
-    }
-    catch (const std::bad_alloc&)
-    {
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        return nullptr;
-    }
-    catch (...)
-    {
-        // ★ F2' (2026-10-25): 削除の前にスロットを解決不能にする。
-        owner.invalidateHandleBeforeDestroy(cache);
-        delete cache;
-        return nullptr;
-    }
-
-    storeNewMap(newMap.release());
-
-    const auto resolved = owner.dspHandleRuntime_.resolve(handle);
-    return static_cast<EQCoeffCache*>(resolved.instance);
+    // 32 個の候補がすべて別キーで埋まる場合は、誤った係数を返さず fail-closed にする。
+    owner.invalidateHandleBeforeDestroy(cache);
+    delete cache;
+    return nullptr;
 }
 
 // ★ F1' (2026-10-25): RT 経路用。lease を返すので、呼び出し側は
