@@ -83,3 +83,9 @@
 - `cppcheck --project=... --file-filter=*<file> --enable=warning,performance,portability`
 - `find-nise-kanji`（3 報告書と変更ソース）
 - GitHub Actions（Windows MSVC / Release、ASan、TSan、CodeQL ほか）
+
+## 追記（2026-11-07）
+
+本報告の 3 項目はすべてマージ済みである。 #1A は PR #166（`45eef58b`）、#12 は PR #167（`7603dfd1`）、N1 は PR #168（`32c9234b`）。
+
+N1 は実機聴感の代わりに自動波形分析で受け入れた（受入対象 5 指標 9 / 9 PASS）。バイパス解除後の wet 絶対レベル一致は受入対象外・未評価として扱う。条件と結果は `doc/work113/20261107-2300_168マージ/report.md` と `doc/work113/20261107-2140_N1自動検証/report.md` を参照。
