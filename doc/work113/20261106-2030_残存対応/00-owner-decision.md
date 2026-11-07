@@ -29,11 +29,11 @@
 | ID | 対応 | 記録 |
 |---|---|---|
 | #9 | 修正し、PR #159 を `48c9b726` としてマージした | `report.md` §2 |
-| #1 残存 A | 保留を維持し、再審査条件を記録 | `06-issue1a-hold.md` |
+| #1 残存 A | 再審査の上で探索上限 64 へ変更し、PR #166 を `45eef58b` としてマージした | `01-residual-register.md` §3・§5 |
 | #1 残存 B | 設計案に基づき実装・テスト追加し、PR #163 を `7faf9fa9` としてマージした | `02-issue1b-design.md` |
-| #12 | 変更なし | `01-residual-register.md` §3 |
-| N1 | Issue #158 として起票 | `05-n1-issue-record.md` |
+| #12 | 非有限入力を FIR 履歴へ入れない修正を行い、PR #167 を `7603dfd1` としてマージした | `01-residual-register.md` §4 |
+| N1 | 実装・テスト・自動受入分析を行い、PR #168 を `32c9234b` としてマージした（バイパス解除後の wet 絶対レベル一致は受入対象外・未評価） | `doc/work113/20261107-2140_N1自動検証/report.md` |
 | TSan | 運用を継続（追加実行なし） | `01-residual-register.md` §6 |
 | soak | Owner が運用条件を決定（実行は実行計画に従う） | `03-soak-tx-conditions.md` |
 | TX 実機 | 測定条件を維持し、実施前の確定事項を整理 | `03-soak-tx-conditions.md` |
-| `ConvoPeq.md` | `f641a187` で再生成して PR #157 で反映し、`#9` のマージ後に再生成した | `04-convopeq-md-sha256.md` |
+| `ConvoPeq.md` | `32c9234b` のソースから再生成し、分割版と SHA-256 を記録した | `doc/work113/20261107-2300_168マージ/report.md` |
