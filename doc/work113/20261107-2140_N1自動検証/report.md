@@ -2,6 +2,7 @@
 
 - 実施: 2026-11-07 21:40
 - 対象: PR #168（N1 Bypass Tail Crossfade）。比較は修正前 `main` の `ConvolverProcessor.Runtime.cpp` と本ブランチの実装。
+- PR head: `4108f315`（本検証コードを含むコミット）。報告書だけの追記は別の docs コミットで行う。
 - 目的: 主観聴感に依存せず、出力 WAV の波形分析で Bypass ON/OFF のクリック・段差・フェードを判定する。
 
 ## 1. テスト環境
