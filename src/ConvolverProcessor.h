@@ -222,6 +222,8 @@ public:
     static constexpr float SMOOTHING_TIME_MIN_SEC = 0.01f;   // 10ms
     static constexpr float SMOOTHING_TIME_MAX_SEC = 0.5f;    // 500ms
     static constexpr float SMOOTHING_TIME_DEFAULT_SEC = 0.1f; // 100ms
+    // N1: バイパス切替の専用フェード時定数（利用者の smoothingTimeSec に依存させない）
+    static constexpr double kBypassCrossfadeTimeSec = 0.020; // 20ms
     static constexpr float IR_LENGTH_MIN_SEC = 0.5f;
     static constexpr float IR_LENGTH_MAX_SEC = 3.0f;
     static constexpr float IR_LENGTH_DEFAULT_SEC = 1.0f;
@@ -670,6 +672,7 @@ private:
     // ★ M-02 (T-M02-1..5) テストシーム: non-finite scrub counter 読み取りと reporter 駆動専用
     //   （本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp。production 影响なし）
     friend struct M02NonFiniteTestAccess;
+    friend struct N1CrossfadeTestAccess;
 
     struct StereoConvolver;
 #include "convolver/ConvolverProcessor.LoaderThreadInline.h"
@@ -1423,6 +1426,9 @@ public: // Added for AudioEngine access
     uint64_t m_latencyChangeRequestedGenSeen { 0 };
     uint64_t m_smoothingTimeChangePendingGenSeen { 0 };
     uint64_t m_mixSmootherResetPendingGenSeen { 0 };
+    // N1: バイパス切替フェードの状態（Audio Thread のみが触る）
+    bool m_lastBypassedState { false };
+    bool m_bypassCrossfadeActive { false };
     // [P1-15] 内部 epoch 管理用 (Convolver 独自ドメイン)
     convo::EpochDomain m_epochDomain;
     // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。

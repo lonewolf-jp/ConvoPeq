@@ -2277,6 +2277,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/DeferredFlowIntegrationTests.cpp
         src/tests/AudioEngineHarness/DeferredPublishViewStateMachineTests.cpp
         src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp
+        # N1 (PR #168) 受け入れ検証: Bypass 切替のオフライン音声分析（CLI 専用）
+        src/tests/AudioEngineHarness/N1BypassAudioAnalysis.cpp
         src/tests/AudioEngineHarness/STG8RecoveryObligationTests.cpp
         src/tests/AudioEngineHarness/EngineInstanceCountTests.cpp
     src/tests/AudioEngineHarness/B2DiagSinkTests.cpp

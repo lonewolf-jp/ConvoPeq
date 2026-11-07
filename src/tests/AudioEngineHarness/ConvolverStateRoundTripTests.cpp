@@ -1055,6 +1055,43 @@ juce::File writeSR01TempIr(const juce::String& tag, double sampleRate, int numCh
     return f;
 }
 
+// N1 用: 指数減衰する IR（peak は先頭）。テールの連続性を見るためだけの固定入力。
+juce::File writeN1DecayIr(const juce::String& tag, double sampleRate, int totalSamples, double tauSamples)
+{
+    const juce::File f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(tag);
+    f.deleteFile();
+    std::unique_ptr<juce::OutputStream> stream(f.createOutputStream());
+    if (stream == nullptr)
+        return {};
+    juce::WavAudioFormat fmt;
+    std::unique_ptr<juce::AudioFormatWriter> w(fmt.createWriterFor(stream,
+        juce::AudioFormatWriterOptions{}
+            .withSampleRate(sampleRate)
+            .withNumChannels(2)
+            .withBitsPerSample(16)));
+    if (w == nullptr)
+        return {};
+    juce::AudioBuffer<float> buf(2, totalSamples);
+    buf.clear();
+    constexpr int kLead = 100;
+    for (int i = kLead; i < totalSamples; ++i)
+    {
+        const auto v = static_cast<float>(0.5 * std::exp(-static_cast<double>(i - kLead) / tauSamples));
+        buf.getWritePointer(0)[i] = v;
+        buf.getWritePointer(1)[i] = v;
+    }
+    int written = 0;
+    while (written < totalSamples)
+    {
+        const int n = std::min(65536, totalSamples - written);
+        if (!w->writeFromAudioSampleBuffer(buf, written, n))
+            return {};
+        written += n;
+    }
+    w.reset();
+    return f;
+}
+
 // ★ M-03 T-M03-1 計測用 IR は既存 writeH01TempIr(tag, peakPos)（4800 samples/48k/2ch/16bit）を
 //   そのまま使用する。新規のファイル生成ヘルパは追加しない（既存資産の再利用・I/O 経路の単一化）。
 
@@ -3245,6 +3282,155 @@ bool checkEqCacheProbeDepthProbe()
 }
 #endif
 
+// N1: ミックス smoother の現在値を読むためのテストアクセス。
+struct N1CrossfadeTestAccess
+{
+    static double currentMix(const ConvolverProcessor& p) noexcept
+    {
+        return p.mixSmoother.getCurrentValue();
+    }
+};
+
+// N1: bypass 切替時に wet テールを不連続に切断しないことを検証する。
+//   dry へのクロスフェード中はテールが残り、切替境界のサンプル差が小さいこと。
+bool checkBypassTailContinuity()
+{
+    // JUCE の finalize は MessageManager 経由。コンソール実行では明示的に初期化する（H01 と同一）。
+    static juce::ScopedJuceInitialiser_GUI n1JuceInit;
+    (void)n1JuceInit;
+
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(0.26f);
+    const juce::File ir = writeN1DecayIr("n1_decay.wav", 48000.0, 12100, 2500.0);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[N1] FAIL: decay IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(ir, false);
+    const bool loaded = pollH01Peak(conv, 100);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[N1] FAIL: decay IR load not finalized\n");
+        return false;
+    }
+
+    conv.setBypass(false);
+    conv.setMix(1.0f);
+    juce::AudioBuffer<double> ab(2, 512);
+    juce::dsp::AudioBlock<double> blk(ab);
+    for (int i = 0; i < 10; ++i)
+    {
+        ab.clear();
+        conv.process(blk);
+    }
+
+    ab.clear();
+    ab.getWritePointer(0)[0] = 1.0;
+    ab.getWritePointer(1)[0] = 1.0;
+    conv.process(blk);
+
+    // ウェットの応答がピークを過ぎ、テールが残っているブロックまで進める。
+    //   IR の減衰に合わせ、ピークの 30% を下回った最初のブロックで切り替える。
+    double peakSeen = 0.0;
+    double last = 0.0;
+    for (int b = 0; b < 200; ++b)
+    {
+        ab.clear();
+        conv.process(blk);
+        double blockMax = 0.0;
+        for (int i = 0; i < 512; ++i)
+        {
+            const double v = std::fabs(ab.getReadPointer(0)[i]);
+            if (v > blockMax)
+                blockMax = v;
+        }
+        if (blockMax > peakSeen)
+            peakSeen = blockMax;
+        last = ab.getReadPointer(0)[511];
+        if (b > 0 && blockMax < 0.3 * peakSeen && blockMax > 1.0e-9)
+            break;
+    }
+    const double preTail = std::fabs(last);
+
+    conv.setBypass(true);
+    ab.clear();
+    conv.process(blk);
+    const double first = ab.getReadPointer(0)[0];
+    const double delta = std::fabs(first - last);
+    double sumAbs = 0.0;
+    for (int i = 0; i < 512; ++i)
+        sumAbs += std::fabs(ab.getReadPointer(0)[i]);
+    const double meanAbs = sumAbs / 512.0;
+
+    if (preTail < 1.0e-9)
+    {
+        std::fprintf(stderr, "[N1] FAIL: precondition, tail too small (%.6f)\n", preTail);
+        return false;
+    }
+    if (delta > 0.25 * preTail)
+    {
+        std::fprintf(stderr, "[N1] FAIL: discontinuity at bypass (pre=%.6f first=%.6f delta=%.6f)\n",
+                     preTail, first, delta);
+        return false;
+    }
+    if (meanAbs < 0.2 * preTail)
+    {
+        std::fprintf(stderr, "[N1] FAIL: tail vanished during the fade (mean=%.6f)\n", meanAbs);
+        return false;
+    }
+
+    double settled = 0.0;
+    for (int b = 0; b < 60; ++b)
+    {
+        ab.clear();
+        conv.process(blk);
+    }
+    for (int i = 0; i < 512; ++i)
+    {
+        const double v = std::fabs(ab.getReadPointer(0)[i]);
+        if (v > settled)
+            settled = v;
+    }
+    // バイパス経路には一定の微小な残留（ノイズフロア）があるため、
+    // 同じ経路で無音を流した床と比較して「テールが残っていない」ことを判定する。
+    double floorMax = 0.0;
+    for (int b = 0; b < 10; ++b)
+    {
+        ab.clear();
+        conv.process(blk);
+    }
+    for (int i = 0; i < 512; ++i)
+    {
+        const double v = std::fabs(ab.getReadPointer(0)[i]);
+        if (v > floorMax)
+            floorMax = v;
+    }
+    if (settled > floorMax * 1.25 + 1.0e-12)
+    {
+        std::fprintf(stderr, "[N1] FAIL: tail did not decay after bypass (settled=%.9f floor=%.9f)\n",
+                     settled, floorMax);
+        return false;
+    }
+
+    conv.setBypass(false);
+    ab.clear();
+    conv.process(blk);
+    const double firstUp = ab.getReadPointer(0)[0];
+    const double unbypassLimit = (0.25 * preTail > 1.25 * floorMax) ? 0.25 * preTail : 1.25 * floorMax;
+    if (!std::isfinite(firstUp) || std::fabs(firstUp) > unbypassLimit)
+    {
+        std::fprintf(stderr, "[N1] FAIL: discontinuity at unbypass (first=%.6f)\n", firstUp);
+        return false;
+    }
+
+    std::printf("[N1] bypass tail crossfade: PASS (pre=%.3e delta=%.3e mean=%.3e)\n",
+                preTail, delta, meanAbs);
+    return true;
+}
+
 // #12: 非有限入力（NaN/Inf）を検出器の履歴へ入れないことを検証する。
 //   同じ実効入力（非有限値を 0 に置換）を受けた参照検出器と、以降の出力が一致すること。
 bool checkTruePeakNonFiniteInput()
@@ -3290,6 +3476,92 @@ bool checkTruePeakNonFiniteInput()
     }
 
     std::printf("[#12] true-peak non-finite guard: PASS\n");
+    return true;
+}
+
+// N1: バイパス切替のフェードは専用の 20 ms 定数で行い、利用者の smoothingTimeSec に依存しない。
+bool checkBypassCrossfadeTimeConstant()
+{
+    static juce::ScopedJuceInitialiser_GUI n1TimeJuceInit;
+    (void)n1TimeJuceInit;
+
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(0.26f);
+    const juce::File ir = writeN1DecayIr("n1_time.wav", 48000.0, 12100, 2500.0);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[N1] FAIL: time-constant IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(ir, false);
+    const bool loaded = pollH01Peak(conv, 100);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[N1] FAIL: time-constant IR load not finalized\n");
+        return false;
+    }
+
+    juce::AudioBuffer<double> ab(2, 512);
+    juce::dsp::AudioBlock<double> blk(ab);
+
+    auto settle = [&conv, &ab, &blk](int blocks)
+    {
+        for (int i = 0; i < blocks; ++i)
+        {
+            ab.clear();
+            conv.process(blk);
+        }
+    };
+
+    auto runCase = [&conv, &ab, &blk, &settle](float smoothingSec, double& afterOne, double& afterTwo) -> bool
+    {
+        conv.setBypass(false);
+        conv.setMix(1.0f);
+        conv.setSmoothingTime(smoothingSec);
+        settle(60); // ミックスを 1.0 へ収束させる（smoothing 0.5 s でも足りる長さ）
+
+        conv.setBypass(true);
+        ab.clear();
+        conv.process(blk);
+        afterOne = N1CrossfadeTestAccess::currentMix(conv);
+        ab.clear();
+        conv.process(blk);
+        afterTwo = N1CrossfadeTestAccess::currentMix(conv);
+
+        // 20 ms @48k = 960 samples。512 サンプル後は約 0.467、1024 サンプル後は 0。
+        return afterOne > 0.30 && afterOne < 0.65 && afterTwo <= 1.0e-4;
+    };
+
+    double slow1 = 0.0, slow2 = 0.0, fast1 = 0.0, fast2 = 0.0;
+    const bool okSlow = runCase(0.5f, slow1, slow2);
+    const bool okFast = runCase(0.01f, fast1, fast2);
+
+    // ミックス変更の途中でバイパスしても、専用 20 ms で収束する。
+    conv.setBypass(false);
+    conv.setMix(0.5f);
+    conv.setSmoothingTime(0.5f);
+    settle(1);
+    conv.setBypass(true);
+    ab.clear();
+    conv.process(blk);
+    const double mid1 = N1CrossfadeTestAccess::currentMix(conv);
+    ab.clear();
+    conv.process(blk);
+    const double mid2 = N1CrossfadeTestAccess::currentMix(conv);
+    const bool okMid = mid1 > 0.0 && mid2 <= 1.0e-4;
+    std::printf("[N1] crossfade time mid-ramp: after1=%.6f after2=%.6f\n", mid1, mid2);
+
+    std::printf("[N1] crossfade time (20ms): smoothing=0.5 after1=%.6f after2=%.6f / "
+                "smoothing=0.01 after1=%.6f after2=%.6f\n",
+                slow1, slow2, fast1, fast2);
+
+    if (!okSlow || !okFast || !okMid)
+    {
+        std::fprintf(stderr, "[N1] FAIL: bypass crossfade is not fixed at 20 ms\n");
+        return false;
+    }
     return true;
 }
 
@@ -3468,6 +3740,16 @@ int runConvolverStateRoundTripTests()
     if (!checkD8AutoLengthRejectsNonFinite())
     {
         std::fprintf(stderr, "FAIL: checkD8AutoLengthRejectsNonFinite\n");
+        return 1;
+    }
+    if (!checkBypassTailContinuity())
+    {
+        std::fprintf(stderr, "FAIL: checkBypassTailContinuity\n");
+        return 1;
+    }
+    if (!checkBypassCrossfadeTimeConstant())
+    {
+        std::fprintf(stderr, "FAIL: checkBypassCrossfadeTimeConstant\n");
         return 1;
     }
     if (!checkTruePeakNonFiniteInput())
