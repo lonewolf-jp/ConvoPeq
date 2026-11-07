@@ -43,7 +43,7 @@
 | ハーネス | `build\Release\AudioEngineHarness.exe` | exit 0、`AudioEngineHarness: all publish pipeline tests PASS` |
 | `ctest` | `ctest --test-dir build -C Release --output-on-failure` | 54 / 54 PASS（334.24 秒） |
 | N1 自動分析の再実行 | `build\Release\AudioEngineHarness.exe --n1-analysis <出力先> post` | 9 / 9 PASS。`metrics_post.csv` は `doc/work113/20261107-2140_N1自動検証/metrics_post.csv` とバイト単位で一致（再現性の確認） |
-| CI（`32c9234b`、`main`） | GitHub Actions | Windows MSVC・audioengine-lint・list-compliance・ISR Authority Compliance は success（Sanitizer は実行中） |
+| CI（`32c9234b`、`main`） | GitHub Actions | 5 ワークフローすべて success。audioengine-lint・list-compliance・ISR Authority Compliance は 23:59、Sanitizer は 2026-11-08 00:06、Windows MSVC は 00:15、Push on main は 00:37（いずれも JST） |
 
 - ハーネスのログに `D5-T1: M4 FAILED` という行が出るが、これは MMCSS 観測テストが記録するマイルストーン名であり、同スイートは `PASS (D5-T1/…/D5-T6)` で終了している。失敗ではない。
 - ビルドツリーの再構成が必要だった。`$ENV{IPPROOT}` を設定せずに CMake が再構成されると、IPP の include が `/include` になり `ipp.h` が見つからない。`MKLROOT`・`IPPROOT`・`ONEAPI_ROOT` を設定して `cmake -S . -B build` を実行した。
@@ -87,11 +87,14 @@
 
 ## 6. Dropbox への納品
 
-`/ConvoPeq-168merge-20261107/` に次を配置した（アップロード後に SHA-256 を照合する）。
+`/ConvoPeq-168merge-20261107/` に 13 ファイルを配置した（アップロード後に `ConvoPeq.md` をダウンロードし、バイト一致を確認）。
 
-- `ConvoPeq.md` と分割版 4 ファイル
-- 本報告書、N1 自動検証の報告書と CSV 3 件
-- 残存課題レジスタ、Owner 決定、SHA 記録
+- `ConvoPeq.md` と分割版 4 ファイル（`ConvoPeq.part01.md`〜`part04.md`）
+- `report-merge168.md`（本報告書）、`report-n1-analysis.md`（N1 自動検証）
+- `comparison.csv`、`metrics_post.csv`、`metrics_pre.csv`
+- `01-residual-register.md`、`00-owner-decision.md`、`04-convopeq-md-sha256.md`
+
+同じフォルダに同名の `report.md` が衝突するため、報告書は上記の名前に変更して配置した。
 
 ## 7. 状態
 
@@ -100,6 +103,18 @@
 | PR #168 | MERGED（`32c9234b`） |
 | N1 | 解消済み（受入対象 5 指標 9 / 9 PASS） |
 | 受入対象外・未評価 | バイパス解除後の wet 絶対レベル一致（既存設計。必要なら別 PR） |
-| `main` | `32c9234b` |
+| `main` | `e7235420`（#168 のマージ `32c9234b` に本記録と `ConvoPeq.md` を反映したコミット） |
 | `ConvoPeq.md` | `32c9234b` のソースから再生成（FRESH、SHA-256 `4f4b857a…e5224`） |
 | 分割版 | 4 ファイル、最大 2,097,146 バイト、結合一致 |
+
+## 8. 反映
+
+| 項目 | 値 |
+|---|---|
+| PR（本記録と `ConvoPeq.md`） | #169 |
+| マージ方式 | squash |
+| マージ commit | `e7235420` |
+| 変更 | 8 ファイル、+1,240 / −30（`ConvoPeq.md` と記録 7 件） |
+| マージ後の `main` の `ConvoPeq.md` | 6,573,934 バイト、CRLF 0（LF のみ）、SHA-256 `4f4b857a5fd317e747a3a35d9a111e86a821820ab0383b0d4bdbc70d631e5224`（生成物と一致） |
+| 鮮度検査（`main`） | `NEWER_SRC_COUNT: 0`、`STATUS: FRESH` |
+| PR #169 の CI | 必須チェック `Windows MSVC / Release` の pass を確認してマージ（ASan と CodeQL は実行中） |
