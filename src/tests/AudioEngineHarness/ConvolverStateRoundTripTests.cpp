@@ -3282,6 +3282,15 @@ bool checkEqCacheProbeDepthProbe()
 }
 #endif
 
+// N1: ミックス smoother の現在値を読むためのテストアクセス。
+struct N1CrossfadeTestAccess
+{
+    static double currentMix(const ConvolverProcessor& p) noexcept
+    {
+        return p.mixSmoother.getCurrentValue();
+    }
+};
+
 // N1: bypass 切替時に wet テールを不連続に切断しないことを検証する。
 //   dry へのクロスフェード中はテールが残り、切替境界のサンプル差が小さいこと。
 bool checkBypassTailContinuity()
@@ -3470,6 +3479,92 @@ bool checkTruePeakNonFiniteInput()
     return true;
 }
 
+// N1: バイパス切替のフェードは専用の 20 ms 定数で行い、利用者の smoothingTimeSec に依存しない。
+bool checkBypassCrossfadeTimeConstant()
+{
+    static juce::ScopedJuceInitialiser_GUI n1TimeJuceInit;
+    (void)n1TimeJuceInit;
+
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(0.26f);
+    const juce::File ir = writeN1DecayIr("n1_time.wav", 48000.0, 12100, 2500.0);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[N1] FAIL: time-constant IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(ir, false);
+    const bool loaded = pollH01Peak(conv, 100);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[N1] FAIL: time-constant IR load not finalized\n");
+        return false;
+    }
+
+    juce::AudioBuffer<double> ab(2, 512);
+    juce::dsp::AudioBlock<double> blk(ab);
+
+    auto settle = [&conv, &ab, &blk](int blocks)
+    {
+        for (int i = 0; i < blocks; ++i)
+        {
+            ab.clear();
+            conv.process(blk);
+        }
+    };
+
+    auto runCase = [&conv, &ab, &blk, &settle](float smoothingSec, double& afterOne, double& afterTwo) -> bool
+    {
+        conv.setBypass(false);
+        conv.setMix(1.0f);
+        conv.setSmoothingTime(smoothingSec);
+        settle(60); // ミックスを 1.0 へ収束させる（smoothing 0.5 s でも足りる長さ）
+
+        conv.setBypass(true);
+        ab.clear();
+        conv.process(blk);
+        afterOne = N1CrossfadeTestAccess::currentMix(conv);
+        ab.clear();
+        conv.process(blk);
+        afterTwo = N1CrossfadeTestAccess::currentMix(conv);
+
+        // 20 ms @48k = 960 samples。512 サンプル後は約 0.467、1024 サンプル後は 0。
+        return afterOne > 0.30 && afterOne < 0.65 && afterTwo <= 1.0e-4;
+    };
+
+    double slow1 = 0.0, slow2 = 0.0, fast1 = 0.0, fast2 = 0.0;
+    const bool okSlow = runCase(0.5f, slow1, slow2);
+    const bool okFast = runCase(0.01f, fast1, fast2);
+
+    // ミックス変更の途中でバイパスしても、専用 20 ms で収束する。
+    conv.setBypass(false);
+    conv.setMix(0.5f);
+    conv.setSmoothingTime(0.5f);
+    settle(1);
+    conv.setBypass(true);
+    ab.clear();
+    conv.process(blk);
+    const double mid1 = N1CrossfadeTestAccess::currentMix(conv);
+    ab.clear();
+    conv.process(blk);
+    const double mid2 = N1CrossfadeTestAccess::currentMix(conv);
+    const bool okMid = mid1 > 0.0 && mid2 <= 1.0e-4;
+    std::printf("[N1] crossfade time mid-ramp: after1=%.6f after2=%.6f\n", mid1, mid2);
+
+    std::printf("[N1] crossfade time (20ms): smoothing=0.5 after1=%.6f after2=%.6f / "
+                "smoothing=0.01 after1=%.6f after2=%.6f\n",
+                slow1, slow2, fast1, fast2);
+
+    if (!okSlow || !okFast || !okMid)
+    {
+        std::fprintf(stderr, "[N1] FAIL: bypass crossfade is not fixed at 20 ms\n");
+        return false;
+    }
+    return true;
+}
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -3650,6 +3745,11 @@ int runConvolverStateRoundTripTests()
     if (!checkBypassTailContinuity())
     {
         std::fprintf(stderr, "FAIL: checkBypassTailContinuity\n");
+        return 1;
+    }
+    if (!checkBypassCrossfadeTimeConstant())
+    {
+        std::fprintf(stderr, "FAIL: checkBypassCrossfadeTimeConstant\n");
         return 1;
     }
     if (!checkTruePeakNonFiniteInput())

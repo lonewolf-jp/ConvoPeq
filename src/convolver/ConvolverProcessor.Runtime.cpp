@@ -417,12 +417,42 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block, const Dia
         }
     }
 
+    // N1: バイパス状態が変わったブロックで、専用の 20 ms 時定数へ切り替える。
+    //     利用者の smoothingTimeSec には依存させない。
+    {
+        const bool bypassedNow = runtimeSnapshot.bypassed;
+        if (bypassedNow != m_lastBypassedState)
+        {
+            m_lastBypassedState = bypassedNow;
+            const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+            if (sampleRate > 0.0)
+            {
+                // 進行中のランプが残っていても、必ず 20 ms 分を最初から使う。
+                const double currentVal = activeMixSmoother.getCurrentValue();
+                const double targetVal = activeMixSmoother.getTargetValue();
+                activeMixSmoother.resetRT(sampleRate, kBypassCrossfadeTimeSec);
+                activeMixSmoother.applyImmediateValueRT(currentVal);
+                activeMixSmoother.setTargetValue(targetVal);
+            }
+            m_bypassCrossfadeActive = true;
+        }
+    }
+
     // N1: bypass 中はミックス目標を 0（dry）に固定し、既存の smoother で遷移させる。
     const double userMixTarget = static_cast<double>(runtimeSnapshot.mixTarget);
     const double targetMixValue = runtimeSnapshot.bypassed ? 0.0 : userMixTarget;
     if (absNoLibm(activeMixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
     {
         activeMixSmoother.setTargetValue(targetMixValue);
+    }
+
+    // N1: フェードが終わったら利用者の smoothingTimeSec に戻す（次回のミックス変更用）。
+    if (m_bypassCrossfadeActive && !activeMixSmoother.isSmoothing())
+    {
+        m_bypassCrossfadeActive = false;
+        const double sampleRate = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+        if (sampleRate > 0.0)
+            activeMixSmoother.resetRT(sampleRate, static_cast<double>(runtimeSnapshot.smoothingTimeSec));
     }
 
     const bool isSmoothing = activeMixSmoother.isSmoothing();
