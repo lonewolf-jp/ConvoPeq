@@ -302,7 +302,13 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block, const Dia
 
     const auto runtimeSnapshot = captureRuntimeProcessSnapshot();
 
-    if (runtimeSnapshot.bypassed)
+
+    // N1: bypass への切替は即時ではなく、既存の wet/dry ミックスで 20 ms かけて
+    //   dry へクロスフェードする（wet を処理し続けるのでテールが途切れない）。
+    //   フェード完了後だけ bypass 経路（dry リングのみ）へ切り替える。
+    if (runtimeSnapshot.bypassed
+        && activeMixSmoother.getCurrentValue() <= 1.0e-4
+        && !activeMixSmoother.isSmoothing())
     {
         processBypassWithLatencyCompensation(block, *conv);
         return;
@@ -411,7 +417,9 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block, const Dia
         }
     }
 
-    const double targetMixValue = static_cast<double>(runtimeSnapshot.mixTarget);
+    // N1: bypass 中はミックス目標を 0（dry）に固定し、既存の smoother で遷移させる。
+    const double userMixTarget = static_cast<double>(runtimeSnapshot.mixTarget);
+    const double targetMixValue = runtimeSnapshot.bypassed ? 0.0 : userMixTarget;
     if (absNoLibm(activeMixSmoother.getTargetValue() - targetMixValue) > 1.0e-5)
     {
         activeMixSmoother.setTargetValue(targetMixValue);
