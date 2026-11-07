@@ -14,7 +14,8 @@
 | 変更 | 10 ファイル（+271 / −14） |
 | 内容 | #1B の実装（無効バンドのキー正規化）、単体・統合テスト、記録の更新 |
 | PR の CI | 15 チェック中 14 pass + 1 skip（意図的失敗の dispatch のみ）、`CLEAN` |
-| main の CI | マージ後に開始（Windows / Sanitizer / CodeQL ほか） |
+| main の CI（`7faf9fa9`） | Windows MSVC・Sanitizer・CodeQL・lint・list-compliance・ISR Authority のすべてが success |
+| main の CI（`568aa10e`） | Windows MSVC・Sanitizer・CodeQL・ISR Verification・ISR Authority のすべてが success |
 
 `main` は `8e54a53a` から `7faf9fa9` へ進んだ。
 
