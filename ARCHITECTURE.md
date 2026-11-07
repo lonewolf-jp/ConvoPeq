@@ -769,7 +769,6 @@ ConvoPeq follows a staged update model:
 
 | Trigger | fadeTimeSec | Source |
 |---|---|---|
-| Convolver bypass toggle | `m_irFadeTimeSec` (80 ms default) | atomic |
 | IR length change | `m_irLengthFadeTimeSec` (50 ms) | atomic |
 | Phase mode change | `m_phaseFadeTimeSec` (60 ms) | atomic |
 | Direct head mode change | `m_directHeadFadeTimeSec` (10 ms) | atomic |
@@ -791,6 +790,15 @@ AudioBlock.cpp: getNextAudioBlock()
 ```
 
 Crossfade runtime state: `CrossfadeRuntime` tracks `LinearRamp` gain (exponential ramp, 30 ms default), dry scale gain, crossfade arm status, event drop counter. `CrossfadeAuthority` determines whether crossfade is needed from `dspProjection` fields (irLoaded, structuralHash, oversamplingFactor) — no DSPCore dependency.
+
+### Bypass Transition (Convolver)
+
+The convolver bypass is not a `CrossfadeAuthority` trigger. It is evaluated inside `ConvolverProcessor::process` from `runtimeSnapshot.bypassed`, and it uses the wet/dry mix ramp rather than the engine crossfade path above.
+
+- On a bypass state change the mix ramps to the new target over `kBypassCrossfadeTimeSec` (20 ms). This constant is independent of the user's `smoothingTimeSec`, which is restored once the ramp settles.
+- While the mix is above the settle threshold the wet convolution keeps running, so the tail decays instead of being cut. When the mix reaches 0 and the smoother stops, the processor dispatches to `processBypassWithLatencyCompensation`, which outputs the delay-compensated dry ring and runs no convolution.
+- The wet state is frozen while bypassed and resumes from the frozen point on release, ramping to the current mix value over the same 20 ms. A bypass request does not interrupt a running ramp; the 20 ms ramp restarts from the current mix value.
+- Host PDC and the reported latency are unchanged. The equal-power mix law is the existing one, and the bypass steady state keeps no additional buffers.
 
 ---
 
