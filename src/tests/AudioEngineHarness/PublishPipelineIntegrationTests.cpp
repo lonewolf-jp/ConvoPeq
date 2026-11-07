@@ -1487,8 +1487,16 @@ static int runRtMeasureRunLocal(int blocks)
 }
 //===========================================================================
 
+// N1BypassAudioAnalysis.cpp (PR #168 受け入れ検証: Bypass 切替のオフライン音声分析)
+int runN1BypassAudioAnalysis(const juce::String& outDir, const juce::String& mode);
+
 int main(int argc, char* argv[])
 {
+    // N1 (PR #168): オフライン音声分析モード。エンジンやスレッドを起動せず、
+    //   AudioEngineHarness --n1-analysis <出力先> <post|pre>
+    if (argc >= 4 && std::string(argv[1]) == "--n1-analysis")
+        return runN1BypassAudioAnalysis(juce::String(argv[2]), juce::String(argv[3]));
+
     // R-106 metric v2: 測定ドライバ（CONVOPEQ_RT_MEASURE_RUN 指定時のみ）。
     if (const char* runBlocks = std::getenv("CONVOPEQ_RT_MEASURE_RUN"))
         return runRtMeasureRunLocal(std::atoi(runBlocks));
