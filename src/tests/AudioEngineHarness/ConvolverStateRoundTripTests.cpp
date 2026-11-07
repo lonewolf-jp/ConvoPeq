@@ -3207,6 +3207,41 @@ bool checkEqCacheDisabledBandKeyProbe()
     std::printf("[#1B] disabled-band key normalisation probe: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
+
+// -----------------------------------------------------------------------------
+// #1A: 40 段の衝突連鎖でも探索が成功する（探索上限 64）ことを検証する
+// -----------------------------------------------------------------------------
+bool checkEqCacheProbeDepthProbe()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[#1A] harness start failed\n");
+        return false;
+    }
+
+    const bool ok = h.engine().debugRunEqCacheProbeDepthProbe();
+    std::printf("[#1A] cache probe depth probe: %s\n", ok ? "PASS" : "FAIL");
+
+    // 探索 1 段あたりのコスト（整数演算のみ・NonRT）。上限 64 でも追加は最大 32 段。
+    const auto t0 = std::chrono::steady_clock::now();
+    std::uint64_t hashState = 0x1234567890abcdefull;
+    std::uint64_t sink = 0;
+    constexpr int kSteps = 1000000;
+    for (int i = 0; i < kSteps; ++i)
+    {
+        hashState = EQProcessor::probeCacheHash(hashState, i & 63);
+        sink ^= hashState;
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const double nsPerStep =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count())
+        / static_cast<double>(kSteps);
+    std::printf("[#1A] probe step cost: %.2f ns (sink=%llu)\n",
+                nsPerStep, static_cast<unsigned long long>(sink));
+
+    return ok;
+}
 #endif
 
 int runConvolverStateRoundTripTests()
@@ -3395,6 +3430,11 @@ int runConvolverStateRoundTripTests()
     if (!checkEqCacheDisabledBandKeyProbe())
     {
         std::fprintf(stderr, "FAIL: checkEqCacheDisabledBandKeyProbe\n");
+        return 1;
+    }
+    if (!checkEqCacheProbeDepthProbe())
+    {
+        std::fprintf(stderr, "FAIL: checkEqCacheProbeDepthProbe\n");
         return 1;
     }
 #endif
