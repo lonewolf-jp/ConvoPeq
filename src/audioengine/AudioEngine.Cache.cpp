@@ -60,7 +60,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
     uint64_t hash = EQProcessor::hashCacheKey(key);
 
     // ロックなしのヒット探索。ハッシュが一致してもキーが違う場合は別ハッシュへ退避する。
-    for (int probe = 0; probe < 32; ++probe)
+    for (int probe = 0; probe < kMaxCollisionProbes; ++probe)
     {
         const CacheMap* currentMap = loadMap();
         if (currentMap == nullptr)
@@ -98,7 +98,7 @@ EQCoeffCache* AudioEngine::EQCacheManager::getOrCreate(const convo::EQParameters
 
     drainDeferredMapsUnderLock();
 
-    for (int probe = 0; probe < 32; ++probe)
+    for (int probe = 0; probe < kMaxCollisionProbes; ++probe)
     {
         const CacheMap* currentMap = loadMap();
         if (currentMap == nullptr)
@@ -252,6 +252,67 @@ bool AudioEngine::EQCacheManager::debugRunDisabledBandKeyProbe()
     c.bands[7].enabled = true;
     EQCoeffCache* cacheC = getOrCreate(c, 48000.0, 512, 3u);
     return cacheC != nullptr && cacheC != cacheA;
+}
+
+bool AudioEngine::EQCacheManager::debugRunProbeDepthProbe()
+{
+    // 40 段の衝突連鎖を作り、32 回で打ち切る旧実装では fail-closed になる深さを再現する。
+    constexpr int kChainLength = 40;
+
+    convo::EQParameters target;
+    target.bands[0].gain = 1.0f;
+    const auto targetKey = EQProcessor::makeCacheKey(target, 48000.0, 512);
+    const uint64_t targetHash = EQProcessor::hashCacheKey(targetKey);
+
+    uint64_t hash = targetHash;
+    for (int i = 0; i < kChainLength; ++i)
+    {
+        if (i > 0)
+            hash = EQProcessor::probeCacheHash(hash, i - 1);
+
+        convo::EQParameters other;
+        other.bands[0].gain = 2.0f + static_cast<float>(i);
+        EQCoeffCache* cache = EQProcessor::createCoeffCache(
+            other, 48000.0, 512, static_cast<uint64_t>(100 + i));
+        if (cache == nullptr)
+            return false;
+
+        cache->key = EQProcessor::makeCacheKey(other, 48000.0, 512);
+        cache->paramsHash = hash;
+
+        const auto handle = owner.dspHandleRuntime_.create(cache);
+        if (handle.isNull())
+        {
+            delete cache;
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(writeMutex);
+        const CacheMap* currentMap = loadMap();
+        if (currentMap == nullptr)
+        {
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return false;
+        }
+
+        std::unique_ptr<CacheMap> newMap;
+        try
+        {
+            newMap = std::make_unique<CacheMap>(*currentMap);
+            newMap->map.emplace(hash, handle);
+        }
+        catch (...)
+        {
+            owner.invalidateHandleBeforeDestroy(cache);
+            delete cache;
+            return false;
+        }
+        storeNewMap(newMap.release());
+    }
+
+    EQCoeffCache* resolved = getOrCreate(target, 48000.0, 512, 999u);
+    return resolved != nullptr && EQProcessor::cacheKeyMatches(*resolved, targetKey);
 }
 #endif
 

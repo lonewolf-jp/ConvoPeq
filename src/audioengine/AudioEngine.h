@@ -1323,6 +1323,8 @@ public:
     bool debugRunEqCacheCollisionProbe() { return eqCacheManager.debugRunCollisionProbe(); }
     // テスト専用: 無効バンドのキー正規化で同一キャッシュが再利用されることを検証する。
     bool debugRunEqDisabledBandKeyProbe() { return eqCacheManager.debugRunDisabledBandKeyProbe(); }
+    // テスト専用: 40 段の衝突連鎖でも探索が成功することを検証する。
+    bool debugRunEqCacheProbeDepthProbe() { return eqCacheManager.debugRunProbeDepthProbe(); }
 #endif
     EQEditProcessor& getEQProcessor() { return uiEqEditor; }
     ThreadAffinityManager& getAffinityManager() noexcept { return affinityManager; }
@@ -2239,6 +2241,11 @@ private:
     {
     public:
         explicit EQCacheManager(AudioEngine& ownerIn) noexcept;
+
+        // キー衝突時の再探索の上限。NonRT（スナップショット構築）専用で、
+        // RT 側は pinByHash の単発参照のみを使う。
+        static constexpr int kMaxCollisionProbes = 64;
+
         EQCoeffCache* getOrCreate(const convo::EQParameters& params,
                                   double sampleRate,
                                   int maxBlockSize,
@@ -2248,6 +2255,8 @@ private:
         bool debugRunCollisionProbe();
         // テスト専用: 無効バンドの値だけが異なる 2 設定で同一キャッシュが返ることを検証する。
         bool debugRunDisabledBandKeyProbe();
+        // テスト専用: 40 段の衝突連鎖でも探索が成功する（fail-closed しない）ことを検証する。
+        bool debugRunProbeDepthProbe();
 #endif
         // V-11 §10.6-3 (2026-10-26): NonRT ONLY. Borrowed raw pointer, no lease.
         //   - RT (audio thread) callers MUST NOT use this; use pinByHash(), whose
