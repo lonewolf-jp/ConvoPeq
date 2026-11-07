@@ -18,6 +18,7 @@
 
 #include "InputBitDepthTransform.h"
 #include "MklFftEvaluator.h"
+#include "TruePeakDetector.h"
 
 #include <atomic>
 #include <cfloat>
@@ -3244,6 +3245,41 @@ bool checkEqCacheDisabledBandKeyProbe()
     std::printf("[#1B] disabled-band key normalisation probe: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
+
+// -----------------------------------------------------------------------------
+// #1A: 40 段の衝突連鎖でも探索が成功する（探索上限 64）ことを検証する
+// -----------------------------------------------------------------------------
+bool checkEqCacheProbeDepthProbe()
+{
+    AudioEngineHarness h;
+    if (!h.start(48000.0, 512))
+    {
+        std::fprintf(stderr, "[#1A] harness start failed\n");
+        return false;
+    }
+
+    const bool ok = h.engine().debugRunEqCacheProbeDepthProbe();
+    std::printf("[#1A] cache probe depth probe: %s\n", ok ? "PASS" : "FAIL");
+
+    // 探索 1 段あたりのコスト（整数演算のみ・NonRT）。上限 64 でも追加は最大 32 段。
+    const auto t0 = std::chrono::steady_clock::now();
+    std::uint64_t hashState = 0x1234567890abcdefull;
+    std::uint64_t sink = 0;
+    constexpr int kSteps = 1000000;
+    for (int i = 0; i < kSteps; ++i)
+    {
+        hashState = EQProcessor::probeCacheHash(hashState, i & 63);
+        sink ^= hashState;
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const double nsPerStep =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count())
+        / static_cast<double>(kSteps);
+    std::printf("[#1A] probe step cost: %.2f ns (sink=%llu)\n",
+                nsPerStep, static_cast<unsigned long long>(sink));
+
+    return ok;
+}
 #endif
 
 // N1: bypass 切替時に wet テールを不連続に切断しないことを検証する。
@@ -3383,6 +3419,54 @@ bool checkBypassTailContinuity()
 
     std::printf("[N1] bypass tail crossfade: PASS (pre=%.3e delta=%.3e mean=%.3e)\n",
                 preTail, delta, meanAbs);
+    return true;
+}
+
+// #12: 非有限入力（NaN/Inf）を検出器の履歴へ入れないことを検証する。
+//   同じ実効入力（非有限値を 0 に置換）を受けた参照検出器と、以降の出力が一致すること。
+bool checkTruePeakNonFiniteInput()
+{
+    constexpr int kBlock = 32;
+    TruePeakDetector bad;
+    TruePeakDetector ref;
+    bad.prepare(48000.0, kBlock);
+    ref.prepare(48000.0, kBlock);
+
+    std::vector<double> finite(static_cast<size_t>(kBlock));
+    for (int i = 0; i < kBlock; ++i)
+        finite[static_cast<size_t>(i)] = 0.5 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * i / 48000.0);
+
+    bad.processBlock(finite.data(), finite.data(), kBlock);
+    ref.processBlock(finite.data(), finite.data(), kBlock);
+
+    std::vector<double> zeroBlock(static_cast<size_t>(kBlock), 0.0);
+    std::vector<double> dirty = zeroBlock;
+    dirty[5] = std::numeric_limits<double>::quiet_NaN();
+    dirty[17] = std::numeric_limits<double>::infinity();
+    dirty[29] = -std::numeric_limits<double>::infinity();
+
+    const double badDirty = bad.processBlock(dirty.data(), dirty.data(), kBlock);
+    const double refDirty = ref.processBlock(zeroBlock.data(), zeroBlock.data(), kBlock);
+    if (!std::isfinite(badDirty) || std::fabs(badDirty - refDirty) > 1.0e-12)
+    {
+        std::fprintf(stderr, "[#12] FAIL: non-finite block changed the peak (bad=%.17g ref=%.17g)\n",
+                     badDirty, refDirty);
+        return false;
+    }
+
+    for (int b = 0; b < 3; ++b)
+    {
+        const double a = bad.processBlock(finite.data(), finite.data(), kBlock);
+        const double r = ref.processBlock(finite.data(), finite.data(), kBlock);
+        if (!std::isfinite(a) || std::fabs(a - r) > 1.0e-12)
+        {
+            std::fprintf(stderr, "[#12] FAIL: detector state diverged after non-finite input (bad=%.17g ref=%.17g)\n",
+                         a, r);
+            return false;
+        }
+    }
+
+    std::printf("[#12] true-peak non-finite guard: PASS\n");
     return true;
 }
 
@@ -3568,6 +3652,11 @@ int runConvolverStateRoundTripTests()
         std::fprintf(stderr, "FAIL: checkBypassTailContinuity\n");
         return 1;
     }
+    if (!checkTruePeakNonFiniteInput())
+    {
+        std::fprintf(stderr, "FAIL: checkTruePeakNonFiniteInput\n");
+        return 1;
+    }
 #if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
     if (!checkEqCacheCollisionProbe())
     {
@@ -3577,6 +3666,11 @@ int runConvolverStateRoundTripTests()
     if (!checkEqCacheDisabledBandKeyProbe())
     {
         std::fprintf(stderr, "FAIL: checkEqCacheDisabledBandKeyProbe\n");
+        return 1;
+    }
+    if (!checkEqCacheProbeDepthProbe())
+    {
+        std::fprintf(stderr, "FAIL: checkEqCacheProbeDepthProbe\n");
         return 1;
     }
 #endif

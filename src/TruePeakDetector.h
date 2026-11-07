@@ -43,6 +43,11 @@ private:
     convo::ScopedAlignedPtr<double> upsampleBuffer;
     int bufferCapacity = 0;
     int upsampledCapacity = 0;
+
+    // 非有限入力の遮断用（prepare で確保し、processBlock では確保しない）
+    convo::ScopedAlignedPtr<double> sanitizedInput[2];
+    int sanitizedCapacity = 0;
+
     double peakHold = 0.0;
     std::atomic<double> currentSampleRate{ 0.0 };
 
