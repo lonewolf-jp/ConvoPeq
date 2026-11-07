@@ -3381,7 +3381,7 @@ bool checkBypassTailContinuity()
         return false;
     }
 
-    std::printf("[N1] bypass tail crossfade: PASS (pre=%.4f delta=%.6f mean=%.5f)\n",
+    std::printf("[N1] bypass tail crossfade: PASS (pre=%.3e delta=%.3e mean=%.3e)\n",
                 preTail, delta, meanAbs);
     return true;
 }
