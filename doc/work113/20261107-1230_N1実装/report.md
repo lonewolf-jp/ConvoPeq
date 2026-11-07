@@ -36,7 +36,8 @@
 | 収束後の減衰 | PASS（無音時の残留フロアの 1.25 倍以下） |
 | bypass OFF の連続性 | PASS（先頭サンプルが同じ許容内） |
 | ハーネス全体 | exit 0、`all publish pipeline tests PASS` |
-| `ctest -C Release` | （実行後に追記） |
+| `ctest -C Release` | 54 / 54 PASS（353.5 秒、フック有効ビルド） |
+| CI（PR #168） | Windows MSVC / Release、ASan、TSan、CodeQL（c-cpp）ほか（結果は PR を参照） |
 
 ### 測定の注意
 
@@ -63,4 +64,10 @@
 |---|---|
 | 実装 | 完了 |
 | テスト | 追加・PASS |
-| PR | 作成済み（マージ未実施） |
+| PR | 作成済み（#168、マージ未実施） |
+
+## 7. Owner 判断が必要な事項
+
+1. 本 PR のマージ可否。
+2. フェード時間は既存の `smoothingTimeSec`（既定 20 ms）をそのまま使うか、バイパス専用の時定数を設けるか。
+3. 実機での聴感確認をマージ前に行うか、マージ後の確認でよいか。
