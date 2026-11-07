@@ -37,8 +37,9 @@
 | 項目 | 結果 |
 |---|---|
 | 非有限入力の回帰テスト | PASS（[#12] true-peak non-finite guard: PASS） |
-| ハーネス全体 | exit 0、ll publish pipeline tests PASS |
-| `ctest -C Release` | （実行後に追記） |
+| ハーネス全体 | exit 0、`all publish pipeline tests PASS` |
+| `ctest -C Release` | 54 / 54 PASS（334.7 秒、フック有効ビルド） |
+| CI（PR #167） | 15 件中 14 pass / 1 skipping（意図的失敗プローブは dispatch のみ） |
 
 ## 4. 影響評価
 
@@ -57,5 +58,11 @@
 | 項目 | 状態 |
 |---|---|
 | 実装 | 完了 |
-| テスト | 追加・実行中 |
-| PR | 作成予定 |
+| テスト | 追加・PASS |
+| PR | 作成済み（#167、マージ未実施） |
+
+## 7. Owner 判断が必要な事項
+
+1. 本 PR のマージ可否。
+2. 非有限値を 0 に置換する現行方針を固定するか。
+3. 本番経路の事前スクラブとの役割分担を文書化するか。
