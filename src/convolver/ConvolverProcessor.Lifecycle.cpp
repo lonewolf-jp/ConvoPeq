@@ -409,6 +409,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         mixSmoother.setCurrentAndTargetValue(static_cast<double>(pendingOverride.mix));
     }
 
+    // N1: prepare 直後は「未遷移」として扱う。バイパス中に prepare された場合も、
+    //     最初のブロックで専用 20 ms のフェードを開始できるようにする。
+    m_lastBypassedState = false;
+    m_bypassCrossfadeActive = false;
+
     // レイテンシー補正の初期化
     latencySmoother.reset(sampleRate, 0.1);
     crossfadeGain.reset(sampleRate, 0.02);

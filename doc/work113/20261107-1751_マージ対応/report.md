@@ -28,6 +28,7 @@ Owner 決定に合わせ、フェード時間を専用定数 20 ms に固定し�
 
 - `src/ConvolverProcessor.h`: `kBypassCrossfadeTimeSec = 0.020` を追加。フェード状態のメンバーを追加。
 - `src/convolver/ConvolverProcessor.Runtime.cpp`: バイパス状態が変わったブロックで、進行中のランプが残っていても 20 ms 分を最初からやり直す。収束後は利用者の `smoothingTimeSec` に戻す。
+- `src/convolver/ConvolverProcessor.Lifecycle.cpp`: prepare 直後は未遷移としてフラグを初期化し、バイパス中に prepare されても最初のブロックから 20 ms でフェードする。
 - `src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp`: `checkBypassCrossfadeTimeConstant` を追加（`smoothingTimeSec` 0.5 s / 0.01 s、およびミックス変更中のバイパスの 3 ケース）。
 
 検証結果:
