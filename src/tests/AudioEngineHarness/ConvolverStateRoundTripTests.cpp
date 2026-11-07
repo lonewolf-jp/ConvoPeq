@@ -18,6 +18,7 @@
 
 #include "InputBitDepthTransform.h"
 #include "MklFftEvaluator.h"
+#include "TruePeakDetector.h"
 
 #include <atomic>
 #include <cfloat>
@@ -3244,6 +3245,54 @@ bool checkEqCacheProbeDepthProbe()
 }
 #endif
 
+// #12: 非有限入力（NaN/Inf）を検出器の履歴へ入れないことを検証する。
+//   同じ実効入力（非有限値を 0 に置換）を受けた参照検出器と、以降の出力が一致すること。
+bool checkTruePeakNonFiniteInput()
+{
+    constexpr int kBlock = 32;
+    TruePeakDetector bad;
+    TruePeakDetector ref;
+    bad.prepare(48000.0, kBlock);
+    ref.prepare(48000.0, kBlock);
+
+    std::vector<double> finite(static_cast<size_t>(kBlock));
+    for (int i = 0; i < kBlock; ++i)
+        finite[static_cast<size_t>(i)] = 0.5 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * i / 48000.0);
+
+    bad.processBlock(finite.data(), finite.data(), kBlock);
+    ref.processBlock(finite.data(), finite.data(), kBlock);
+
+    std::vector<double> zeroBlock(static_cast<size_t>(kBlock), 0.0);
+    std::vector<double> dirty = zeroBlock;
+    dirty[5] = std::numeric_limits<double>::quiet_NaN();
+    dirty[17] = std::numeric_limits<double>::infinity();
+    dirty[29] = -std::numeric_limits<double>::infinity();
+
+    const double badDirty = bad.processBlock(dirty.data(), dirty.data(), kBlock);
+    const double refDirty = ref.processBlock(zeroBlock.data(), zeroBlock.data(), kBlock);
+    if (!std::isfinite(badDirty) || std::fabs(badDirty - refDirty) > 1.0e-12)
+    {
+        std::fprintf(stderr, "[#12] FAIL: non-finite block changed the peak (bad=%.17g ref=%.17g)\n",
+                     badDirty, refDirty);
+        return false;
+    }
+
+    for (int b = 0; b < 3; ++b)
+    {
+        const double a = bad.processBlock(finite.data(), finite.data(), kBlock);
+        const double r = ref.processBlock(finite.data(), finite.data(), kBlock);
+        if (!std::isfinite(a) || std::fabs(a - r) > 1.0e-12)
+        {
+            std::fprintf(stderr, "[#12] FAIL: detector state diverged after non-finite input (bad=%.17g ref=%.17g)\n",
+                         a, r);
+            return false;
+        }
+    }
+
+    std::printf("[#12] true-peak non-finite guard: PASS\n");
+    return true;
+}
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -3419,6 +3468,11 @@ int runConvolverStateRoundTripTests()
     if (!checkD8AutoLengthRejectsNonFinite())
     {
         std::fprintf(stderr, "FAIL: checkD8AutoLengthRejectsNonFinite\n");
+        return 1;
+    }
+    if (!checkTruePeakNonFiniteInput())
+    {
+        std::fprintf(stderr, "FAIL: checkTruePeakNonFiniteInput\n");
         return 1;
     }
 #if defined(CONVOPEQ_ENABLE_TEST_HOOKS) && CONVOPEQ_ENABLE_TEST_HOOKS
