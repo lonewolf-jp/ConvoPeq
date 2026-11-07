@@ -14,7 +14,7 @@
 | マージ前 head | `e79a6a3f` |
 | PR の CI（`e79a6a3f`） | 14 pass / 1 skip / 0 fail、`CLEAN` |
 | マージ commit | `32c9234b` |
-| 変更規模 | 15 ファイル、+1,234 / −3。うちソースコードは `src/` の 6 ファイル（+822 / −2）と `CMakeLists.txt`（+2）、残り 8 ファイルは報告書と CSVs |
+| 変更規模 | 15 ファイル、+1,234 / −3。うちソースコードは `src/` の 6 ファイル（+822 / −2）と `CMakeLists.txt`（+2）、残り 8 ファイルは報告書 4 件・CSV 3 件・残存課題レジスタ 1 件 |
 | マージ日時 | 2026-11-07 22:58（JST） |
 | ローカルの `main` | `32c9234b`（`origin/main` と一致） |
 
@@ -43,7 +43,7 @@
 | ハーネス | `build\Release\AudioEngineHarness.exe` | exit 0、`AudioEngineHarness: all publish pipeline tests PASS` |
 | `ctest` | `ctest --test-dir build -C Release --output-on-failure` | 54 / 54 PASS（334.24 秒） |
 | N1 自動分析の再実行 | `build\Release\AudioEngineHarness.exe --n1-analysis <出力先> post` | 9 / 9 PASS。`metrics_post.csv` は `doc/work113/20261107-2140_N1自動検証/metrics_post.csv` とバイト単位で一致（再現性の確認） |
-| CI（`32c9234b`、`main`） | GitHub Actions | 5 ワークフローすべて success。audioengine-lint・list-compliance・ISR Authority Compliance は 23:59、Sanitizer は 2026-11-08 00:06、Windows MSVC は 00:15、Push on main は 00:37（いずれも JST） |
+| CI（`32c9234b`、`main`） | GitHub Actions | 5 ワークフローすべて success。audioengine-lint・list-compliance・ISR Authority Compliance は 22:59、Windows MSVC は 23:15、Push on main は 23:37、Sanitizer は 2026-11-08 00:06（いずれも JST） |
 
 - ハーネスのログに `D5-T1: M4 FAILED` という行が出るが、これは MMCSS 観測テストが記録するマイルストーン名であり、同スイートは `PASS (D5-T1/…/D5-T6)` で終了している。失敗ではない。
 - ビルドツリーの再構成が必要だった。`$ENV{IPPROOT}` を設定せずに CMake が再構成されると、IPP の include が `/include` になり `ipp.h` が見つからない。`MKLROOT`・`IPPROOT`・`ONEAPI_ROOT` を設定して `cmake -S . -B build` を実行した。
@@ -103,7 +103,7 @@
 | PR #168 | MERGED（`32c9234b`） |
 | N1 | 解消済み（受入対象 5 指標 9 / 9 PASS） |
 | 受入対象外・未評価 | バイパス解除後の wet 絶対レベル一致（既存設計。必要なら別 PR） |
-| `main` | `e7235420`（#168 のマージ `32c9234b` に本記録と `ConvoPeq.md` を反映したコミット） |
+| `main` | コードは `32c9234b`、本記録と `ConvoPeq.md` は `e7235420` で反映済み。最新の head は git 履歴を参照 |
 | `ConvoPeq.md` | `32c9234b` のソースから再生成（FRESH、SHA-256 `4f4b857a…e5224`） |
 | 分割版 | 4 ファイル、最大 2,097,146 バイト、結合一致 |
 
@@ -118,3 +118,4 @@
 | マージ後の `main` の `ConvoPeq.md` | 6,573,934 バイト、CRLF 0（LF のみ）、SHA-256 `4f4b857a5fd317e747a3a35d9a111e86a821820ab0383b0d4bdbc70d631e5224`（生成物と一致） |
 | 鮮度検査（`main`） | `NEWER_SRC_COUNT: 0`、`STATUS: FRESH` |
 | PR #169 の CI | 必須チェック `Windows MSVC / Release` の pass を確認してマージ（ASan と CodeQL は実行中） |
+| 最終記録（本節と CI 結果の追記） | PR #170（文書のみ） |
