@@ -17,6 +17,8 @@ TruePeakDetector::~TruePeakDetector()
             stage.upHistory[ch].reset();
     }
     upsampleBuffer.reset();
+    sanitizedInput[0].reset();
+    sanitizedInput[1].reset();
 }
 
 void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
@@ -38,6 +40,13 @@ void TruePeakDetector::prepare(double sampleRate, int maxBlockSize, int taps)
     {
         upsampleBuffer = convo::makeAlignedArray<double>(static_cast<size_t>(upBufferSize));
         bufferCapacity = upBufferSize;
+    }
+
+    if (maxBlockSize > sanitizedCapacity || !sanitizedInput[0] || !sanitizedInput[1])
+    {
+        sanitizedInput[0] = convo::makeAlignedArray<double>(static_cast<size_t>(maxBlockSize));
+        sanitizedInput[1] = convo::makeAlignedArray<double>(static_cast<size_t>(maxBlockSize));
+        sanitizedCapacity = maxBlockSize;
     }
 
     // 2段の2倍OSで4倍を構成
@@ -93,10 +102,47 @@ double scanPeak(const double* buf, int n) noexcept
 
 } // anonymous namespace
 
+namespace {
+
+bool hasNonFinite(const double* buf, int n) noexcept
+{
+    for (int i = 0; i < n; ++i)
+    {
+        if (!std::isfinite(buf[i]))
+            return true;
+    }
+    return false;
+}
+
+void sanitizeCopy(const double* src, double* dst, int n) noexcept
+{
+    for (int i = 0; i < n; ++i)
+        dst[i] = std::isfinite(src[i]) ? src[i] : 0.0;
+}
+
+} // namespace
+
 double TruePeakDetector::processBlock(const double* dataL, const double* dataR, int numSamples) noexcept
 {
     if (numSamples <= 0 || !upsampleBuffer)
         return 0.0;
+
+    // 入力の非有限値（NaN/Inf）を履歴へ入れない。履歴に入ると FIR 出力が
+    // 非有限になり、流れ出るまで検出値が落ちる。正常入力ではコピーしない。
+    const double* inputL = dataL;
+    const double* inputR = (dataR != nullptr) ? dataR : dataL;
+    if (sanitizedCapacity >= numSamples && sanitizedInput[0] && sanitizedInput[1])
+    {
+        const bool badL = hasNonFinite(inputL, numSamples);
+        const bool badR = (dataR != nullptr) && hasNonFinite(inputR, numSamples);
+        if (badL || badR)
+        {
+            sanitizeCopy(inputL, sanitizedInput[0].get(), numSamples);
+            sanitizeCopy(inputR, sanitizedInput[1].get(), numSamples);
+            inputL = sanitizedInput[0].get();
+            inputR = sanitizedInput[1].get();
+        }
+    }
 
     double* work = upsampleBuffer.get();
     const size_t up1Samples = static_cast<size_t>(numSamples) * 2;
@@ -111,12 +157,12 @@ double TruePeakDetector::processBlock(const double* dataL, const double* dataR, 
     const size_t     kStage1ROffset = up1Samples * 2 + up2Samples;
 
     // Stage 0: 1x -> 2x (L)
-    interpolateStage(stages[0], dataL, numSamples, work + kStage0LOffset, 0);
+    interpolateStage(stages[0], inputL, numSamples, work + kStage0LOffset, 0);
     // Stage 0: 1x -> 2x (R)
     if (dataR != nullptr)
-        interpolateStage(stages[0], dataR, numSamples, work + kStage0ROffset, 1);
+        interpolateStage(stages[0], inputR, numSamples, work + kStage0ROffset, 1);
     else
-        interpolateStage(stages[0], dataL, numSamples, work + kStage0ROffset, 1);
+        interpolateStage(stages[0], inputL, numSamples, work + kStage0ROffset, 1);
 
     // Stage 1: 2x -> 4x (L + R)
     interpolateStage(stages[1], work + kStage0LOffset, up1Samples, work + kStage1LOffset, 0);  // L
@@ -126,6 +172,8 @@ double TruePeakDetector::processBlock(const double* dataL, const double* dataR, 
     double peakL = scanPeak(work + kStage1LOffset, static_cast<int>(up2Samples));
     double peakR = scanPeak(work + kStage1ROffset, static_cast<int>(up2Samples));
     double peak = std::max(peakL, peakR);
+    if (!std::isfinite(peak))
+        peak = 0.0;
 
     // ピークホールド（指数平滑）
     if (peak > peakHold)
