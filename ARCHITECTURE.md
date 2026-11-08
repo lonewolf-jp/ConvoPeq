@@ -496,9 +496,8 @@ AudioDeviceCallback → AudioProcessorPlayer → AudioEngineProcessor.getNextAud
                                                                      └─ RuntimeBuilder.buildRuntimePublishWorld()
                                                                            → RuntimePublicationOrchestrator.submitPublishRequest()
                                                                              → PublicationAdmission.evaluate()
-                                                                               → Accepted → RuntimePublicationCoordinator.publishWorld()
-                                                                                 → RuntimePublishExecutor.executePublish()
-                                                                                   → RuntimeWorldAuthority::commit()
+                                                                               → Accepted → RuntimePublishExecutor.executePublish()
+                                                                                 → RuntimeWorldAuthority::commit()
 ┌─────────────────────┐
 │  Timer Thread       │  Orchestrator.tick() (100ms), HealthMonitor.tick(),
 │  (100ms polling)    │  Telemetry drain, Evidence emit, Retire reclaim
@@ -615,7 +614,7 @@ Non-RT Path (Message/Worker/Timer Threads):
           ├─ admission_.evaluate(healthState, req) → Accepted
           ├─ RuntimeBuilder.buildRuntimePublishWorld()
           ├─ CrossfadeAuthority.evaluate(oldWorld, newWorld, policy)
-          └─ Coordinator.publishWorld(worldOwner)
+          └─ publish (after admission): precheck → publish → RuntimeStore swap
               ├─ runPublicationPrecheckNonRt(world)
               │   ├─ validateSemanticCompleteness()
               │   ├─ validateRuntimeGraphAuthorityContract()
@@ -765,7 +764,7 @@ ConvoPeq follows a staged update model:
      - Check shutdown state
      - Check generation monotonicity
      - Check IR-finalized, retire pressure, and fading state
-   - If accepted: `RuntimeBuilder.buildRuntimePublishWorld()` → `RuntimePublicationCoordinator.publishWorld()`.
+   - If accepted: `RuntimeBuilder.buildRuntimePublishWorld()` → `RuntimePublishExecutor.executePublish()` → `RuntimeWorldAuthority::commit()`.
    - `CrossfadeAuthority` determines crossfade type (smooth/hard reset).
    - `RuntimePublishExecutor` commits via `RuntimeWorldAuthority` on the ISR path.
 
