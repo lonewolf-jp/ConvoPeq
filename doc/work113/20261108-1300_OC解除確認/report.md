@@ -51,9 +51,14 @@
 - Explorer 経由で `cmd` を起動して確認したところ、`%OPENCHAMBER_ELECTRON_LOAD_SERVER_UI%` は空（`[]`）だった。次回のショートカット起動には環境変数が渡らない。
 - 稼働中のプロセスは起動時の環境を保持するため、この起動では従来どおり 63621 の UI が使われる。次回起動から同梱 UI になる。
 
-## 5. 残る確認と復元手順
+## 5. 再起動での確認（2026-11-08 13:20）
 
-- 次回起動で同梱 UI が読み込まれ、`agent.list failed (403)` が出ないことを確認する。このセッションの再起動は作業を中断させるため、実施していない。
+- OpenChamber を再起動した。このセッションのプロセス環境に `OPENCHAMBER_ELECTRON_LOAD_SERVER_UI` は無い。
+- ウィンドウの Document URL は `openchamber-ui://app/index.html?session=ses_f19075ee9ffeEqSqmOuJ4fDaVk` で、同梱 UI が読み込まれている。
+- アプリログ（`~\AppData\Roaming\OpenChamber\logs\main.log`）に 403・cross-site・API 失敗は無い。無関係な skill frontmatter の警告 3 件だけである。
+- OpenCode のログに現れる「403」は `http.span=403` という span ID で、HTTP ステータスではない。
+
+以上から、回避策は解除できる。以下は復元手順として残す。
 - 失敗した場合の復元:
 
 ```powershell
