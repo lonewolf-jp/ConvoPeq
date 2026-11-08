@@ -503,9 +503,6 @@ bool checkD12T5ValidatorResourceContract()
 
 } // namespace
 
-// ── D12-6: FrozenRuntimeWorld の publish 境界は seal を要求する ──
-//   releaseState() は「seal 済みの world だけ」を移譲する。未 seal の移譲を許すと
-//   Builder 境界の freeze を迂回した world が publish に進めてしまう。
 // ── D12-6: FrozenRuntimeWorld の release 順序（seal は publish transaction 側）──
 //   実経路では release 時点の world は未 seal で、seal は publish transaction の中で行われる。
 //   releaseState() に seal を要求すると正当な publish が落ちる（2026-11-08 実測 / D12-1-C）。
@@ -636,10 +633,7 @@ int runSTG11D12StateIntegerGuardTests()
 
 // ── 2026-11-08: D12-6 だけを実行する（engine 非依存）。
 //   既定スイートや D12-1〜D12-4（engine を起動する）が環境依存で停止する場合の
-//   限定検証用。FrozenRuntimeWorld の release 前提条件だけを確認する。
-// ── 2026-11-08: D12-6 だけを実行する（engine 非依存）。
-//   既定スイートや D12-1〜D12-4（engine を起動する）が環境依存で停止する場合の
-//   限定検証用。FrozenRuntimeWorld の release 前提条件だけを確認する。
+//   限定検証用。FrozenRuntimeWorld の release 順序だけを確認する。
 int runSTG11D12FrozenWorldOnly()
 {
     const bool ok = checkD12T6FrozenWorldReleaseOrder();

@@ -143,6 +143,18 @@
 - `QuiescenceObservation::postStopEnqueueZero`（bool）
 - `ReleaseResources` の `jassert(reclaimed)` / `juce::ignoreUnused(reclaimed)`
 
+### 3.4 レビュー指摘への対応
+
+PR #201 の CodeRabbit レビューで 3 件（いずれも「未検証」扱いの Trivial）が挙がった。実コードを確認したところ、3 件とも実在したため修正した。
+
+| 指摘 | 実態 | 対応 |
+|---|---|---|
+| `FrozenRuntimeWorld.cpp` の `releaseState()` 直前コメントが「未 seal は移譲しない」と書いている | 実装は seal を見ない（前提条件を撤回した際の古いコメントが残っていた） | 古い 3 行を削除し、実装内の説明に一本化 |
+| `STG11D12...` の D12-6 ヘッダーコメントが「release は seal を要求する」と書いている | 直前の修正で残った矛盾する 2 行 | 該当 2 行を削除 |
+| `STG11D12...` の限定実行関数のコメントが重複している | 同じ 3 行が 2 回 | 1 回に統合し、「release 順序」に表現を修正 |
+
+あわせて `PublishPipelineIntegrationTests.cpp` の限定実行入口コメント 2 箇所を「release 前提条件」から「release 順序」に直した。CodeRabbit の pre-merge check「Docstring Coverage」は C++ の本プロジェクトには該当しない運用（コメントで契約を書く）ため、対応しない。
+
 ## 4. テスト・ビルド
 
 ### 4.1 追加・変更したテスト
@@ -192,7 +204,7 @@
 | loader の実時間競合テスト | 実 LoaderThread の競合は未試験 | engine 起動が必要 | commit 直前ガードの静的確認に留まる | AudioEngineHarness に非同期 IR 差し替えテストを追加 |
 | Coordinator join 失敗時 | `stopThread(2000)` が失敗すると Q2 が false になり reclaim を拒否するが、`unique_ptr` reset は既存挙動のまま | 既存の JUCE スレッド破棄契約 | join できていないスレッドを破棄するリスクは従来どおり | `stopLoop()` の失敗を上位で扱う設計（別作業） |
 
-保証できること: Q2/Q6 は authority の状態のみで判定され、caller の observation だけでは成立しない。Q5 は観測束と generation の一致が無ければ成立しない。reclaim の失敗は Release でも記録される。FrozenRuntimeWorld の publish 境界は seal を要求する。
+保証できること: Q2/Q6 は authority の状態のみで判定され、caller の observation だけでは成立しない。Q5 は観測束と generation の一致が無ければ成立しない。reclaim の失敗は Release でも記録される。FrozenRuntimeWorld の publish は seal 済みであることを commit 前に検証する（release 自体は所有権移譲のみ）。
 
 保証できないこと: 4 条件（Q3/Q4 を含む）すべての同時偽装、seal 中の直接書き込み、実時間の並行実行での安全性。これらは「テストが通ったから安全」とは主張しない。
 

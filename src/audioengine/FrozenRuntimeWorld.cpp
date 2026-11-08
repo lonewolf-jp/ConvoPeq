@@ -28,9 +28,7 @@ void FrozenRuntimeWorld::sealRecursively() noexcept
     state_->sealRecursively();
 }
 
-// ★ 2026-11-08: publish 境界の前提条件を強制する。
-//   sealRecursively() 済みでない world は移譲しない（nullptr を返し、所有権は保持）。
-//   呼出側（PublicationExecutor::publishImpl）は nullptr を PublishFailed として扱う。
+// ★ 2026-11-08: release は所有権の移譲のみを行う（seal は publish transaction 側の責務）。
 RuntimeState* FrozenRuntimeWorld::releaseState() noexcept
 {
     // ★ 2026-11-08: seal を前提にしない。実経路では world は release 時点では未 seal で、
