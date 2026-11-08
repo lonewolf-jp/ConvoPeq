@@ -125,34 +125,34 @@
 
 ## 8. 文書のみ PR でのスキップ確認（修正後）
 
-修正を main に取り込んだ後、文書だけを変更した PR #182 で確認した。
+修正を `main` に取り込んだ後、文書だけを変更した PR #182 で確認した。
 
 | 確認 | 結果 |
 |---|---|
-| Detect changed files | pass（11 秒） |
-| Windows MSVC / Release（必須） | skipping（スキップ。マージを妨げない） |
-| Windows MSVC Build 全体 | success（実行時間は 14 秒） |
-| Sanitizer CI | 起動しない |
-| ISR Authority Compliance | 起動しない |
-| ISR Verification | 起動しない |
-| CodeQL | 起動しない |
-| udioengine-lint / list-compliance | 起動しない（paths が src/** などのため） |
+| `Detect changed files` | pass（11 秒） |
+| `Windows MSVC / Release`（必須） | skipping（スキップ。マージを妨げない） |
+| `Windows MSVC Build` 全体 | success（実行時間は 14 秒） |
+| `Sanitizer CI` | 起動しない |
+| `ISR Authority Compliance` | 起動しない |
+| `ISR Verification` | 起動しない |
+| `CodeQL` | 起動しない |
+| `audioengine-lint` / `list-compliance` | 起動しない（`paths` が `src/**` などのため） |
 
-- gh pr checks はスキップした必須チェックを skipping と表示する。必須チェックとしては成功として扱われ、マージはブロックされない。
-- 起動したワークフローは Windows MSVC Build の 1 本だけで、そのうち実行されたのは変更判定のジョブだけである。ビルドもテストも動かない。
-- 文書だけの PR の CI はこれで 14 秒で終わる。以前は同じ PR で約 40 分のビルドが走っていた。
+- `gh pr checks` はスキップした必須チェックを `skipping` と表示する。必須チェックとしては成功として扱われ、マージはブロックされない。
+- 起動したワークフローは `Windows MSVC Build` の 1 本だけで、そのうち実行されたのは変更判定のジョブだけである。ビルドもテストも動かない。
+- 文書だけの PR の CI はこれで 14 秒で終わる。同じワークフローがフルビルドまで進むと、`f2995a44`（PR #180 のマージ）では 18 分かかった。
 
 ### 8.1 main へのマージ後（push）
 
-文書だけの PR #182 を main にマージした直後の push でも、同じ判定が働いた。
+文書だけの PR #182 を `main` にマージした直後の push でも、同じ判定が働いた。
 
 | 確認 | 結果 |
 |---|---|
-| Detect changed files | success（11 秒、efore..sha の判定） |
-| Windows MSVC / Release | skipped |
-| Sanitizer CI | 起動しない |
-| ISR Authority Compliance | 起動しない |
-| ISR Verification | 起動しない |
-| CodeQL | 起動する（変更判定を持たないワークフロー） |
+| `Detect changed files` | success（11 秒、`before..sha` の判定） |
+| `Windows MSVC / Release` | skipped |
+| `Sanitizer CI` | 起動しない |
+| `ISR Authority Compliance` | 起動しない |
+| `ISR Verification` | 起動しない |
+| `CodeQL` | 起動する（変更判定を持たないワークフロー） |
 
-- 参考として、直前のマージ c4f50ef はワークフロー自体を変更していたため、push でも約 40 分のビルドが走った。差分が文書だけなら 11 秒で終わる。
+- 参考として、直前のマージ `bc4f50ef` はワークフロー自体を変更していたため、push でもビルドが走った。差分が文書だけなら 11 秒で終わる。
