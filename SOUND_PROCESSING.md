@@ -74,11 +74,16 @@ Input conditioning is the first DSP stage after buffer alignment. It prepares th
   ```cpp
   inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
   {
-      // AVX2: 4 doubles per instruction
+      int i = 0;
+      const int vEnd = numSamples / 4 * 4;
       const __m256d vGain = _mm256_set1_pd(gain);
-      for (int i = 0; i < numSamples/4*4; i += 4)
-          _mm256_storeu_pd(data+i, _mm256_mul_pd(_mm256_loadu_pd(data+i), vGain));
-      // scalar tail
+      for (; i < vEnd; i += 4)
+      {
+          __m256d vData = _mm256_loadu_pd(data + i);
+          _mm256_storeu_pd(data + i, _mm256_mul_pd(vData, vGain));
+      }
+      for (; i < numSamples; ++i)
+          data[i] *= gain;
   }
   ```
 - **No `libm` calls**: the gain is pre-converted from dB to linear in the message thread; the audio thread only performs multiplication.
@@ -135,7 +140,7 @@ juce::dsp::AudioBlock<double> processUp(juce::dsp::AudioBlock<double>& inputBloc
 - For each 2× stage, calls `interpolateStage()` per channel:
   - Applies FIR interpolation using precomputed coefficients.
   - Uses **AVX2/FMA** SIMD for dot product operations.
-  - Explicitly flushes denormal numbers to zero (`killDenormal`).
+  - Flushes tiny accumulation results to zero (`fastAbs(acc) < kDenormThreshold`), and zeroes any non-finite result while setting the corruption flag.
 - Each stage doubles the sample count.
 - Final output: double-precision, planar, 64-byte aligned buffer.
 
@@ -729,7 +734,7 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
 [JUCE Audio Device Callback]
         │
         ▼
-[AudioEngineProcessor::processBlock (float or double)]
+[AudioEngineProcessor::processBlock(double) — standalone build]
         │
         ▼
 [AudioEngine::processBlockDouble]
