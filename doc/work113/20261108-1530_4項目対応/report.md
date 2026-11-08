@@ -98,3 +98,18 @@
 
 - ツール更新のセッションへの反映は再起動後。
 - soak、TX 実機、TSan の実行、#10・#11 の文書修正は行っていない。
+
+## 7. 文書のみ PR でのスキップ確認
+
+文書だけを変更した PR（本節の追加そのもの）で、次を確認した。
+
+| 確認 | 結果 |
+|---|---|
+| `Detect changed files` | pass（`code=false`） |
+| `Windows MSVC / Release`（必須） | skipped（成功扱い。マージ可能） |
+| `Sanitizer CI` | 起動しない（`paths-ignore`） |
+| `ISR Authority Compliance` | 起動しない |
+| `ISR Verification` | 起動しない |
+| `audioengine-lint` / `list-compliance` | 起動しない（`src/**` などのパス条件） |
+
+スキップされた必須チェックは "This check was skipped." と表示され、成功として扱われる。文書だけの変更ではビルド・テストの実行時間が発生しない。
