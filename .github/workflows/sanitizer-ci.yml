@@ -23,6 +23,12 @@ on:
     branches: [main, "release/**"]
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'doc/**'
+      - '**.md'
+      - '.memories/**'
+      - '.x64dbg-mcp/**'
+      - '.zcode/**'
 
 env:
   BUILD_DIR: ${{ github.workspace }}/build
