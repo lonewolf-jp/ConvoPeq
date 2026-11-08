@@ -7,7 +7,10 @@ REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
 REM
 REM Usage:
-REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [-DVAR]
+REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [app] [-DVAR]
+REM
+REM   app : ConvoPeq.exe だけをビルドする（テストターゲットはビルドしない）
+REM          例: build.bat Release icx app
 REM
 REM   -DVAR[=VALUE] : CMake definition (SHIFT解析方式対応、引用符不要).
 REM           Examples:
@@ -31,6 +34,7 @@ set "PGO_MODE=normal"
 set "DO_CLEAN=0"
 set "NO_PAUSE=0"
 set "COMPILER_MODE=msvc"
+set "TARGET_MODE=all"
 set "CMAKE_EXTRA_FLAGS="
 
 :argloop
@@ -48,6 +52,7 @@ if /I "%arg:~0,2%"=="-D" (
     if /i "%arg%"=="pgo-use" set "PGO_MODE=pgo-use"
     if /i "%arg%"=="icx"   set "COMPILER_MODE=icx"
     if /i "%arg%"=="icpx"  set "COMPILER_MODE=icpx"
+    if /i "%arg%"=="app"   set "TARGET_MODE=app"
 )
 shift
 goto :argloop
@@ -72,6 +77,7 @@ echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
 echo [INFO] COMPILER_MODE: !COMPILER_MODE!
+echo [INFO] TARGET_MODE: !TARGET_MODE!
 echo [INFO] Extra CMake flags: !CMAKE_EXTRA_FLAGS!
 REM icx PGO exclusion: icx/icpx does not support PGO
 if not "!COMPILER_MODE!"=="msvc" if not "!PGO_MODE!"=="normal" (
@@ -246,7 +252,12 @@ set "NINJA_FLAGS="
 REM icx/icpx は /Qipo リンク等でメモリを大量消費するため並列度を -j 2 に抑える（LLVM out of memory 回避）
 if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
 if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
-cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
+if /i "!TARGET_MODE!"=="app" (
+    echo [INFO] Building the ConvoPeq target only - test targets are skipped...
+    cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target ConvoPeq %NINJA_FLAGS%
+) else (
+    cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
+)
 if not errorlevel 1 goto build_ok
 
 REM icx 初回ビルドで RC1109 発生時は一度だけリトライ
@@ -266,7 +277,7 @@ exit /b 1
 
 :build_ok
 
-if /i "!COMPILER_MODE!"=="icx" (
+if /i "!COMPILER_MODE!"=="icx" if /i not "!TARGET_MODE!"=="app" (
     echo [INFO] Building Phase 8 test targets...
     cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target GainStagingContractTests --target EQProcessorMaxGainTests %NINJA_FLAGS% >nul 2>&1
 )
