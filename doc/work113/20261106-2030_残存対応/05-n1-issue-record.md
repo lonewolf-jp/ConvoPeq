@@ -27,9 +27,9 @@ N1 は「バイパス時にウェットをドライへ即時切替し、テー�
 
 | 項目 | 状態 |
 |---|---|
-| Issue | #158（OPEN）。Owner の明示的な承認までクローズしない |
+| Issue | #158（CLOSED、2026-11-08。Owner 承認） |
 | 承認範囲 | 起票、要望 1 の実装（PR #168）、要望 2 の採否記録、要望 3 の文書化、R7 の検証（2026-11-08 判断） |
 | 実装 | 要望 1 は PR #168（`32c9234b`）でマージ済み。要望 2 は未採用（保留）。要望 3 は `ARCHITECTURE.md` §9「Bypass Transition (Convolver)」に記載 |
 | 受入 | N1 の受入対象 5 指標は 9 / 9 PASS。R7（ミックス固定と自動化・プリセットの相互作用）は `checkBypassMixHold` で確認 |
-| クローズ判断 | R3・R4・R7 は解消済み。Owner のクローズ承認待ち |
-| 関連記録 | `01-residual-register.md` の N1 行、`07-n1-tail-hold-decision.md`、`doc/work113/20261108-0110_158判断支援/report.md` |
+| クローズ判断 | クローズ済み（R3・R4・R7 の解消、Sanitizer success、要求範囲の確認。2026-11-08） |
+| 関連記録 | `01-residual-register.md` の §4（解消済み）、`07-n1-tail-hold-decision.md`、`doc/work113/20261108-0110_158判断支援/report.md` |
