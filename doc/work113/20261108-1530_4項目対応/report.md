@@ -1,7 +1,7 @@
 # build.bat のアプリ限定ビルド、CI の文書スキップ、ツール更新、フォルダ整理
 
 - 実施: 2026-11-08 15:00〜
-- 対象: `main` = `969a988e`
+- 対象: 開始時点の `main` = `969a988e`。第 1〜6 節は PR #180 でマージ済み（`main` = `f2995a44`）。第 7 節以降は PR #181 で扱う。
 - 目的: 次の 4 件を実施する。(1) `build.bat` にアプリ限定ビルドのオプションを追加、(2) 文書だけの変更で GitHub Actions をスキップ、(3) context-mode と graphify の更新と学習、(4) プロジェクト内フォルダの扱いの整理。
 
 ## 1. `build.bat` のアプリ限定ビルド（`app`）
@@ -21,7 +21,7 @@
 | MSVC | `build.bat Release app clean nopause` | 139 | exit 0 | `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`（47,606,784 B、15:33:57） |
 
 - どちらも `Building Phase 8 test targets` は実行されていない。
-- 所要は icx が約 18 分（クリーンから）、MSVC が約 4 分（クリーンから、-j 既定）。
+- 所要は icx が約 8.9 分、MSVC が約 3.2 分（どちらもクリーンから、ログの作成から最終書き込みまで）。同じ環境のフルビルド（678 ターゲット）は icx で約 39 分だった。icx はメモリ対策で `-j 2` 固定のため、削減率は目標数ほど大きくはない。
 
 ### 注意
 
@@ -36,12 +36,17 @@
 - `windows-msvc-build.yml` に `changes` ジョブを追加し、変更ファイルを判定して `code` を出力する。`release` ジョブは `needs: changes` と次の条件を付けた。
   - `if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')`
   - 判定に失敗した場合はビルドする側に倒す（安全側）。
+- 変更の取得方法は event で分ける。
+  - `pull_request`: `origin/<base>..HEAD`。checkout されるのはマージコミットなので、base の先端との 2 点リビジョンが PR の変更そのものになる。3 点リビジョンはマージベースを必要とし、浅いクローンでは答えられないことがあるため使わない。
+  - `push`: `before..sha`。マージコミットの push なら `before` は `HEAD^1` で、`fetch-depth: 2` に含まれる。含まれない場合は `git fetch` を試し、取れなければビルドする。
+  - それ以外の event と、差分の取得に失敗した場合はビルドする。
 - 文書とみなすパターン: `doc/`、`*.md`、`.memories/`、`.x64dbg-mcp/`、`.zcode/`。
-- 必須ではない `sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` には、`pull_request` の `paths-ignore` を追加した（workflow ごとスキップ）。
+- パスの取得は `git -c core.quotepath=false diff --name-only -z` と `tr '\0' '\n'` を使う。既定の `git diff --name-only` は非 ASCII のパスを引用符で囲むため、日本語のディレクトリ名を持つこのリポジトリでは文書を文書と判定できない（第 7 節）。
+- 必須ではない `sanitizer-ci.yml` と `isr-authority-compliance.yml` には `push` と `pull_request` の両方、`isr-verification.yml` には `pull_request` に `paths-ignore` を追加した（workflow ごとスキップ）。main へ文書だけをマージした場合も重い処理が動かない。
 
 ### 実測
 
-- 文書だけの PR を作成し、`Windows MSVC / Release` がスキップ（成功扱い）になること、他の 3 ワークフローが起動しないことを確認した。結果は本報告の追記に記す。
+- 文書だけの PR を作成して確認した。1 回目は判定を誤ってビルドが走ったため、判定の取得方法を修正した（第 7 節）。修正後の確認結果は第 8 節に記す。
 
 ## 3. ツールの更新
 
@@ -89,7 +94,7 @@
 
 | 種別 | ファイル |
 |---|---|
-| ビルド | `build.bat` |
+| ビルド | `build.bat`、`BUILD_GUIDE_WINDOWS.md`（`app` オプションの追記） |
 | CI | `.github/workflows/windows-msvc-build.yml`、`sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` |
 | 整理 | `.gitignore`、`.memories/repo/...`（追跡解除）、`.x64dbg-mcp/*`（追跡解除）、`.zcode/config.json`（削除） |
 | 報告 | 本ファイル |
@@ -98,3 +103,21 @@
 
 - ツール更新のセッションへの反映は再起動後。
 - soak、TX 実機、TSan の実行、#10・#11 の文書修正は行っていない。
+
+## 7. 文書のみ PR でのスキップ確認（1 回目は判定を誤った）
+
+### 1 回目の結果
+
+文書だけを変更した PR #181 で確認した。`Detect changed files` は pass した。しかし `Windows MSVC / Release` はスキップされなかった。通常どおりビルドが始まった。
+
+原因は、変更ファイルの取得方法にある。`git diff --name-only` は既定（`core.quotepath=true`）で、非 ASCII のパスを引用符と 8 進エスケープで囲む。
+
+```
+"doc/work113/20261108-1530_4\351\240\205\347\233\256\345\257\276\345\277\234/report.md"
+```
+
+この文字列は先頭が `"` で末尾も `"` だ。`^doc/` にも `\.md$` にも一致しない。誤判定である。日本語のディレクトリ名を使うこのリポジトリでは、文書だけの PR がすべてビルド対象になってしまう。
+
+### 修正
+
+`git -c core.quotepath=false diff --name-only -z` に変え、NUL 区切りを `tr '\0' '\n'` で 1 行 1 パスに戻した。`-z` はパスを引用しないため、非 ASCII のパスも `doc/.../report.md` のまま届く。

@@ -3,6 +3,12 @@ name: ISR Authority Compliance v6.4
 on:
   push:
     branches: [ main, master ]
+    paths-ignore:
+      - 'doc/**'
+      - '**.md'
+      - '.memories/**'
+      - '.x64dbg-mcp/**'
+      - '.zcode/**'
   pull_request:
     branches: [ main, master ]
     paths-ignore:

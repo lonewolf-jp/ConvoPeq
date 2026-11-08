@@ -21,6 +21,12 @@ name: Sanitizer CI
 on:
   push:
     branches: [main, "release/**"]
+    paths-ignore:
+      - 'doc/**'
+      - '**.md'
+      - '.memories/**'
+      - '.x64dbg-mcp/**'
+      - '.zcode/**'
   pull_request:
     branches: [main]
     paths-ignore:
