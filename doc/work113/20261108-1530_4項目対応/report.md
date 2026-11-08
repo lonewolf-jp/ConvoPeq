@@ -1,7 +1,7 @@
 # build.bat のアプリ限定ビルド、CI の文書スキップ、ツール更新、フォルダ整理
 
 - 実施: 2026-11-08 15:00〜
-- 対象: 開始時点の `main` = `969a988e`。第 1〜6 節は PR #180 でマージ済み（`main` = `f2995a44`）。第 7 節と CI の修正は PR #181、第 8 節は PR #182 で扱う。
+- 対象: 開始時点の `main` = `969a988e`。第 1〜6 節は PR #180 でマージ済み（`main` = `f2995a44`）。第 7 節と CI の修正は PR #181、第 8 節は PR #182〜#184 で扱う。
 - 目的: 次の 4 件を実施する。(1) `build.bat` にアプリ限定ビルドのオプションを追加、(2) 文書だけの変更で GitHub Actions をスキップ、(3) context-mode と graphify の更新と学習、(4) プロジェクト内フォルダの扱いの整理。
 
 ## 1. `build.bat` のアプリ限定ビルド（`app`）
@@ -103,7 +103,7 @@
 ## 6. 未実施・注意
 
 - ツール更新のセッションへの反映は再起動後。
-- soak、TX 実機、TSan の実行、#10・#11 の文書修正は行っていない。
+- soak、TX 実機、TSan の実行は行っていない。
 
 ## 7. 文書のみ PR でのスキップ確認（1 回目は判定を誤った）
 
@@ -148,7 +148,7 @@
 
 | 確認 | 結果 |
 |---|---|
-| `Detect changed files` | success（11 秒、`before..sha` の判定） |
+| `Detect changed files` | success（8 秒、`before..sha` の判定） |
 | `Windows MSVC / Release` | skipped |
 | `Sanitizer CI` | 起動しない |
 | `ISR Authority Compliance` | 起動しない |
