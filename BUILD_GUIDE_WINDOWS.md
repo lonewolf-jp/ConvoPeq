@@ -108,6 +108,10 @@ build.bat Release pgo-use      # MSVC PGO optimization
 
 build.bat Release icx pgo-gen  # ERROR: PGO not supported for icx
 
+# ConvoPeq.exe only: no test targets (139 targets instead of 678, no Phase 8):
+build.bat Release app
+build.bat Release icx app clean
+
 # Pass extra CMake defines (-D prefix, SHIFT parsing, no quotes needed):
 build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 build.bat Debug icx -DCONVOPEQ_REQUIRE_MKL=OFF
