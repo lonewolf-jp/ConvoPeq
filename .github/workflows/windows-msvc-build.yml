@@ -83,7 +83,9 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          files=$(git diff --name-only "$base...HEAD" || true)
+          # -z は非 ASCII のパスを引用しない（既定だと "doc/...\351\240\205..." に
+          # なる）。tr で NUL 区切りを 1 行 1 パスに戻す。
+          files=$(git -c core.quotepath=false diff --name-only -z "$base...HEAD" | tr '\0' '\n' || true)
           if [ -z "$files" ]; then
             echo "code=false" >> "$GITHUB_OUTPUT"
           elif printf '%s\n' "$files" | grep -qvE '^(doc/|.*\.md$|\.memories/|\.x64dbg-mcp/|\.zcode/)'; then

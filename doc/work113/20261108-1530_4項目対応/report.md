@@ -99,17 +99,20 @@
 - ツール更新のセッションへの反映は再起動後。
 - soak、TX 実機、TSan の実行、#10・#11 の文書修正は行っていない。
 
-## 7. 文書のみ PR でのスキップ確認
+## 7. 文書のみ PR でのスキップ確認（1 回目は判定を誤った）
 
-文書だけを変更した PR（本節の追加そのもの）で、次を確認した。
+### 1 回目の結果
 
-| 確認 | 結果 |
-|---|---|
-| `Detect changed files` | pass（`code=false`） |
-| `Windows MSVC / Release`（必須） | skipped（成功扱い。マージ可能） |
-| `Sanitizer CI` | 起動しない（`paths-ignore`） |
-| `ISR Authority Compliance` | 起動しない |
-| `ISR Verification` | 起動しない |
-| `audioengine-lint` / `list-compliance` | 起動しない（`src/**` などのパス条件） |
+文書だけを変更した PR #181 で確認したところ、`Detect changed files` は pass したものの、`Windows MSVC / Release` はスキップされず通常どおりビルドを開始した。
 
-スキップされた必須チェックは "This check was skipped." と表示され、成功として扱われる。文書だけの変更ではビルド・テストの実行時間が発生しない。
+原因は変更ファイルの取得方法にあった。`git diff --name-only` は既定（`core.quotepath=true`）で非 ASCII のパスを引用符と 8 進エスケープで囲む。
+
+```
+"doc/work113/20261108-1530_4\351\240\205\347\233\256\345\257\276\345\277\234/report.md"
+```
+
+この文字列は先頭が `"` で末尾も `"` のため、`^doc/` にも `\.md$` にも一致しない。その結果「文書ではない」と判定され、`code=true` になっていた。日本語のディレクトリ名を使うこのリポジトリでは、文書だけの PR がすべてビルド対象になってしまう。
+
+### 修正
+
+`git -c core.quotepath=false diff --name-only -z` に変え、NUL 区切りを `tr '\0' '\n'` で 1 行 1 パスに戻した。`-z` はパスを引用しないため、非 ASCII のパスも `doc/.../report.md` のまま届く。
