@@ -1,6 +1,6 @@
 # ConvoPeq Audio Signal Processing Guide
 
-This document describes the complete audio signal processing flow in ConvoPeq v0.6.10, from external audio input to external audio output. It covers all major components, threading, buffer management, and real-time safety strategies.
+This document describes the complete audio signal processing flow in ConvoPeq v0.6.11, from external audio input to external audio output. It covers all major components, threading, buffer management, and real-time safety strategies.
 
 **Project**: ConvoPeq v0.6.11 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20
@@ -42,7 +42,7 @@ class AudioEngineProcessor final : public juce::AudioProcessor
 ### 1.4 Double-Precision Internals
 
 - All internal DSP processing is performed in **double-precision (`double`)**, regardless of input format.
-- If the input is `float`, samples are promoted to `double` during the copy to aligned buffers.
+- If the input is `float`, samples are promoted to `double` during the copy to the aligned buffers (AVX2 4-wide copy with a scalar tail).
 - Using `double` throughout ensures sufficient precision for the entire processing chain.
 
 ### 1.5 Real-Time Thread Safety at Entry
@@ -50,16 +50,16 @@ class AudioEngineProcessor final : public juce::AudioProcessor
 - `AudioEngine::processBlockDouble()` immediately acquires:
   - `lifecycleToken` from `lifecycleRuntime_.enterAudioCallback()` — engine lifecycle state gate
   - `firewallToken` from `rtCapabilityFirewall_.enter()` — RT capability verification
-  - `ScopedNoDenormals` — flush denormals to zero for the entire callback duration
+  - `ensureThreadFloatingPointEnvironment()` — FTZ/DAZ is set once per thread (ADR-006); there is no per-block `ScopedNoDenormals` save/restore
   - `ThreadRole::AudioRealtime` scoped role marker for numeric policy verification
 - If `lifecycleState != EngineLifecycleState::Prepared`, the buffer is cleared and the function returns immediately.
 - If shutdown is in progress, `shutdownRuntime_.markLateCallback()` is called and the buffer is cleared.
 
 ### 1.6 DSPCore Process Entry
 
-- `DSPCore::process()` is the main audio-thread processing function.
+- `DSPCore::processDouble()` is the main audio-thread processing function for the double path (`DSPCore::process()` is the float/`AudioSourceChannelInfo` path).
 - It receives the aligned double-precision buffers and a `ProcessingState` snapshot (all parameters atomically loaded at block start).
-- All processing occurs within `DSPCore::process()` on the audio thread.
+- All processing occurs within `DSPCore::processDouble()` on the audio thread.
 
 ---
 
@@ -69,7 +69,7 @@ Input conditioning is the first DSP stage after buffer alignment. It prepares th
 
 ### 2.1 Headroom Gain
 
-- **Purpose**: Prevents internal DSP clipping by scaling input samples by a configurable gain (typically -3 dB to -6 dB).
+- **Purpose**: Prevents internal DSP clipping by scaling input samples by a configurable gain (range −12…0 dB; −3 to −6 dB is typical).
 - **Implementation**: `scaleBlockFallback()` in `AudioEngine.Processing.DSPCoreDouble.cpp`:
   ```cpp
   inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
@@ -89,26 +89,19 @@ Input conditioning is the first DSP stage after buffer alignment. It prepares th
 - **Purpose**: Removes DC offset from each channel using a **two-stage first-order IIR high-pass filter**.
 - **Class**: `UltraHighRateDCBlocker` (header-only, `src/UltraHighRateDCBlocker.h`).
 - **Structure**: Two cascaded 1st-order IIR sections with slightly different cutoff frequencies for minimal phase distortion.
-- **Coefficients**: computed once in `prepareToPlay()` (message thread), using `std::sin`/`std::cos`. On the audio thread, only the difference equation is evaluated.
+- **Coefficients**: computed once in `prepareToPlay()` (message thread) as `alpha = 1 − exp(−ω)` using `std::expm1()` for precision at low cutoffs. On the audio thread, only the difference equation is evaluated.
 - **State**: maintained per channel, per block. Filter states are stored in aligned memory.
 - **SIMD safety**: no `libm` calls, no dynamic allocation, no branching on audio thread.
 - **Real-time guarantee**: all state variables are pre-allocated and initialized to zero in `prepareToPlay()`.
 
 ### 2.3 Analyzer Input Tap (Lock-Free FIFO)
 
-- **Purpose**: Captures raw input samples (pre-gain, pre-DC block) for the UI spectrum analyzer.
-- **Implementation**: `LockFreeRingBuffer<AudioBlock, 4096>` — a **SPSC (single-producer, single-consumer)** lock-free ring buffer.
-  ```cpp
-  // Audio thread: split into 256-sample blocks and push
-  pushAdaptiveCaptureBlocks(captureQueue, alignedL, alignedR,
-                              numSamples, sampleRate, bitDepth, coeffBankIndex);
-  ```
-- **Mechanism**:
-  - `AudioBlock` contains 256 samples (double-precision, planar L/R).
-  - `memcpy` is used to copy samples — no dynamic allocation.
-  - Atomic head/tail counters ensure the SPSC property.
-  - `readFromFifo()` in the UI thread consumes data — also lock-free for the audio thread.
-- **Cache-line alignment**: ring buffer and control structures are `alignas(64)` to prevent false sharing.
+Two different lock-free queues are easy to confuse:
+
+- **Analyzer FIFO** — `LockFreeAudioRingBuffer analyzerFifo` (SPSC, `FIFO_SIZE = 1048576` samples). The tap runs inside `processInputDouble()` (before headroom gain and the input DC blocker) when the analyzer source is `Input`, and the output-side tap pushes after the DSP chain, before the fixed latency delay.
+- **Adaptive capture queue** — `LockFreeRingBuffer<AudioBlock, 4096>`. The audio thread splits its output into 256-sample `AudioBlock`s with `pushAdaptiveCaptureBlocks()` for the noise-shaper learner; this queue is not the analyzer's.
+
+Both are SPSC with atomic head/tail counters, pre-allocated in `prepareToPlay()`, and consume nothing on the audio thread beyond the copy (AVX2 `_mm256_loadu_pd`/`_mm256_storeu_pd` plus a scalar tail). The UI/worker side reads with `readFromFifo()` / the learner's segment assembler.
 
 ---
 
@@ -192,16 +185,16 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 
 ### 4.2 EQProcessor (20-Band Parametric EQ)
 
-**Source**: `src/eqprocessor/` (17 files, split TU implementation, ~207 KB)
+**Source**: `src/eqprocessor/` (17 files, split TU implementation, ~213 KB)
 
 | File | Size | Role |
 |---|---|---|
-| `EQProcessor.h` | 37.5 KB | Class definition, types, RCU handle |
-| `EQProcessor.Core.cpp` | 46.7 KB | Core processing logic, M/S, AGC |
-| `EQProcessor.Coefficients.cpp` | 20.6 KB | TPT SVF & biquad coefficient calculation |
-| `EQProcessor.Parameters.cpp` | 13.1 KB | Parameter getters/setters |
-| `EQProcessor.Processing.cpp` | **56.2 KB** — Largest TU | AVX2 FMA TPT SVF processing |
-| `EQProcessor.ProcessingCache.cpp` | 3.1 KB | EQCoeffCache management |
+| `EQProcessor.h` | 47.8 KB | Class definition, types, RCU handle |
+| `EQProcessor.Core.cpp` | 41.2 KB | Core initialization and public API |
+| `EQProcessor.Coefficients.cpp` | 21.0 KB | TPT SVF & biquad coefficient calculation |
+| `EQProcessor.Parameters.cpp` | 15.2 KB | Parameter getters/setters |
+| `EQProcessor.Processing.cpp` | **56.6 KB** — Largest TU | AVX2 FMA TPT SVF processing, M/S conversion, AGC |
+| `EQProcessor.ProcessingCache.cpp` | 1.8 KB | EQCoeffCache management |
 | `PeakEstimator.{h,cpp}` | 5.4 KB | Peak detection for EQ analysis |
 | `UpperBoundEstimator.{h,cpp}` | 1.2 KB | Upper bound estimation for EQ bands |
 | `EQResponseSampler.{h,cpp}` | 9.5 KB | Frequency response sampling (magnitude/phase) |
@@ -232,7 +225,7 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 - Old states retired via `retireEQStateDeferred()` / `retireBandNodeDeferred()` → `enqueueDeferredDeleteWithFallback()` → `DeletionQueue`.
 
 **EQCoeffCache (Phase 1 v2.3)**:
-- `EQCoeffCache` is a `RefCountedDeferred<EQCoeffCache>` — refcounted, shared coefficient cache.
+- `EQCoeffCache` is an `alignas(64)` struct whose lifetime is owned by `DSPHandleRuntime` (the earlier `RefCountedDeferred` wrapper was replaced in v20.2.6).
 - Multiple snapshots share the same `EQCoeffCache` if parameters are identical.
 - Hash-based lookup via `computeParamsHash()`.
 - Reduces coefficient recalculation when multiple `RuntimeState` snapshots share EQ parameters.
@@ -253,7 +246,7 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 - `bypassFadeGain` (a `LinearRamp`) ramps from 0 to 1 on engage, 1 to 0 on disengage.
 
 **Total Gain Smoothing**:
-- `SMOOTHING_TIME_SEC = 0.05` (50 ms) exponential ramp.
+- `SMOOTHING_TIME_SEC = 0.05` (50 ms) linear ramp (`convo::LinearRamp`).
 - `totalGainTarget` stored as linear gain (converted in message thread — no `std::pow` on audio thread).
 
 **M/S (Mid-Side) Processing**:
@@ -268,22 +261,22 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 
 ### 4.3 ConvolverProcessor (FFT Convolution Engine)
 
-**Source**: `src/convolver/` (10 files, split TU implementation, ~261 KB)
+**Source**: `src/convolver/` (12 files, split TU implementation, ~299 KB for the TU set; 372 KB including `ConvolverProcessor.h`)
 
 | File | Size | Role |
 |---|---|---|
 | `ConvolverProcessor.Internal.h` | 5.3 KB | Helpers: `unwrapPhaseRadians`, `nextPow2`, `resampleIR`, `convertToMinimumPhase` |
-| `ConvolverProcessor.Lifecycle.cpp` | 23.7 KB | Lifecycle, RCU integration, `ChangeBroadcaster` |
-| `ConvolverProcessor.Rebuild.cpp` | 12.2 KB | Rebuild decision, debouncing (`REBUILD_DEBOUNCE_DEFAULT_MS`) |
-| `ConvolverProcessor.LoaderThread.cpp` + `LoaderThreadInline.h` (3.4 KB) | 33.6 KB | Background IR loading, progress tracking |
-| `ConvolverProcessor.LoadPipeline.cpp` | 37.1 KB | Pipeline processing, IR validation |
-| `ConvolverProcessor.MixedPhase.cpp` | 37.1 KB | Phase modes, mixed-phase transition |
-| `ConvolverProcessor.ResampleAndFallback.cpp` | 17.1 KB | r8brain resampling, hard fallback |
-| `ConvolverProcessor.Runtime.cpp` | 47.0 KB | **Audio thread** — partitioned FFT convolution via MKL NUC |
-| `ConvolverProcessor.StateAndUI.cpp` | 47.8 KB | Preset management, UI state |
-| `ConvolverProcessor.h` (at `src/` root) | 66.0 KB | Public API, `BuildSnapshot`, `PhaseMode`, `ResamplingPhaseMode` |
+| `ConvolverProcessor.Lifecycle.cpp` | 26.6 KB | Lifecycle, RCU integration, `ChangeBroadcaster` |
+| `ConvolverProcessor.Rebuild.cpp` | 13.0 KB | Rebuild decision, debouncing (`REBUILD_DEBOUNCE_DEFAULT_MS`) |
+| `ConvolverProcessor.LoaderThread.cpp` + `LoaderThreadInline.h` (3.9 KB) | 43.4 KB | Background IR loading, progress tracking |
+| `ConvolverProcessor.LoadPipeline.cpp` | 41.6 KB | Pipeline processing, IR validation |
+| `ConvolverProcessor.MixedPhase.cpp` | 36.8 KB | Phase modes, mixed-phase transition |
+| `ConvolverProcessor.ResampleAndFallback.cpp` | 19.1 KB | r8brain resampling, hard fallback |
+| `ConvolverProcessor.Runtime.cpp` | 53.3 KB | **Audio thread** — partitioned FFT convolution via MKL NUC |
+| `ConvolverProcessor.StateAndUI.cpp` | 50.9 KB | Preset management, UI state |
+| `ConvolverProcessor.h` (at `src/` root) | 72.7 KB | Public API, `BuildSnapshot`, `PhaseMode`, `ResamplingPhaseMode` |
 
-The **legacy monolithic** `MKLNonUniformConvolver.{h,cpp}` (~106 KB combined) is retained under `#ifdef` for backward compatibility.
+`MKLNonUniformConvolver.{h,cpp}` (124.1 KB combined) is the live NUC engine and is compiled unconditionally. Only its diagnostic blocks are `#ifdef`-guarded; the class itself is not a legacy fallback.
 
 **FFT Abstraction Layer** (Builder → Plan → ExecutionContext):
 - `ConvolverBuilder.h` (3.1 KB) — Non-RT Plan factory; sole creator/destroyer of FFT Plans.
@@ -292,18 +285,18 @@ The **legacy monolithic** `MKLNonUniformConvolver.{h,cpp}` (~106 KB combined) is
 
 **Algorithm** — Intel MKL Non-Uniform Partitioned Convolution (NUC):
 - Partitions the impulse response into non-uniform blocks (shorter blocks near the start for low-latency, longer blocks toward the tail for efficiency).
-- Uses **MKL DFTI** (Discrete Fourier Transform Interface) for forward/backward FFTs.
-- All FFT and buffer operations use **AVX2/FMA SIMD**.
+- Forward/backward FFTs use **Intel IPP** (`ippsFFTFwd_RToCCS_64f` / `ippsFFTInv_CCSToR_64f`) through `FFTBackend`; MKL DFTI is no longer used on the audio path.
+- Buffers are 64-byte aligned and the hot loops use AVX2/FMA intrinsics; the FFT itself runs inside IPP.
 - 64-byte aligned buffers throughout.
 
 **Phase Modes**:
 - `PhaseMode::AsIs`: use IR as-is (linear phase).
 - `PhaseMode::Minimum`: convert IR to minimum phase.
-- `PhaseMode::Mixed`: blend linear-phase (low frequencies) with minimum-phase (high frequencies) — controlled by `mixedTransitionStartHz` and `mixedTransitionEndHz`.
+- `PhaseMode::Mixed`: **minimum phase at low frequencies, linear phase at high frequencies** — the weight of the minimum-phase component is 1.0 at and below `mixedTransitionStartHz` and 0.0 at and above `mixedTransitionEndHz`.
 
 **IR Loading (Background)**:
 - `loadImpulseResponse()` is called from the **message thread**.
-- A `LoaderThread` (`std::thread`) performs the actual file read, resampling (via `r8brain-free-src`), and phase conversion **asynchronously**.
+- A `LoaderThread` (`juce::Thread` subclass, thread names "IRLoader" / "IRRebuilder") performs the actual file read, resampling (via `r8brain-free-src`), and phase conversion **asynchronously**.
 - On completion, the new IR state is atomically swapped via **RCU** — audio thread continues processing with the old IR without interruption or blocking.
 - Old convolution engines are retired via the ISR retire pipeline (`DSPLifetimeManager → ISRRetireRouter → EpochDomain`).
 
@@ -334,32 +327,34 @@ mklNUC.process(channelBuffer, currentIR, ...);
 
 ## 5. Output Conditioning
 
-### 5.1 OutputFilter — Conditional on Final Processor
+### 5.1 OutputFilter — Applied per Active Stage
 
 **Source**: `src/OutputFilter.h/cpp`
 
-The output filter configuration depends on **which processor is last in the chain**:
+`OutputFilter` is not a single "last processor" stage. `DSPCore::processDouble()` calls it twice per block: once on the convolver output whenever the convolver is active (HC/LC), and once on the EQ output whenever the EQ is active (HPF/LPF). With both processors active, both filter sets run, independent of the processing order.
 
-#### Case ① — Convolver is Last
+All cutoffs below are keyed to the **internal processing rate** (device rate × oversampling factor), because `prepare()` receives the processing rate.
+
+#### Stage ① — Convolver output (HC/LC)
 
 - **High-Cut Filter (HCF)**:
   - `Sharp`: Butterworth 4th-order cascaded (Q1=0.5412, Q2=1.3066) — steep, maintains sound pressure at cutoff
   - `Natural`: Linkwitz-Riley 4th-order (Q=0.7071 for both stages) — better phase response, default
   - `Soft`: 2nd-order (Q=0.5) — gentle, no time-domain smear
-  - Cutoff: **19 kHz** (fs ≤ 48 kHz) / **22 kHz** (fs > 48 kHz)
+  - Cutoff: **19 kHz** (processing rate ≤ 48 kHz) / **22 kHz** (above)
 
 - **Low-Cut Filter (LCF)**:
   - `Natural`: Butterworth 2nd-order **HPF, 18 Hz** — minimum low-frequency distortion
   - `Soft`: 2nd-order HPF, Q=0.5, **15 Hz** — gentler, more subsonic removal
 
-#### Case ② — EQ is Last
+#### Stage ② — EQ output (HPF/LPF)
 
 - **High-Pass Filter (HPF)**: Fixed Butterworth 2nd-order, **20 Hz** (always).
 - **Low-Pass Filter (LPF)**:
   - `Sharp`: Q=1.0 (two cascaded stages)
   - `Natural`: Q=0.7071 (two cascaded stages)
   - `Soft`: Q=0.5 (two cascaded stages)
-  - Cutoff: **19 kHz** (fs ≤ 48 kHz) / **24 kHz** (fs > 48 kHz)
+  - Cutoff: **19 kHz** (processing rate ≤ 48 kHz) / **24 kHz** (above)
 
 **Coefficient Precomputation** (`prepare()`, message thread only):
 - Uses **RBJ Audio EQ Cookbook** biquad formulas with `std::sin`/`std::cos`.
@@ -374,11 +369,11 @@ w2[n] = b2·x[n] − a2·y[n]
 ```
 State (`w1`, `w2`) maintained per channel per stage, zeroed in `reset()`.
 
-**SIMD**: all state and coefficient arrays are 64-byte aligned for AVX2 efficiency.
+**SIMD**: `process()` packs the left/right channels into 128-bit `__m128d` registers (SSE2 + FMA) and keeps the biquad state in plain structs; there is no explicit 64-byte alignment requirement on this path.
 
 ### 5.2 Soft Clipping
 
-**Source**: `AudioEngine.Processing.DSPCoreDouble.cpp` — `softClipBlockAVX2()`, `musicalSoftClipScalar()`, `fastTanh()`
+**Source**: `AudioEngine.Processing.DSPCoreDouble.cpp` — `softClipBlockAVX2()`, `musicalSoftClipScalar()`; `fastTanh()` lives in `src/dsp/math/FastTanhApprox.h` (`SoftClipPadePolicy`)
 
 **Algorithm** — piecewise function (NOT simple cubic saturation):
 
@@ -408,14 +403,14 @@ return num / den;
 
 **AVX2 Vectorized Version** (`softClipBlockAVX2`):
 - Processes 4 doubles per instruction using `_mm256_*` intrinsics.
-- `prevSampleInOut` scalar feedback carried across blocks (to maintain state across calls).
+- `prevSampleInOut` is written back at the end of the block but is not read into the soft-clip math (write-only state).
 - `_mm256_set_pd` / `_mm256_mul_pd` / `_mm256_fnmadd_pd` / `_mm256_blendv_pd` etc.
-- `_mm256_round_pd(..., _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)` for nearest-even quantization.
+- With input oversampling at 1×, a local 2× halfband stage (`softClipOS`, 31 taps) wraps the clipper; that path adds 15 base-rate samples of latency, which `getCurrentLatencyBreakdown()` reports.
 
-**Parameters** (all atomic, snapshotted at block start):
-- `threshold` (default ~1.0)
-- `knee` (default ~0.2)
-- `asymmetry` (default ~0.0)
+**Parameters** (snapshotted at block start): a single `saturationAmount` atomic drives all three shapes per block:
+- `threshold = 0.95 − 0.45 · saturationAmount` (default 0.1 → 0.905)
+- `knee = 0.05 + 0.35 · saturationAmount` (default → 0.085)
+- `asymmetry = 0.10 · saturationAmount` (default → 0.01)
 
 **Real-time safety**:
 - No `libm` calls (fastTanh is a rational polynomial approximation).
@@ -424,7 +419,7 @@ return num / den;
 
 ### 5.3 Output Makeup Gain
 
-- **Purpose**: Final gain adjustment after filtering and soft clipping to match target output level.
+- **Purpose**: Gain applied after the output filters and **before** soft clipping, so the clipper sees the final level (the chain in `DSPCore::processDouble()` is makeup gain → soft clip).
 - **Implementation**: AVX2 SIMD scaling using the same `scaleBlockFallback()` function as input headroom gain.
 - **Gain value**: atomic, converted from dB to linear in the message thread (no `std::pow` on audio thread).
 - All buffers 64-byte aligned.
@@ -440,17 +435,17 @@ All four noise shaper types share these properties:
 - **TPDF (Triangular Probability Density Function) dither** — two uniform random samples summed.
 - **Error-feedback** topology: the quantization error is fed back and shaped by the noise shaper coefficients.
 
-### 6.1 PsychoacousticDither (GUI: "9th-order")
+### 6.1 PsychoacousticDither (GUI: "12th-order")
 
 **Source**: `src/PsychoacousticDither.h`
 
-Despite the GUI label "9th-order", the actual order is **NS_ORDER = 12** (12-tap error-feedback). The discrepancy exists because the coefficient table (`kCoeffTable`) design uses only 9 independently variable coefficients per preset, while the remaining 3 coefficients are fixed for stability.
+The device-settings entry is labelled **"12th-order"**, matching the implementation: **NS_ORDER = 12** (12-tap error-feedback). The separate "9th-order adaptive" entry selects the learned lattice shaper in §6.4.
 
 **Architecture**:
 - **12th-order error-feedback** noise shaper (NS_ORDER = 12).
 - **TPDF dither** via **MKL VSL** (`vdRngUniform`, BRNG = `VSL_BRNG_SFMT19937`) or **Xoshiro256\*\* fallback** if MKL VSL is unavailable.
 - **RNG ring buffer**: 65,536 entries per channel, SPSC, pre-filled.
-  - `rngRing[2][65536]` with atomic `rngReadPos[2]` / `rngWritePos[2]`.
+  - `rngRing[MAX_CHANNELS][65536]` (8 channels) with atomic `rngReadPos[MAX_CHANNELS]` / `rngWritePos[MAX_CHANNELS]`.
   - Refilled by worker thread (non-RT) via `refillRandomRingNonRt()`.
   - `fillChunkForChannel()` uses `vdRngUniform` for bulk fill.
 
@@ -478,7 +473,7 @@ Despite the GUI label "9th-order", the actual order is **NS_ORDER = 12** (12-tap
 
 **Error Feedback Stability**:
 - Uses error-feedback (not direct-form IIR) topology — all poles are at z=0 → **always BIBO stable**.
-- Maximum shaping error = `(scale/2) × Σ|c_k|` — worst case at 705.6 kHz / 16-bit ≈ −66 dBFS.
+- Maximum shaping error = `(scale/2) × Σ|c_k|` — worst case at 705.6 kHz / 16-bit (Σ|c_k| = 65.18, scale = 2⁻¹⁶) ≈ 9.95e-4 ≈ −60 dBFS.
 
 ### 6.2 FixedNoiseShaper (GUI: "4th-order")
 
@@ -627,7 +622,7 @@ Key atomics:
 
 ### 9.3 RCU (Read-Copy-Update) Pattern
 
-- **EpochDomain** (`src/core/EpochDomain.h`, 32.2 KB): manages named reader slots and a global epoch counter.
+- **EpochDomain** (`src/core/EpochDomain.h`, 35.6 KB): manages 64 named reader slots and a global epoch counter.
 - **RCUReader** (`src/core/RCUReader.h`): RAII reader — enters epoch on construction, exits on destruction.
 - **Publication flow**: message thread creates new object → `publishCurrentState()` → audio thread `loadCurrentState(acquire)` → old object retired via `enqueueRetire()`.
 - **Retire pipeline**: `DSPLifetimeManager → ISRRetireRouter → EpochDomain → DeletionQueue`.
@@ -669,7 +664,7 @@ Key atomics:
 | `DSPLifetimeManager::retire()` | Orchestrates retire via `ISRRetireRouter` |
 | `ISRRetireRouter::enqueueRetire()` | Queues retire to `EpochDomain` |
 
-### 9.7 ISR Runtime Governance (126 files in `src/audioengine/`)
+### 9.7 ISR Runtime Governance (128 files in `src/audioengine/`)
 
 The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP lifecycle, publication, crossfade, and health monitoring:
 
@@ -741,15 +736,15 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
         ▼
 [AudioEngine::processBlockDouble]
         ├── AudioCallbackRuntimeScope (lifecycle + firewall token)
-        ├── ScopedNoDenormals
+        ├── ensureThreadFloatingPointEnvironment() (FTZ/DAZ once per thread)
         └── ThreadRole::AudioRealtime
         ▼
-[DSPCore::process — Input Conditioning]
+[DSPCore::processDouble — Input Conditioning]
         │
-        ├── 1. Copy to 64-byte aligned buffers (alignedL, alignedR)
-        ├── 2. Headroom gain (AVX2 scaleBlockFallback)
-        ├── 3. DC blocking (UltraHighRateDCBlocker × 2 stages)
-        └── 4. Analyzer input tap (LockFreeRingBuffer SPSC)
+        ├── 1. Copy to 64-byte aligned buffers (AVX2 4-wide + scalar tail)
+        ├── 2. Analyzer input tap (when the analyzer source is Input)
+        ├── 3. Headroom gain (AVX2 scaleBlockFallback, −12…0 dB)
+        └── 4. Input DC blocking (UltraHighRateDCBlocker, 3 Hz)
         ▼
 [Oversampling — CustomInputOversampler::processUp]
         (if enabled: 2×/4×/8× FIR, AVX2/FMA, Kaiser windowed sinc)
@@ -773,57 +768,44 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
         │       ├── ConvolverProcessor::process()
         │       └── EQProcessor::process()
         ▼
-[OutputFilter (conditional on final processor)]
+[OutputFilter — applied per active stage, not by routing position]
         │
-        ├── Case ① (Convolver-last): HCF (Sharp/Natural/Soft 4th-order)
-        │                          + LCF (Natural Butterworth 2nd HPF 18Hz
-        │                              / Soft 2nd HPF Q=0.5 15Hz)
+        ├── Stage ① (convolver output, whenever the convolver is active):
+        │     HCF Sharp/Natural 4th-order, Soft 2nd-order
+        │     LCF Natural 2nd-order HPF 18 Hz / Soft 2nd-order Q=0.5 15 Hz
+        │     cutoff 19 kHz (processing rate ≤ 48 kHz) / 22 kHz
         │
-        └── Case ② (EQ-last): HPF (Butterworth 2nd 20Hz, fixed)
-        │                    + LPF (Sharp/Natural/Soft 2nd × 2 stages)
+        └── Stage ② (EQ output, whenever the EQ is active):
+              HPF 2nd-order 20 Hz, fixed
+              LPF Sharp/Natural/Soft 2nd-order × 2 stages
+              cutoff 19 kHz (processing rate ≤ 48 kHz) / 24 kHz
         │  All coefficients precomputed in prepare() (std::sin/cos),
         │  process() = table lookup only, no libm, in-place biquad SOS
-        ▼
-[Soft Clipping — softClipBlockAVX2]
-        ├── piecewise: linear → knee (t²(3−2t)) → clipped (fastTanh)
-        ├── fastTanh: rational polynomial approximation, branchless
-        ├── AVX2: 4 doubles per instruction, _mm256_round_pd
-        ├── prevSampleInOut scalar feedback across blocks
-        └── Parameters: threshold, knee, asymmetry (atomic snapshot)
         ▼
 [Output Makeup Gain]
         │  (AVX2 SIMD, atomic gain pre-converted to linear)
         ▼
-[Dither / Noise Shaping]
-        │
-        ├── PsychoacousticDither: 12th-order (NS_ORDER=12)
-        │     MKL VSL RNG ring buffer (65,536 × 2 ch) or Xoshiro fallback
-        │     TPDF dither, kCoeffTable[6][3][12] (6 SR bands × 3 bitdepths)
-        │     SSE4.1 stereo quantization, error shift-register
-        │
-        ├── FixedNoiseShaper: 4th-order error-feedback, psychoacoustic coeffs
-        │
-        ├── Fixed15TapNoiseShaper: 16th-order error-feedback (ORDER=16)
-        │
-        └── AdaptiveNoiseShaper (NoiseShaperLearner)
-              LatticeNoiseShaper (9th-order, kOrder=9)
-              CMA-ES optimizer on worker thread
-              LockFreeRingBuffer<AudioBlock, 4096> for audio transfer
-              AudioSegmentBuffer for segment assembly (4096 samples)
-              RCU handoff of LearnedState to audio thread
+[Soft Clipping — softClipBlockAVX2]
+        ├── piecewise: linear → knee (t²(3−2t)) → clipped (fastTanh)
+        ├── local 2× halfband around the clipper when input OS = 1
+        │     (31 taps; 15 base-rate samples of reported latency)
+        ├── fastTanh: rational polynomial approximation, branchless
+        └── Parameters: saturationAmount → threshold/knee/asymmetry
         ▼
 [Downsampling — CustomInputOversampler::processDown]
         (if oversampling: multi-stage FIR decimation, AVX2/FMA, fail-safe)
         ▼
-[Output Level Measurement]
-        │
-        ├── LoudnessMeter: ITU-R BS.1770-4/5 K-weighting
-        │     LockFreeRingBuffer publish to worker thread
-        │
-        └── TruePeakDetector: 4× OS, 63-tap FIR, AVX2 dot product
-        ▼
 [Analyzer Output Tap]
-        │  (optional spectrum analysis via LockFreeRingBuffer)
+        │  (LockFreeAudioRingBuffer analyzerFifo, taken before the fixed delay)
+        ▼
+[Output conditioning — processOutputDouble]
+        ├── Output DC blocker (3 Hz)
+        ├── Dither / Noise Shaping at −1 dBFS headroom
+        │     (Psychoacoustic 12th / Fixed 4th / Fixed 16th / Adaptive 9th;
+        │      plain −1 dBFS headroom when dither is off)
+        ├── TruePeak + LUFS metering
+        ├── peakLimiter + hard clamp to ±0.8913
+        └── Fixed latency delay (latency compensation)
         ▼
 [DSPCore::processToBuffer — write to output buffer]
         │
@@ -904,7 +886,7 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
 | `src/convolver/ConvolverProcessor.Internal.h` | Helper functions |
 | `src/UltraHighRateDCBlocker.h` | Two-stage IIR DC blocker |
 | `src/CustomInputOversampler.{h,cpp}` | FIR oversampler (2×/4×/8×) |
-| `src/OutputFilter.{h,cpp}` | Output HCF/LCF/HPF/LPF (conditional) |
+| `src/OutputFilter.{h,cpp}` | Output HC/LC (convolver stage) and HPF/LPF (EQ stage) |
 | `src/PsychoacousticDither.{h,cpp}` | 12th-order psychoacoustic dither (26.5 KB) |
 | `src/FixedNoiseShaper.h` | 4th-order fixed noise shaper (13.4 KB) |
 | `src/Fixed15TapNoiseShaper.h` | 16th-order (ORDER=16, name legacy "15Tap") fixed noise shaper (19.0 KB) |
@@ -912,13 +894,13 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
 | `src/NoiseShaperLearner.{h,cpp}` | CMA-ES adaptive learning (79.8 KB combined) |
 | `src/NoiseShaperLearnerTypes.h` | Learning mode, status, progress types (2.3 KB) |
 | `src/LoudnessMeter.{h,cpp}` | ITU-R BS.1770-4/5 K-weighting (13.0 KB) |
-| `src/TruePeakDetector.{h,cpp}` | 4× OS true peak, 63-tap FIR (14.4 KB) |
+| `src/TruePeakDetector.{h,cpp}` | 4× OS true peak, 63-tap FIR (16.2 KB) |
 | `src/SpectrumAnalyzerComponent.{h,cpp}` | FFT spectrum UI (59.0 KB) |
 | `src/NoiseShaperLearningComponent.{h,cpp}` | Noise shaper learning UI (24.1 KB) |
-| `src/ConvolverControlPanel.{h,cpp}` | Convolver control panel (66.2 KB) |
+| `src/ConvolverControlPanel.{h,cpp}` | Convolver control panel (69.7 KB) |
 | `src/ConvolverSettingsComponent.{h,cpp}` | Advanced convolver settings (5.2 KB) |
 | `src/MixedPhaseOptimizationComponent.{h,cpp}` | Mixed-phase progress UI (5.3 KB) |
-| `src/MKLNonUniformConvolver.{h,cpp}` | Legacy MKL NUC (backward compat, ~106 KB) |
+| `src/MKLNonUniformConvolver.{h,cpp}` | Active MKL NUC engine (124.1 KB) |
 | `src/ConvolverBuilder.h` | ISR Plan Builder (Non-RT Authority, 3.1 KB) |
 | `src/FFTBackend.{h,cpp}` | FFT abstraction layer (IPP ProductionFft / TestFft, 12.3 KB) |
 | `src/FFTExecutionContext.{h,cpp}` | FFT execution context (const Plan& consumer, 5.8 KB) |
@@ -963,9 +945,9 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
 | `src/audioengine/RuntimeGraph.h` | Runtime graph representation |
 | `src/audioengine/RuntimePublishExecutor.h` | ISR publish execution gateway (7.4 KB) |
 | `src/audioengine/RuntimeWorldAuthority.h` | World authority + PendingPublishRegistry (21.4 KB) |
-| `src/audioengine/OwnerChannel.h` | SPSC sole-ownership transfer (6.9 KB) |
-| `src/audioengine/BuildErrorPolicy.h` | BuildError / FailureClassification contract (8.4 KB) |
-| `src/audioengine/RetryScheduler.{h,cpp}` | Rebuild retry scheduler (4.6 KB) |
+| `src/audioengine/OwnerChannel.h` | SPSC sole-ownership transfer (7.4 KB) |
+| `src/audioengine/BuildErrorPolicy.h` | BuildError / FailureClassification contract (8.9 KB) |
+| `src/audioengine/RetryScheduler.{h,cpp}` | Rebuild retry scheduler (4.7 KB) |
 | `src/audioengine/SequenceArithmetic.h` | Modular sequence arithmetic (5.6 KB) |
 | `src/audioengine/PublicationAdmission.{h,cpp}` | Admission evaluation |
 | `src/audioengine/PublicationExecutor.{h,cpp}` | Publication commit |
