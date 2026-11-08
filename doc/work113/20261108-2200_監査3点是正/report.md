@@ -203,9 +203,9 @@ PR #201 の CodeRabbit レビューで 3 件（いずれも「未検証」扱い
 | `Windows MSVC / Release`（必須） | pass |
 | `authority-runtime-tests` / `isr-verify` / `lint-audioengine` / `compliance-list-md` / `audit-report-verification` / `CodeQL` の各 Analyze | pass |
 | CodeRabbit | pass（3 回のレビューで計 5 件の指摘、すべて対応） |
-| `RelWithDebInfo ASan (MSVC, /MD)`（非必須） | 初回は oneAPI の winget インストール段階で失敗（ビルド前に停止。コード起因外）。再実行は oneAPI を通過し、マージ時点ではビルド継続中 |
+| `RelWithDebInfo ASan (MSVC, /MD)`（非必須） | **pass**（`3e6dc060` で全ステップ成功。初回は oneAPI の winget インストール段階で失敗したが、再実行で通過） |
 
-ASan の最終結果はマージ時点で未確定である。必須チェックではなく、失敗の原因もインストーラ段階だったため、マージ判断は必須チェックとローカル検証で行った。ASan の結果が出た場合は CI 上で確認できる。
+ASan は `3e6dc060` の時点で成功している。`3e6dc060` と main（`871c3801`）の `src/` 本番コードに差分はなく（`git diff --stat 3e6dc060 871c3801 -- src ':!src/tests'` が空）、以降のコミットで変わったのはテストと文書だけである。したがって main の本番コードは ASan 検証済みの状態と同一である。
 
 ### 4.3 未実施の検証
 
