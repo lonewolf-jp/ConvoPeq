@@ -55,6 +55,8 @@
 
 **是正。** `ShutdownRuntime::noteReclaimProofFailure()` を追加し、`active` / `fading` の両経路で失敗を計上する。`ShutdownResult::reclaimProofFailureCount` と `shutdown_trace.json` の `reclaimProofFailureCount` に出力する。動作は従来どおり継続する。物理破棄は `DSPLifetimeManager::retireDetachedCoreForShutdown` が handle 台帳経由で行うため、reclaim を skip しても UAF にはならない（`DSPLifetimeManager.cpp:139-165` を確認）。
 
+`ShutdownResult::completed` は「phase が `ShutdownComplete` に到達したか」という既存契約のままとし、reclaim 認可の成否とは分けて観測する。両者を 1 つの bool に混ぜると、terminal closure を前提にしている既存テスト（`PublishPipelineIntegrationTests.cpp:765-767`、`P1PolyphaseGainCharacterization.cpp:1278`）の意味が変わるためである。認可の失敗は `reclaimProofFailureCount` で見る。
+
 ### 2.5 `loaderGeneration_`
 
 **死んだ状態だった。** 全参照は `ConvolverProcessor.h` の宣言と `ConvolverProcessor.Lifecycle.cpp` の destructor での加算のみで、読み出しが 1 箇所も無かった。destructor のコメント「Generation を進めて全 LoaderThread を無効化」は成立しておらず、owner-validity を何も保証していなかった。
@@ -185,7 +187,7 @@ PR #201 の CodeRabbit レビューで 3 件（いずれも「未検証」扱い
 | `LoaderCurrencyContractTests` | `build\Release\LoaderCurrencyContractTests.exe` | 3 ケース PASS（exit 0） |
 | `AudioEngineHarness`（D12 限定） | `CONVOPEQ_STG11D12_ONLY=1` | D12-1-A/B/C・D12-3・D12-4・D12-6 PASS（exit 0） |
 | `AudioEngineHarness`（D12-6 限定） | `CONVOPEQ_D12_FROZEN_ONLY=1` | PASS（exit 0） |
-| `AudioEngineHarness`（全体） | `ctest --test-dir build -C Release -R ^AudioEngineHarness$` | **1/1 Passed（321.82 秒）** |
+| `AudioEngineHarness`（全体） | `ctest --test-dir build -C Release -R ^AudioEngineHarness$` | **1/1 Passed（321.15 秒）** |
 | `ConvoPeq`（MSVC Release） | `cmake --build build --config Release --target ConvoPeq` | 成功（exit 0） |
 
 補足が 2 点ある。
@@ -225,8 +227,9 @@ grep -n "captureEpochQuiescenceEvidence\|coordinatorLoopStopped" src/audioengine
 # 死んだ状態の消滅
 grep -rn "loaderGeneration_" src        # コメントとテストのみ
 
-# seal 前提条件
+# seal の強制点（release は所有権移譲のみ / 検証は commit 側）
 grep -n "releaseState" -A 10 src/audioengine/FrozenRuntimeWorld.cpp
+grep -n "isSealedRecursively()" src/audioengine/AudioEngine.Commit.cpp
 
 # テスト
 build\Release\invariant_INV3_INV5Tests.exe
