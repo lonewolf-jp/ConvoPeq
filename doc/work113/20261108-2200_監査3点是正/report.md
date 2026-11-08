@@ -196,6 +196,17 @@ PR #201 の CodeRabbit レビューで 3 件（いずれも「未検証」扱い
 
 第二に、exe を直接実行すると `CONVOPEQ_SOURCE_ROOT` が未設定のため D18-D（ソース構造チェック）だけが FAIL する。ctest は `ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=..."` を設定するため pass する。テスト側の環境依存であり、今回の変更による回帰ではない（ログに `D18-D: CONVOPEQ_SOURCE_ROOT is not set` を確認）。
 
+### 4.2.1 CI（PR #201）
+
+| チェック | 結果 |
+|---|---|
+| `Windows MSVC / Release`（必須） | pass |
+| `authority-runtime-tests` / `isr-verify` / `lint-audioengine` / `compliance-list-md` / `audit-report-verification` / `CodeQL` の各 Analyze | pass |
+| CodeRabbit | pass（3 回のレビューで計 5 件の指摘、すべて対応） |
+| `RelWithDebInfo ASan (MSVC, /MD)`（非必須） | 初回は oneAPI の winget インストール段階で失敗（ビルド前に停止。コード起因外）。再実行は oneAPI を通過し、マージ時点ではビルド継続中 |
+
+ASan の最終結果はマージ時点で未確定である。必須チェックではなく、失敗の原因もインストーラ段階だったため、マージ判断は必須チェックとローカル検証で行った。ASan の結果が出た場合は CI 上で確認できる。
+
 ### 4.3 未実施の検証
 
 - 実 `LoaderThread` を走らせた非同期競合テスト（engine 起動と MKL 初期化が必要なため、機構テストと静的検証で代替）。
