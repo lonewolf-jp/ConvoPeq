@@ -37,7 +37,7 @@
 ## 3. ARCHITECTURE.md（44 件の意味修正 + 193 のサイズ欄 + テスト 14 行）
 
 - 学習モードを実装どおり 6 種（Shortest / Short / Middle / Long / Ultra / Continuous）に修正し、目標時間（10/30/60/120/300 秒、Continuous は無期限）を記載した。従来の「Short/Medium/Long + スペクトル 3 種」は存在しない。
-- Layer 4 を `RuntimeIntentCoordinator` に修正し、API を `precheckPublish()` → `commit()` → `enqueueRetire()`/`retire()` に直した。`publishWorld()` は存在しない。
+- Layer 4 を `RuntimeIntentCoordinator` に修正し、API を `precheckPublish()` → `commit()` → `enqueueRetire()`/`retire()` に直した。`publishWorld()` は存在しないため、公開経路の記述からも削除した。
 - `Admission.evaluate(PublishRequest, AudioEngine, RuntimeReaderContext)`、`buildRuntimePublishWorld(sealedSnapshot, spec)`（旧オーバーロードも併記）へシグネチャを修正した。
 - `worldId` を Authoritative に移し、`config/authority_inventory.json` のスナップショットが Diagnostic のままである点を注記した。
 - RuntimeGraph のパスを `src/audioengine/RuntimeGraph.h` に修正した。
