@@ -175,9 +175,9 @@ Owner 判断（2026-11-08）を受けて、残っていた 3 点を次のよう�
 
 | # | 解消内容 | 証拠 |
 |---|---|---|
-| R3 | 要望 2 を「現時点では未採用（保留）」と決定し、再検討の 3 条件を記録した。将来の要求を否定しない | doc/work113/20261106-2030_残存対応/07-n1-tail-hold-decision.md |
-| R4 | ARCHITECTURE.md §9 から「Convolver bypass toggle / 80 ms」の行を削除し、「Bypass Transition (Convolver)」節で 20 ms のミックスフェード、収束後のドライ経路、凍結点からの再開、PDC 不変を明記した | ARCHITECTURE.md §9 |
-| R7 | バイパス中のミックス固定と、自動化・プリセット相当のミックス変更の相互作用を checkBypassMixHold で確認した。バイパス中の音声側は 0 のまま、保存値は最新値を保持し、解除後は 20 ms で最新値へ戻る（実測: 1 ブロック後 0.213333、収束 0.400000） | src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp の checkBypassMixHold |
+| R3 | 要望 2 を「現時点では未採用（保留）」と決定し、再検討の 3 条件を記録した。将来の要求を否定しない | `doc/work113/20261106-2030_残存対応/07-n1-tail-hold-decision.md` |
+| R4 | ARCHITECTURE.md §9 から「Convolver bypass toggle / 80 ms」の行を削除し、「Bypass Transition (Convolver)」節で 20 ms のミックスフェード、収束後のドライ経路、凍結点からの再開、PDC 不変を明記した | `ARCHITECTURE.md` §9 |
+| R7 | バイパス中のミックス固定と、自動化・プリセット相当のミックス変更の相互作用を `checkBypassMixHold` で確認した。バイパス中の音声側は 0 のまま、保存値は最新値を保持し、解除後は 20 ms で最新値へ戻る（実測: 1 ブロック後 0.213333、収束 0.400000） | `src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp` の `checkBypassMixHold` |
 
 判断の更新: 3 点は解消し、Issue #158 は Owner のクローズ承認だけで閉じられる状態になった。
 
@@ -191,15 +191,15 @@ Owner 判断（2026-11-08）を受けて、残っていた 3 点を次のよう�
 
 ### 10.1 R7 の要求範囲
 
-本アプリはスタンドアローンである（CMakeLists.txt の juce_add_gui_app、src/MainApplication.cpp の「スタンドアローンアプリ (VST3等ではない) として設計」）。VST3/AU のエクスポートはなく、DAW の自動化スケジューリングは製品の対象外である。
+本アプリはスタンドアローンである（`CMakeLists.txt` の `juce_add_gui_app`、`src/MainApplication.cpp` の「スタンドアローンアプリ (VST3等ではない) として設計」）。VST3/AU のエクスポートはなく、DAW の自動化スケジューリングは製品の対象外である。
 
 したがって Issue #158 の「既存のミックス・プリセット・自動化との整合」は、次の範囲で評価できる。
 
 | 経路 | 確認内容 |
 |---|---|
-| ミックス値 | setMix は pendingOverride.mix を更新する。バイパス中も保存値は変わらない |
-| プリセット | getState はミックス値を保存し、setState は setMix で復元する（ConvolverProcessor.StateAndUI.cpp）。既存の状態ラウンドトリップ試験がある |
-| 自動化相当の連続変更 | checkBypassMixHold で、掃引（0.9 → 0.4）でも保存値は最新値だけが残り、音声側は 0 のままであることを確認した |
+| ミックス値 | `setMix` は `pendingOverride.mix` を更新する。バイパス中も保存値は変わらない |
+| プリセット | `getState` はミックス値を保存し、`setState` は `setMix` で復元する（`ConvolverProcessor.StateAndUI.cpp`）。既存の状態ラウンドトリップ試験がある |
+| 自動化相当の連続変更 | `checkBypassMixHold` で、掃引（0.9 → 0.4）でも保存値は最新値だけが残り、音声側は 0 のままであることを確認した |
 
 DAW スケジューリングの未検証は、要求の未達ではなく適用外である。
 
@@ -207,9 +207,9 @@ DAW スケジューリングの未検証は、要求の未達ではなく適用�
 
 | 対象 | 結果 |
 |---|---|
-| 6bbf1689（テスト追加、PR #173） | success |
-| 9f9dd8f3（main のマージ commit。コードは 6bbf1689 と同一） | success |
-| f3a0245（文書のみ。コードは 9f9dd8f3 と同一） | 実行中 |
+| `6bbf1689`（テスト追加、PR #173） | success |
+| `9f9dd8f3`（`main` のマージ commit。コードは `6bbf1689` と同一） | success |
+| `ff3a0245`（文書のみ。コードは `9f9dd8f3` と同一） | success |
 
 ### 10.3 クローズ
 

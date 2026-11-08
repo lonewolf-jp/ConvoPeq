@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-07 23:01:03
+> Generated: 2026-11-08 10:08:09
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -99272,6 +99272,112 @@ bool checkBypassCrossfadeTimeConstant()
     return true;
 }
 
+// N1 / R7: バイパス中のミックス固定が、自動化・プリセットのミックス変更を壊さないことを確認する。
+//   - バイパス中は音声側の目標だけを 0 に固定し、保存値（pendingOverride.mix）は変更しない。
+//   - 解除時は「その時点の最新値」へ 20 ms で戻る。
+//   自動化ホストは setMix を繰り返すため、連続変更（掃引）も同じ経路で確認する。
+bool checkBypassMixHold()
+{
+    static juce::ScopedJuceInitialiser_GUI n1MixJuceInit;
+    (void)n1MixJuceInit;
+
+    ConvolverProcessor conv;
+    conv.prepareToPlay(48000.0, 512);
+    conv.setTargetIRLength(0.26f);
+    const juce::File ir = writeN1DecayIr("n1_mixhold.wav", 48000.0, 12100, 2500.0);
+    if (!ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[N1-R7] FAIL: IR write failed\n");
+        return false;
+    }
+    conv.loadImpulseResponse(ir, false);
+    const bool loaded = pollH01Peak(conv, 100);
+    ir.deleteFile();
+    if (!loaded)
+    {
+        std::fprintf(stderr, "[N1-R7] FAIL: IR load not finalized\n");
+        return false;
+    }
+
+    juce::AudioBuffer<double> ab(2, 512);
+    juce::dsp::AudioBlock<double> blk(ab);
+    auto processBlocks = [&conv, &ab, &blk](int blocks)
+    {
+        for (int i = 0; i < blocks; ++i)
+        {
+            ab.clear();
+            conv.process(blk);
+        }
+    };
+
+    conv.setSmoothingTime(0.01f); // 通常のミックス変更は短い時定数で収束させる
+    conv.setMix(0.6f);
+    processBlocks(60);
+    const double mixBefore = N1CrossfadeTestAccess::currentMix(conv);
+    if (std::abs(mixBefore - 0.6) > 0.01)
+    {
+        std::fprintf(stderr, "[N1-R7] FAIL: mix did not settle before bypass: %.6f\n", mixBefore);
+        return false;
+    }
+
+    // バイパス ON → 20 ms で 0 へ収束する。
+    conv.setBypass(true);
+    processBlocks(2);
+    const double mixBypassed = N1CrossfadeTestAccess::currentMix(conv);
+    if (mixBypassed > 1.0e-4)
+    {
+        std::fprintf(stderr, "[N1-R7] FAIL: mix not held at 0 while bypassed: %.6f\n", mixBypassed);
+        return false;
+    }
+
+    // バイパス中に自動化・プリセット相当のミックス変更を行っても、音声側は 0 のまま。
+    conv.setMix(0.25f);
+    processBlocks(2);
+    const double mixAfterChange = N1CrossfadeTestAccess::currentMix(conv);
+    const float storedAfterChange = conv.getMix();
+    if (mixAfterChange > 1.0e-4 || std::abs(storedAfterChange - 0.25f) > 1.0e-4f)
+    {
+        std::fprintf(stderr,
+                     "[N1-R7] FAIL: mix change leaked into the audio target "
+                     "(audio=%.6f stored=%.6f)\n",
+                     mixAfterChange, static_cast<double>(storedAfterChange));
+        return false;
+    }
+
+    // 連続変更（自動化の掃引）でも保存値は最後の値だけが残る。
+    conv.setMix(0.9f);
+    conv.setMix(0.4f);
+    processBlocks(1);
+    const double mixAfterSweep = N1CrossfadeTestAccess::currentMix(conv);
+    const float storedAfterSweep = conv.getMix();
+    if (mixAfterSweep > 1.0e-4 || std::abs(storedAfterSweep - 0.4f) > 1.0e-4f)
+    {
+        std::fprintf(stderr,
+                     "[N1-R7] FAIL: sweep during bypass not held "
+                     "(audio=%.6f stored=%.6f)\n",
+                     mixAfterSweep, static_cast<double>(storedAfterSweep));
+        return false;
+    }
+
+    // 解除 → 最新値 0.4 へ 20 ms で戻る。1 ブロック後は約 0.4 × 512/960。
+    conv.setBypass(false);
+    processBlocks(1);
+    const double firstRamp = N1CrossfadeTestAccess::currentMix(conv);
+    processBlocks(1);
+    const double settled = N1CrossfadeTestAccess::currentMix(conv);
+    const bool okFirst = firstRamp > 0.15 && firstRamp < 0.28;
+    const bool okSettled = std::abs(settled - 0.4) < 0.01;
+    std::printf("[N1-R7] bypass mix hold: stored=%.6f after_1_block=%.6f settled=%.6f\n",
+                static_cast<double>(storedAfterSweep), firstRamp, settled);
+
+    if (!okFirst || !okSettled)
+    {
+        std::fprintf(stderr, "[N1-R7] FAIL: release did not ramp to the latest stored mix\n");
+        return false;
+    }
+    return true;
+}
+
 int runConvolverStateRoundTripTests()
 {
     if (!checkNucRoundTrip())
@@ -99457,6 +99563,12 @@ int runConvolverStateRoundTripTests()
     if (!checkBypassCrossfadeTimeConstant())
     {
         std::fprintf(stderr, "FAIL: checkBypassCrossfadeTimeConstant\n");
+        return 1;
+    }
+    // ★ N1 / R7: バイパス中のミックス固定と、自動化・プリセットのミックス変更の相互作用
+    if (!checkBypassMixHold())
+    {
+        std::fprintf(stderr, "FAIL: checkBypassMixHold\n");
         return 1;
     }
     if (!checkTruePeakNonFiniteInput())

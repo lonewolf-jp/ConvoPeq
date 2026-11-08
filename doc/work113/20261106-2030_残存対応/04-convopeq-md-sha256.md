@@ -117,3 +117,28 @@
 4 分割。最大は 2,097,146 バイトで 2 MiB 以下。4 ファイルを順に結合すると元ファイルと一致する（`bytes_equal = True`）。
 
 生成直後のファイルは CRLF（149,108 箇所）だったため、リポジトリの `*.md text eol=lf` に合わせて LF へ正規化した。スナップショットは正規化前の控え（6,723,042 バイト）である。
+
+## 10. 4 回目の生成（R7 のテスト追加後）
+
+| 項目 | 値 |
+|---|---|
+| 生成元 `main` | `b73e653a`（R7 の検証テストとクローズ記録を含む） |
+| 生成日時 | 2026-11-08 10:08:09 |
+| 自動保存されたスナップショット | `doc/ConvoPeqMD/20261108100809/ConvoPeq.md`（CRLF、6,727,569 バイト） |
+| 鮮度検査 | `NEWER_SRC_COUNT: 0`、`STATUS: FRESH` |
+| サイズ | 6,578,349 バイト（LF、149,220 行） |
+| SHA-256 | `898b2c8e96d69c58ad0079a9363789e4c14d75440d5fec67725e5183f1b950a6` |
+| 前回（`32c9234b` 基準）との差 | +113 / −1 行。`checkBypassMixHold` の追加とヘッダの生成時刻 |
+
+再生成のきっかけは、PR #173 で `src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp` が変わったことである。`--check` は `NEWER_SRC_COUNT: 1`、`STATUS: STALE` を示し、対象は同ファイルであった。
+
+### 分割版
+
+| ファイル | サイズ（バイト） | SHA-256 |
+|---|---|---|
+| `ConvoPeq.part01.md` | 2,097,131 | `dea5a420b4b3e5cd4da228f3ff3486c32b205521468c24f1bb48f98c9d73caee` |
+| `ConvoPeq.part02.md` | 2,097,146 | `ea915f4757dcd0252afed59d962a1a74aae1e5dd1fbb72072fc96876326076ff` |
+| `ConvoPeq.part03.md` | 2,097,149 | `7371ecd0d121009660196bcd6d9ed87076ff34e08fe489465e836f708f2c87f0` |
+| `ConvoPeq.part04.md` | 286,923 | `ea0e423a9706231b0efee9f15db8753b8043c4ec5c42a6691816fa81d86a7a4c` |
+
+4 分割。最大は 2,097,149 バイトで 2 MiB 以下。4 ファイルを順に結合すると元ファイルとバイト単位で一致する。
