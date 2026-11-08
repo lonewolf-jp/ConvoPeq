@@ -583,6 +583,12 @@ bool checkD12T5ValidatorResourceContract()
         }
         else
         {
+            // 二重 seal が seal を落としていないこと（commit 側の検証を通る前提）
+            if (!raw->isSealedRecursively())
+            {
+                std::fprintf(stderr, "D12-6: double-sealed world lost its seal\n");
+                ok = false;
+            }
             convo::aligned_unique_ptr<RuntimeState> owner(raw);
         }
     }

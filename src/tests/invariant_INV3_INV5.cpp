@@ -992,10 +992,9 @@ makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
     if (shutdown.tryMakeQuiescenceProof(obs).has_value())
         return false;                         // Q6 不成立 → Proof なし
 
-    // Permit も発行できない（Proof が無いため）— 呼出側の認可経路が閉じる
-    auto staleProof = shutdown.tryMakeQuiescenceProof(obs);
-    if (staleProof.has_value())
-        return false;
+    // Q6 不成立後の新規 Proof は発行されない（上の判定で確認済み）。
+    // なお Proof は取得時点のスナップショットであり、既発行の Proof から Permit を
+    // 得る経路はここでは扱わない（Q6 は H.11.13.4 の防波堤であり、認可は identity 照合で行う）。
 
     return true;
 }

@@ -155,6 +155,13 @@ PR #201 の CodeRabbit レビューで 3 件（いずれも「未検証」扱い
 
 あわせて `PublishPipelineIntegrationTests.cpp` の限定実行入口コメント 2 箇所を「release 前提条件」から「release 順序」に直した。CodeRabbit の pre-merge check「Docstring Coverage」は C++ の本プロジェクトには該当しない運用（コメントで契約を書く）ため、対応しない。
 
+2 回目のレビュー（コミット `3e6dc060`）で 2 件の指摘があり、いずれも妥当だったため修正した。
+
+| 指摘 | 実態 | 対応 |
+|---|---|---|
+| D12-6 の二重 seal ケースが、移譲後の seal 状態を確認していない | 二重 seal が seal を落としても release が非 null なら通ってしまう | `raw->isSealedRecursively()` の確認を追加 |
+| Q6 テストの「Permit も発行できない」というコメントと重複アサーション | `tryMakeQuiescenceProof` の再呼び出しは直前の判定と同一で、Permit は Proof 無しでは取得できない | 重複ブロックを削除し、Proof は取得時点のスナップショットである旨にコメントを修正 |
+
 ## 4. テスト・ビルド
 
 ### 4.1 追加・変更したテスト
@@ -163,7 +170,7 @@ PR #201 の CodeRabbit レビューで 3 件（いずれも「未検証」扱い
 |---|---|---|
 | `testQ2ProducerJoinAuthorityGate` | join 前は Proof が出ない / join 後は出る / join 後でも観測 false なら出ない | 実 `ShutdownRuntime` の FSM 遷移（closeAdmission → joinProducers） |
 | `testQ5EpochEvidenceRealDomain` | reader active では Proof が出ない / exit + registration close + epoch 前進で成立 / evidence と observation の矛盾は拒否 | 実 `EpochDomain` に reader を登録・enter・exit し、実 `ISRRetireRouter` から activeReaders を取得 |
-| `testQ6PostStopEnqueueBlocksProof` | 0 件なら成立 / `markPostStopEnqueue()` 後は不成立 / Permit も発行できない | 実カウンタを実 API で増やす |
+| `testQ6PostStopEnqueueBlocksProof` | 0 件なら成立 / `markPostStopEnqueue()` 後は新規 Proof が出ない | 実カウンタを実 API で増やす |
 | `testReclaimProofFailureObservability` | 失敗回数が accessor と `collectResult` に反映 | 実メソッド呼び出し |
 | `checkD12T6FrozenWorldReleaseOrder` | 未 seal でも release できる（実経路の順序）/ 移譲後の seal が効く / seal 済みも移譲できる / 二重 seal は冪等 | 実 `RuntimeState`（aligned 確保、Builder と同じ経路） |
 | `LoaderCurrencyContractTests`（3 ケース） | bump で旧世代が無効化 / 並行 bump で勝者は 1 つ / 実行中タスクが新要求で stale になる | 実 `GenerationManager` |
