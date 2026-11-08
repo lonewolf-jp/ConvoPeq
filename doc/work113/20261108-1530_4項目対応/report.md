@@ -173,6 +173,13 @@ OpenChamber を再起動した後、更新したツールが実際に読み込�
 
 - graphify のグラフ: `graphify update .` で HEAD `fb10111` に一致させた。63,344 nodes / 80,669 edges / 3,318 communities になり、`graph.html` と `GRAPH_REPORT.md` も同時に更新された。更新前のグラフは `graphify-out/2026-11-08/` に退避されている。
 
+### グラフ再構築時の注意
+
+- コード抽出は 5 ファイルで構文エラー扱いの部分抽出になった（`src/DeviceSettings.cpp`、`AudioEngine.CtorDtor.cpp`、`AudioEngine.Processing.DSPCoreLifecycle.cpp`、`AudioEngine.h`、`B2DiagSinkTests.cpp`）。`AudioEngine.h` でも 1,157 シンボルは抽出できている。
+- `.github/scripts/cli-smoke-test.ps1` など 3 ファイルはシンボルが 0 だった。
+- 走査対象から外れたが実在する 8 ノードは、取りこぼしを避けるため保持された（fail-closed）。
+- community 名は 3,318 件のうち 449 件がハブ名で置き換わった。LLM による命名は `graphify label` を実行していないため、既存名のままである。
+
 ### `ctx_doctor` の D3（host config）だけが FAIL する件
 
 `ctx_doctor` は D3 だけ FAIL し、opencode では「MCP エントリが違う（wrong: MCP entry）」と報告する。同じ設定のまま CLI で実行すると PASS する。
