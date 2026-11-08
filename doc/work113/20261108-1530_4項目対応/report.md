@@ -21,7 +21,7 @@
 | MSVC | `build.bat Release app clean nopause` | 139 | exit 0 | `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`（47,606,784 B、15:33:57） |
 
 - どちらも `Building Phase 8 test targets` は実行されていない。
-- 所要は icx が約 18 分（クリーンから）、MSVC が約 4 分（クリーンから、-j 既定）。
+- 所要は icx が約 8.9 分、MSVC が約 3.2 分（どちらもクリーンから、ログの作成から最終書き込みまで）。同じ環境のフルビルド（678 ターゲット）は icx で約 39 分だった。icx はメモリ対策で `-j 2` 固定のため、削減率は目標数ほど大きくはない。
 
 ### 注意
 
@@ -36,12 +36,17 @@
 - `windows-msvc-build.yml` に `changes` ジョブを追加し、変更ファイルを判定して `code` を出力する。`release` ジョブは `needs: changes` と次の条件を付けた。
   - `if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')`
   - 判定に失敗した場合はビルドする側に倒す（安全側）。
+- 変更の取得方法は event で分ける。
+  - `pull_request`: `origin/<base>..HEAD`。checkout されるのはマージコミットなので、base の先端との 2 点リビジョンが PR の変更そのものになる。3 点リビジョンはマージベースを必要とし、浅いクローンでは答えられないことがあるため使わない。
+  - `push`: `before..sha`。マージコミットの push なら `before` は `HEAD^1` で、`fetch-depth: 2` に含まれる。含まれない場合は `git fetch` を試し、取れなければビルドする。
+  - それ以外の event と、差分の取得に失敗した場合はビルドする。
 - 文書とみなすパターン: `doc/`、`*.md`、`.memories/`、`.x64dbg-mcp/`、`.zcode/`。
+- パスの取得は `git -c core.quotepath=false diff --name-only -z` と `tr '\0' '\n'` を使う。既定の `git diff --name-only` は非 ASCII のパスを引用符で囲むため、日本語のディレクトリ名を持つこのリポジトリでは文書を文書と判定できない（第 7 節）。
 - 必須ではない `sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` には、`pull_request` の `paths-ignore` を追加した（workflow ごとスキップ）。
 
 ### 実測
 
-- 文書だけの PR を作成し、`Windows MSVC / Release` がスキップ（成功扱い）になること、他の 3 ワークフローが起動しないことを確認した。結果は本報告の追記に記す。
+- 文書だけの PR を作成して確認した。1 回目は判定を誤ってビルドが走ったため、判定の取得方法を修正した（第 7 節）。修正後の確認結果は第 8 節に記す。
 
 ## 3. ツールの更新
 
@@ -89,7 +94,7 @@
 
 | 種別 | ファイル |
 |---|---|
-| ビルド | `build.bat` |
+| ビルド | `build.bat`、`BUILD_GUIDE_WINDOWS.md`（`app` オプションの追記） |
 | CI | `.github/workflows/windows-msvc-build.yml`、`sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` |
 | 整理 | `.gitignore`、`.memories/repo/...`（追跡解除）、`.x64dbg-mcp/*`（追跡解除）、`.zcode/config.json`（削除） |
 | 報告 | 本ファイル |
