@@ -156,3 +156,36 @@
 | `CodeQL` | 起動する（変更判定を持たないワークフロー） |
 
 - 参考として、直前のマージ `bc4f50ef` はワークフロー自体を変更していたため、push でもビルドが走った。差分が文書だけなら 11 秒で終わる。
+
+## 9. 再起動後の反映確認（17:06）
+
+OpenChamber を再起動した後、更新したツールが実際に読み込まれたかを確認した。
+
+| 確認 | 結果 |
+|---|---|
+| context-mode の版 | 2.1.6（`ctx_doctor` の D1 PASS） |
+| context-mode の MCP | 9 ツールで接続。`ctx_stats` と `ctx_doctor` が応答する |
+| context-mode の索引 | 55 sources / 242 chunks（D9 PASS） |
+| context-mode の適用モード | deny-reason（D10 PASS） |
+| graphify の MCP | 10 ツールで接続。`graph_stats` が 57,380 nodes / 71,653 edges を返す |
+| graphify のスキル | 0.9.104 に更新済み（opencode / copilot。初回実行時に codex / claude も自動更新） |
+| その他の MCP | box 117、dropbox 41、obscura 37、serena 32、aidex 31、firecrawl 27、notion 24、mcp-windbg 12、brave 8、ddgs 6、headroom 3、context7 2、semble 2、cocoindex 1 |
+
+- graphify のグラフ: `graphify update .` で HEAD `fb10111` に一致させた。63,344 nodes / 80,669 edges / 3,318 communities になり、`graph.html` と `GRAPH_REPORT.md` も同時に更新された。更新前のグラフは `graphify-out/2026-11-08/` に退避されている。
+
+### `ctx_doctor` の D3（host config）だけが FAIL する件
+
+`ctx_doctor` は D3 だけ FAIL し、opencode では「MCP エントリが違う（wrong: MCP entry）」と報告する。同じ設定のまま CLI で実行すると PASS する。
+
+```
+context-mode doctor --agents opencode
+AGENT     STATUS  DETAIL
+opencode  PASS    checked: parse, list, mcp, hook-registered, hook-runs, hook-seen, skills
+```
+
+`ctx_doctor` は MCP サーバーの子プロセスとして動き、自分の環境のホームから `~/.config/opencode/opencode.json` を読む。読めなかった場合は「MCP エントリが無い」と扱う実装になっている（`opencodeListed` が例外を握りつぶし、`mcpWrong` が true を返す）。設定側には `mcp["context-mode"]` が `type: local`、`command: [node, ..., server.mjs, --agent, opencode]`、`enabled: true` で入っており、実際に 9 ツールで接続している。CLI の PASS と接続実績から、設定の不備ではなく実行環境による判定差と判断した。設定は変えず、記録だけ残す。
+
+### そのほかの注意
+
+- `D6 MCP` は UNKNOWN。`clientInfo` / `protocolVersion` を送らないクライアントのためで、接続とツール応答は取れている。
+- `opencode mcp list` はこの環境で「No MCP servers configured」を返す（既知）。設定の判定には使わず、`opencode.log` の `mcp connected` で確認する。
