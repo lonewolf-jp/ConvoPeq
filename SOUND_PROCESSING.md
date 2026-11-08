@@ -28,8 +28,8 @@ class AudioEngineProcessor final : public juce::AudioProcessor
 };
 ```
 
-- `AudioEngineProcessor::processBlock(float)` wraps the buffer in `juce::AudioSourceChannelInfo` and delegates to `AudioEngine::getNextAudioBlock()`.
 - `AudioEngineProcessor::processBlock(double)` delegates to `AudioEngine::processBlockDouble()`.
+- The shipped app defines `CONVOPEQ_STANDALONE_ONLY`, and `MainWindow` calls `audioProcessorPlayer.setDoublePrecisionProcessing(true)` (MainWindow.cpp:282), so the double overload is always the one that runs. The float `processBlock(float)` is then a stub that clears the buffer (it delegates to `AudioEngine::getNextAudioBlock()` only when that macro is absent).
 - MIDI input is ignored (only audio is processed).
 
 ### 1.3 Buffer Structure & Lifetime
@@ -390,16 +390,15 @@ For input `x` with `threshold`, `knee`, `asymmetry`:
 - `asymmetric_gain = 1 − asymmetry · (1 − sign) · 0.5 · knee_shape`
 - `return sign · mixed · asymmetric_gain`
 
-**fastTanh Approximation** (branchless, no `libm`):
+**fastTanh Approximation** (`SoftClipPadePolicy` in `src/dsp/math/FastTanhApprox.h`, no `libm`):
 ```cpp
-// Valid for |x| < CLIP_THRESHOLD (branchless)
 const double x2 = x * x;
-const double num = x * (NUM_A + x2 * (NUM_B + x2 * NUM_C));
-const double den = DEN_A + x2 * (DEN_B + x2 * (DEN_C + x2));
+const double num = x * (NumA + x2 * (NumB + x2 * NumC));
+const double den = DenA + x2 * (DenB + x2 * (DenC + x2));
 return num / den;
 ```
-- For `x ≥ CLIP_THRESHOLD`: returns ±1.0
-- For `x ≤ −CLIP_THRESHOLD`: returns ∓1.0
+- The polynomial evaluation itself is branch-free. Above `clipThreshold` (4.5) the scalar path returns ±1.0 with a branch, while the AVX2 path selects the result with a blend.
+- For `x ≥ clipThreshold`: returns ±1.0; for `x ≤ −clipThreshold`: returns ∓1.0
 
 **AVX2 Vectorized Version** (`softClipBlockAVX2`):
 - Processes 4 doubles per instruction using `_mm256_*` intrinsics.
@@ -430,7 +429,7 @@ return num / den;
 
 All four noise shaper types share these properties:
 - Double-precision processing throughout.
-- All state and buffers **pre-allocated and 64-byte aligned** for SIMD.
+- All state and buffers are pre-allocated; only the coefficient tables are explicitly 64-byte aligned (`alignas(64)`).
 - **No dynamic allocation, no locks** on the audio thread.
 - **TPDF (Triangular Probability Density Function) dither** — two uniform random samples summed.
 - **Error-feedback** topology: the quantization error is fed back and shaped by the noise shaper coefficients.
@@ -443,10 +442,10 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 
 **Architecture**:
 - **12th-order error-feedback** noise shaper (NS_ORDER = 12).
-- **TPDF dither** via **MKL VSL** (`vdRngUniform`, BRNG = `VSL_BRNG_SFMT19937`) or **Xoshiro256\*\* fallback** if MKL VSL is unavailable.
+- **TPDF dither** via **MKL VSL** (`vdRngUniform`, BRNG = `VSL_BRNG_SFMT19937`), or a **xorshift64\* fallback** (`fallbackUniform`) when MKL VSL is unavailable or the ring runs dry.
 - **RNG ring buffer**: 65,536 entries per channel, SPSC, pre-filled.
   - `rngRing[MAX_CHANNELS][65536]` (8 channels) with atomic `rngReadPos[MAX_CHANNELS]` / `rngWritePos[MAX_CHANNELS]`.
-  - Refilled by worker thread (non-RT) via `refillRandomRingNonRt()`.
+  - Refilled from the audio engine's timer callback (message thread, non-RT) via `refillRandomRingNonRt()`.
   - `fillChunkForChannel()` uses `vdRngUniform` for bulk fill.
 
 **Coefficient Table** (`kCoeffTable[6][3][12]`):
@@ -473,7 +472,7 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 
 **Error Feedback Stability**:
 - Uses error-feedback (not direct-form IIR) topology — all poles are at z=0 → **always BIBO stable**.
-- Maximum shaping error = `(scale/2) × Σ|c_k|` — worst case at 705.6 kHz / 16-bit (Σ|c_k| = 65.18, scale = 2⁻¹⁶) ≈ 9.95e-4 ≈ −60 dBFS.
+- Maximum shaping error = `(scale/2) × Σ|c_k|`, where `scale = 1/2^(bitDepth−1)` (so `scale/2 = 2⁻¹⁶` for 16-bit). Worst case at 705.6 kHz / 16-bit: 65.18 × 2⁻¹⁶ ≈ 9.95e-4 ≈ −60 dBFS.
 
 ### 6.2 FixedNoiseShaper (GUI: "4th-order")
 
@@ -482,9 +481,8 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 - **4th-order error-feedback** noise shaper (ORDER = 4).
 - Coefficients: psychoacoustically tuned, sum to 1.0 for stability (e.g., `{0.46, 0.28, 0.17, 0.09}`).
 - TPDF dither added before quantization.
-- All state 64-byte aligned, pre-allocated.
-- Diagnostics (RMS/peak error) computed in background thread.
-- **SIMD fallback**: scalar processing when AVX2 is not beneficial.
+- State is pre-allocated but not `alignas(64)`; the quantization step uses SSE2 (`_mm_round_sd`), and this shaper has no AVX2 path.
+- Diagnostics (RMS/peak error) accumulate on the audio thread from each block and are published atomically for the UI.
 
 ### 6.3 Fixed15TapNoiseShaper (GUI: "15th-order")
 
@@ -493,8 +491,8 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 - **16th-order error-feedback** noise shaper (class name retains "15Tap" for legacy consistency, but ORDER = 16).
 - Coefficients: `kFixed15TapNoiseShaperTunedCoeffs` (psychoacoustically optimized).
 - TPDF dither added before quantization.
-- All state 64-byte aligned, pre-allocated.
-- Diagnostics (RMS/peak error) computed in background thread.
+- State is pre-allocated but not `alignas(64)`.
+- Diagnostics (RMS/peak error) accumulate on the audio thread; the error FIFO has no reader in the current tree.
 
 ### 6.4 AdaptiveNoiseShaper — NoiseShaperLearner (GUI: "9th-order adaptive")
 
@@ -502,11 +500,11 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 
 **Structure** — Lattice (ladder) filter:
 - Order = 9 (`LatticeNoiseShaper::kOrder`).
-- Lattice topology: reflection coefficients stay inside the unit circle by construction → unconditionally stable.
+- Lattice topology with reflection coefficients kept inside the unit circle by a ±0.85 clamp → stable by construction.
 - Error feedback via lattice structure, not direct-form IIR.
 
 **CMA-ES Optimization**:
-- Covariance Matrix Adaptation Evolution Strategy running on a **dedicated worker thread** (not the audio thread).
+- Covariance Matrix Adaptation Evolution Strategy running off the audio thread: one dedicated coordinator (`std::jthread`) fans candidate evaluation out to up to **6** worker threads (`kMaxParallelEvaluators`).
 - Receives `AudioBlock` structs (256 samples, planar L/R) via `LockFreeRingBuffer<AudioBlock, 4096>` from the audio thread, assembled into `AudioSegment` (4096 samples + masking thresholds) for spectral evaluation.
   - `AudioBlock`: `double L[256]`, `double R[256]`, sampleRate, bitDepth, coeffBankIndex, sessionId (defined in `AudioEngine.h`).
   - `AudioSegment`: `double left[4096]`, `double right[4096]`, masking thresholds (2049 bins via MKL FFT). 64-byte aligned.
@@ -517,9 +515,10 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 - For each generation: evaluates candidate coefficient sets by simulating the noise shaper and computing weighted error (psychoacoustic masking or A-weighting).
 - Updates mean and covariance of the coefficient distribution.
 
-**Coefficient Handoff** (RCU pattern):
-- Best coefficient set published as `LearnedState` via atomic generation counter.
-- Audio thread: `RCUReader` enters epoch, reads current `LearnedState`, processes, exits epoch.
+**Coefficient Handoff** (double-buffered `CoeffSet`):
+- The learner writes `coeffSetA` / `coeffSetB` under `CoeffSetWriteLockGuard`, then publishes the active index with an atomic generation counter.
+- The audio thread reads the active `CoeffSet` through the `ProcessingState` snapshot (`consumeAtomic` with acquire); no RCU reader is involved.
+- `LearnedState` exists only for file persistence (`saveLearnedState` / `loadLearnedState`), not for the audio-thread handoff.
 - No blocking, no locks, no allocation on audio thread.
 
 **Bank Management**:
@@ -529,8 +528,8 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 - UI polls `Status`, `Progress`, `State` atomically via `NoiseShaperLearnerProgress`.
 
 **Stability Guarantee**:
-- Reflection coefficients constrained to stay inside the unit circle.
-- Lattice structure guarantees BIBO stability regardless of coefficient values.
+- Reflection coefficients are clamped to `|k| ≤ 0.85` (`clampCoeff`) and the lattice state is clamped to ±2.0 (`kLatticeStateLimit`).
+- Within those bounds the lattice is BIBO stable; stability is enforced by the clamps, not guaranteed for arbitrary coefficients.
 
 ---
 
@@ -559,18 +558,17 @@ If oversampling was enabled, `CustomInputOversampler::processDown()` is called a
   - RLB filter coefficients: `{1.0, −2.0, 1.0, −1.990047454833980, 0.990072250366210}`
 - Channel weights: stereo = `{1.0, 1.0}`.
 - **Block mean square** computed per channel, weighted and summed.
-- Published to **worker thread** via `LockFreeRingBuffer<BlockPower, 4096>`.
-- Worker thread aggregates Momentary / Short-term / Integrated loudness.
-- All filter states per-channel, pre-allocated, 64-byte aligned.
+- Block power is pushed into a `LockFreeRingBuffer<BlockPower, 4096>`. No consumer of `getRingBuffer()` exists in the current tree, so Momentary / Short-term / Integrated aggregation is not implemented yet.
+- Filter states are per-channel and pre-allocated as plain structs (no explicit 64-byte alignment; only the ring-buffer storage is `alignas(64)`).
 
 ### 8.2 TruePeakDetector — ITU-R BS.1770-4/5
 
 **Source**: `src/TruePeakDetector.h`
 
 - **4× oversampling** (2 stages of 2×) using linear-phase FIR interpolation.
-- **63 taps** per stage (Kaiser window, Bessel I0 for side-lobe suppression) — exceeds ITU-R BS.1770-3 Example reference (48 taps).
+- **63 taps in the first stage and 31 in the second** (`max(15, taps / 2)`), Kaiser-windowed with Bessel I0. The first stage alone already exceeds the ITU-R BS.1770-3 example (48 taps).
 - **AVX2 dot product** (`dotProductAvx2()`) for convolution.
-- Peak hold published atomically for UI display.
+- `peakHold` is a plain member updated by `processBlock`; there is no atomic publication and both call sites discard the return value.
 - Measurement-only — no gain applied to the audio signal.
 
 ### 8.3 Spectrum Analyzer — UI Component
@@ -634,7 +632,7 @@ Key atomics:
 |---|---|
 | UI parameter updates | `std::atomic` publish/consume |
 | Analyzer data (audio → UI) | `LockFreeAudioRingBuffer` (SPSC, 1M samples) |
-| Loudness/TruePeak data (audio → UI) | `LockFreeRingBuffer<SPSC>` |
+| Loudness block power (audio → main thread) | `LockFreeRingBuffer<BlockPower, 4096>` (producer only; no consumer yet) |
 | Adaptive noise shaper (audio → worker) | `LockFreeRingBuffer<AudioBlock, 4096>` (SPSC) |
 | Intent queue (Builder/Timer/CoordinatorLoop → ISR) | `MpscBoundedRing` (MPSC, Vyukov-style) |
 | Coefficient handoff (worker → audio) | RCU + atomic generation counter |
@@ -645,10 +643,10 @@ Key atomics:
 
 **All** buffers, states, and working memory are allocated in `prepareToPlay()`:
 
-- `alignedL`, `alignedR` — 64-byte aligned input buffers.
-- `eqBuffer`, `convBuffer`, `parallelInputBuffer`, `parallelWorkBuffer`, `parallelAccumBuffer`, `dryBypassBuffer`, `structureOldOutBuffer`, `structureNewOutBuffer`.
-- `msWorkBuffer` (M/S processing).
-- `scratchBuffer`, `filterState[4][20][2]` (EQ SVF integrators).
+- `DSPCore`: `alignedL`, `alignedR` (input), `dryBypassBufferDoubleL/R` (bypass crossfade dry path).
+- `EQProcessor`: `scratchBuffer`, `parallelInputBuffer`, `parallelWorkBuffer`, `parallelAccumBuffer`, `structureOldOutBuffer`, `structureNewOutBuffer` (Serial↔Parallel crossfade), `msWorkBuffer` (M/S processing), and `filterState[4][20][2]` (SVF integrators).
+- `CustomInputOversampler`: `workA`, `workB`, per-stage histories and coefficient arrays.
+- `PsychoacousticDither`: `rngRing[8][65536]` and the per-channel error shift registers.
 - `agcAttackCoeffTable`, `agcReleaseCoeffTable`, `agcSmoothCoeffTable`.
 - All filter coefficients, lookup tables, and coefficient caches.
 
@@ -657,7 +655,7 @@ Key atomics:
 | Mechanism | Path |
 |---|---|
 | `DeferredDeletionQueue` | Thread-safe queue of delete requests |
-| `RefCountedDeferred` | Reference-counted deferred delete |
+| `RefCountedDeferred` | Legacy ref-counted wrapper; no longer used for EQ lifetime (moved to `DSPHandleRuntime`) |
 | `DeferredFreeThread` | Dedicated background thread for actual deallocation |
 | `enqueueDeferredDeleteWithFallback` | EO-style deferred delete with EpochDomain fallback |
 | `retireEQStateDeferred` / `retireBandNodeDeferred` | Per-object EQ state retirement |
@@ -958,7 +956,7 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
 | `src/audioengine/OversamplingPolicy.h` | Max oversampling factor per sample rate |
 | `src/audioengine/DSPTransition.h` | DSP transition handling |
 | `src/audioengine/AtomicAccess.h` | Atomic primitives (`publishAtomic`, etc.) |
-| `src/core/EpochDomain.h` | RCU epoch domain (64 reader slots, 32.2 KB) |
+| `src/core/EpochDomain.h` | RCU epoch domain (64 reader slots, 35.6 KB) |
 | `src/core/RCUReader.h` | RAII RCU reader |
 | `src/core/SnapshotCoordinator.{h,cpp}` | Snapshot coordination |
 | `src/core/SnapshotFactory.{h,cpp}` | Snapshot creation |

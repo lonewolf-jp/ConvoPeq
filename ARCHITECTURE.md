@@ -74,7 +74,7 @@ src/
 | `ConvolverBuilder.h` | 3.1 KB | ISR Plan Builder (Non-RT Authority). Sole creator/destroyer of FFT Plans; injects Plan into FFTExecutionContext. |
 | `FFTBackend.{h,cpp}` | 12.4 KB | FFT abstraction layer (C++20 Concept). `ProductionFft` (Intel IPP) + `TestFft` injectable backend. Plan lifecycle owned by Builder; RT calls are const & noexcept. |
 | `FFTExecutionContext.{h,cpp}` | 5.8 KB | Receives const Plan& from Builder; must not own or extend Plan lifetime (EC-1/EC-2/PLAN-LT). |
-| `MKLNonUniformConvolver.{h,cpp}` | 124.1 KB | Intel MKL-backed non-uniform partitioned convolution backend. Legacy monolithic (kept for backward compat). |
+| `MKLNonUniformConvolver.{h,cpp}` | 124.1 KB | Intel MKL-backed non-uniform partitioned convolution backend; the active NUC engine. |
 | `CustomInputOversampler.{h,cpp}` | 37.7 KB | AVX2 multi-stage FIR/IIR oversampler (2x/4x/8x). IIRLike and LinearPhase presets. Corruption auto-detection and fallback. |
 | `OutputFilter.{h,cpp}` | 28.0 KB | Biquad-based output conditioning (HPF, LPF, HC, LC). All coefficients pre-computed at prepare time. |
 | `NoiseShaperLearner.{h,cpp}` | 79.8 KB | CMA-ES-driven adaptive noise shaper learning (9th-order IIR). |
@@ -122,7 +122,7 @@ src/
 
 ### 3.2 `src/audioengine/` — ISR Runtime Governance (128 files, ~2.07 MB)
 
-The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,176 lines (315.6 KB).
+The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,777 lines (315.6 KB).
 
 **AudioEngine Split Translation Units** (PImpl-style responsibility split):
 
@@ -259,7 +259,7 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,176 lines (315.6
 | `IRLoadAdmission.h` | 8.5 KB | Admission rules for starting an IR load/rebuild. |
 | `IRTrimTestHooks.h` | 0.5 KB | Test hooks for IR trim/level checks. |
 
-> Legacy monolithic `MKLNonUniformConvolver.cpp` (~94 KB) is still compiled unconditionally for backward compatibility; only its diagnostic blocks are `#ifdef`-guarded.
+> `MKLNonUniformConvolver.cpp` (~94.4 KB) is the active NUC engine and is compiled unconditionally; only its diagnostic blocks are `#ifdef`-guarded.
 
 ### 3.4 `src/eqprocessor/` — 20-Band EQ Split + Analysis Subsystem (17 files, ~213 KB)
 
@@ -396,6 +396,7 @@ All tests registered via `add_test()` in CMakeLists.txt. Many are JUCE-independe
 + External CI: `HeadlessAudioPathVerification` (PowerShell, gated by `$CONVO_CI_BUILD`).
 
 > CMake registers **54 `add_test()`** entries (53 executable-based tests plus the PowerShell `HeadlessAudioPathVerification`, which is not registered when `CONVO_CI_BUILD` is defined).
+
 ### 3.7 `src/tools/` — Build Gate Scripts (1 file)
 
 | File | Role |
@@ -426,7 +427,7 @@ Audio Input
   → Input conditioning (DC removal, input headroom gain)
   → Oversampling (optional, 2x/4x/8x)
   → [EQ <-> Convolver] (order selectable)
-  → Output Filter (HC/LC/HPF/LPF, mode-dependent)
+  → Output Filter (HC/LC after the convolver, HPF/LPF after the EQ)
   → Output Makeup Gain
   → Soft Clipping (optional, musical soft clip)
   → Downsampling (if oversampled)
@@ -438,29 +439,29 @@ Audio Input
 ### 4.2 Callback-Level Detailed Flow
 
 ```
-AudioDeviceCallback → AudioProcessorPlayer → AudioEngineProcessor.getNextAudioBlock()
-  → AudioEngine::getNextAudioBlock()                                                                   [Audio Thread]
+AudioDeviceCallback → AudioProcessorPlayer → AudioEngineProcessor::processBlock(double)
+  → AudioEngine::processBlockDouble()                                                                  [Audio Thread]
     ├─ AudioCallbackRuntimeScope: lifecycle/firewall/allocator scope
     ├─ RuntimeWorld read (RCU): readAudioRuntimeView()
     │   ├─ audioThreadRcuReader.enter()
-    │   ├─ RuntimePublicationCoordinator::consumeWorldHandle(runtimeStore) → RuntimeState*
+    │   ├─ RuntimeWorldAuthority::consumeWorldHandle(readToken) → const RuntimeState*
     │   ├─ resolveActiveRuntimeDSPFromRuntimeWorldOnly() → DSPCore*
     │   └─ resolveFadingRuntimeDSPFromRuntimeWorldOnly() → DSPCore*
     ├─ EngineParameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld)
     ├─ Crossfade delay gate (if pending), arm crossfade
-    ├─ DSPCore::process(bufferToFill, ...)                                                            [DSP Flow]
-    │   ├─ processInput: headroom gain, DC remove, input level metering
+    ├─ DSPCore::processDouble(buffer, ...)                                                            [DSP Flow]
+    │   ├─ processInput: input level metering (+ analyzer tap) → headroom gain → input DC block
     │   ├─ [if OS] processUp: multi-stage AVX2 FIR/IIR upsample
     │   │   └─ UltraHighRateDCBlocker.oversampledL/R
     │   ├─ route(order): EQThenConvolver → eqRt.process → convolverRt.process
     │   │                ConvolverThenEQ → convolverRt.process → eqRt.process
-    │   ├─ outputFilter.process(HCMode/LCMode)
+    │   ├─ outputFilter.process(convolver stage: HC/LC) · outputFilter.process(EQ stage: HPF/LPF)
     │   ├─ scaleBlockFallback(outputMakeupGain) [AVX2]
     │   ├─ [if softClip] softClipBlockAVX2(fastTanh musical soft clip)
     │   ├─ [if OS] processDown: multi-stage AVX2 FIR downsampling
     │   ├─ pushToFifo(analyzerFifo) [if analyzer output tap]
     │   ├─ outputLevelLinear ← measureLevel(publishAtomic)
-    │   └─ processOutput: DC remove, fixed latency delay, fade in ramp
+    │   └─ processOutput: output DC block → dither/noise shaping at −1 dBFS headroom → metering → limiter/clamp → fixed latency delay
     ├─ [if canCrossfade] runLatencyAlignedCrossfadeMixLoop (new/old equal-power blend)
     ├─ finish crossfade / cleanup
     └─ Diagnostic telemetry (CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS)
@@ -679,7 +680,7 @@ RT Path (Audio Thread):
 - 20-band parametric EQ in the real-time path using TPT SVF filters.
 - RCU parameter updates via `uintptr_t`-backed atomic handles + `EpochDomain`.
 - AGC (automatic gain control) with pre-computed attack/release/smooth coefficient tables.
-- Nonlinear saturation via `fastTanh` approximation (AVX2).
+- Nonlinear saturation via `fastTanh` approximation (`fastTanhV128Output`, 128-bit SSE2; AVX2/FMA is used for the gain ramps and stereo packing).
 - `EQCoeffCache` for cross-snapshot coefficient sharing. Its lifetime is owned by `DSPHandleRuntime` (the earlier `RefCountedDeferred` wrapper was replaced).
 - Serial/Parallel filter structure with crossfade-able transition.
 - Analysis subsystem: `PeakEstimator`, `UpperBoundEstimator`, `EQResponseSampler`, `AnalysisMerge`, `BandHelper`, `EQAnalysisMath`.
@@ -687,13 +688,13 @@ RT Path (Audio Thread):
 ### 6.3 ConvolverProcessor
 
 - IR-based convolution via Intel MKL Non-Uniform Partitioned Convolution (NUC).
-- Asynchronous IR loading/rebuild on Worker Thread. `BuildSnapshot` + `StructuralHash` for rebuild decision.
+- Asynchronous IR loading/rebuild on the dedicated `LoaderThread` (`juce::Thread`, thread names "IRLoader" and "IRRebuilder"). `BuildSnapshot` + `StructuralHash` for the rebuild decision.
 - Configurable rebuild debounce (20 ms default, 10–3000 ms range).
 - Crossfade-safe transitions (old/new DSP fade with latency compensation).
-- Phase modes: As-Is / Mixed / Minimum. Mixed-phase uses `AllpassDesigner` (CMA-ES).
+- Phase modes: As-Is / Mixed / Minimum. Mixed is **minimum phase at low frequencies and linear phase at high frequencies** (`mixedTransitionStartHz` 200 Hz → `mixedTransitionEndHz` 1 kHz by default), designed with `AllpassDesigner` (CMA-ES / AdaGrad).
 - Tail modes: AirAbsorption / LayerTailContouring / Bypass.
 - Progressive FFT upgrade (background thread).
-- Split across 8 TUs (`src/convolver/`) for compile-time efficiency; legacy monolithic `MKLNonUniformConvolver.cpp` retained for backward compat.
+- Split across 8 TUs (`src/convolver/`) for compile-time efficiency. `MKLNonUniformConvolver.cpp` is the active NUC engine (`nucConvolvers[2]`), not a legacy fallback.
 - FFT abstraction: `ConvolverBuilder` (Non-RT Plan factory) → `FFTBackend` (IPP ProductionFft / TestFft) → `FFTExecutionContext` (const Plan& consumer).
 
 ### 6.4 NoiseShaperLearner
@@ -720,13 +721,16 @@ RT Path (Audio Thread):
 
 | Thread | Responsibility | Constraints |
 |---|---|---|
-| **Message Thread** (GUI) | UI rendering, event processing, user actions, device settings, dispatches async requests | Heavy work delegated to Worker thread |
+| **Message Thread** (GUI) | UI rendering, event processing, user actions, device settings, dispatches async requests | Heavy work delegated to the background threads |
 | **Audio Thread** (RT Callback) | Block-based DSP processing only; always references pre-constructed state | **No** allocations, libm, locks, blocking, exceptions, I/O |
-| **Timer Thread** (100ms) | Telemetry drain, rebuild dispatch, HealthMonitor polling, spectro-analysis trigger, Evidence export |
-| **Worker / Rebuild Thread** | IR parsing/loading/resampling/phase conversion, DSPCore construction, snapshot assembly |
-| **DeferredFree Thread** | Asynchronous object reclamation after RCU grace period |
-| **NoiseShaperLearner Thread** | CMA-ES optimization using recent AudioBlocks |
-| **RetryScheduler Thread** | Collapsed retry dispatch for Transient/Infrastructure build failures |
+| **Timer Thread** (100 ms) | Telemetry drain, rebuild dispatch, HealthMonitor polling, evidence export | No analyzer work: `SpectrumAnalyzerComponent` runs its own timer (60 / 15 / 5 Hz by state) |
+| **IR Loader Thread** (`juce::Thread` "IRLoader" / "IRRebuilder") | IR file read, resampling, phase conversion, mixed-phase design | Never touches the audio thread; hands off via RCU |
+| **Rebuild Thread** (`std::thread`) | DSPCore construction and publication submission | Debounced; publishes through the ISR pipeline |
+| **Worker Thread** (`convo::WorkerThread`) | Debounce loop for rebuild commands | Snapshot creation was removed (#3.2.8); rebuilds are submitted directly |
+| **CoordinatorLoop** (`juce::Thread` "ConvoPeq.CoordinatorLoop", 1 ms) | Intent processing, overflow drain, deferred resubmission | Non-RT; uses `MpscBoundedRing` |
+| **DeferredFree Thread** | Reclaims `ConvolverState` objects after the audio thread stops using them | Only convolver state; DSP objects use the retire router |
+| **NoiseShaperLearner Thread** | CMA-ES optimization using recent AudioBlocks | Worker priority; RCU coefficient handoff |
+| **RetryScheduler Thread** | Collapsed retry dispatch for Transient/Infrastructure build failures | Non-RT only |
 
 ### Thread-Safe Communication
 
@@ -738,7 +742,7 @@ RT Path (Audio Thread):
 | Lock-Free MPSC Ring | `MpscBoundedRing` | Intent queue (Builder/Rebuild + Timer + CoordinatorLoop producers) |
 | Lock-Free Audio FIFO | `LockFreeAudioRingBuffer` | Spectrum analyzer (FIFO_SIZE = 1M samples) |
 | Owner Transfer | `OwnerChannel` | Sole ownership of RuntimeState across RT boundary |
-| Deferred Deletion | `DeferredDeletionQueue` + `DeferredFreeThread` | Old DSPCore, EQState, BandNode after grace period |
+| Deferred Deletion | `ISRRetireRouter` → `DeferredDeletionQueue` (and `DeferredFreeThread` for convolver state) | Old DSPCore / EQState / BandNode go through the router; `DeferredFreeThread` reclaims only `ConvolverState` |
 | Quarantine Fallback | `RetireQuarantineStore` | Objects that cannot be enqueued (queue full) |
 
 ---
@@ -765,13 +769,13 @@ ConvoPeq follows a staged update model:
      - Check generation monotonicity
      - Check IR-finalized, retire pressure, and fading state
    - If accepted: `RuntimeBuilder.buildRuntimePublishWorld()` → `RuntimePublishExecutor.executePublish()` → `RuntimeWorldAuthority::commit()`.
-   - `CrossfadeAuthority` determines crossfade type (smooth/hard reset).
+   - `RuntimePublicationOrchestrator` selects the `TransitionPolicy` (HardReset by default, SmoothOnly when a fade is possible); `CrossfadeAuthority` only decides *whether* a crossfade is needed and for how long.
    - `RuntimePublishExecutor` commits via `RuntimeWorldAuthority` on the ISR path.
 
 4. **Apply/swap phase (real-time-safe boundary)**
    - `DSPTransition` atomically swaps active/fading DSPCore pointers.
    - Audio Thread observes new world via RCU read path on next callback.
-   - Crossfade executes over fade duration (typically 30–80 ms, mode-dependent).
+   - Crossfade executes over the fade duration selected by `CrossfadeAuthority` (10–80 ms depending on the trigger).
 
 ### Persistence Paths
 
@@ -795,6 +799,9 @@ ConvoPeq follows a staged update model:
 | NUC filter change | `m_nucFilterFadeTimeSec` (30 ms) | atomic |
 | Tail mode change | `m_tailFadeTimeSec` (30 ms) | atomic |
 | Oversampling change | `m_osFadeTimeSec` (30 ms) | atomic |
+| Structural hash change (default) | `m_irFadeTimeSec` (80 ms) | atomic |
+
+The effective `fadeTimeSec` is the **maximum** of the constants that apply to the transition, not the single constant of one trigger. When the IR presence itself changes (`oldHasIR != newHasIR`), the IR-time constant is clamped to **1–10 ms** so the swap stays short.
 
 ### Crossfade Execution
 
@@ -805,11 +812,13 @@ AudioBlock.cpp: getNextAudioBlock()
   └─ if (canCrossfade):
       ├─ new DSP → current process path
       ├─ old DSP → dspCrossfadeFloatBuffer (fadingState, no analyzer)
-      └─ runLatencyAlignedCrossfadeMixLoop(new, old, latencyDelay, gNew, gOld)
-          └─ equal-power sine mixing: out[i] = newL[i]*sin(gNew*pi/2) + dryScaledL[i]*sin((1-gNew)*pi/2)
+      └─ runLatencyAlignedCrossfadeMixLoop(dstL, dstR, oldL, oldR, numSamples,
+                                            delayOld, delayNew, runtimeResetPending, mixFn)
+          └─ mixFn reads gNew per sample and derives gOld = 1 - gNew:
+             out[i] = newL[i]*sin(gNew*pi/2) + dryScaledL[i]*sin((1-gNew)*pi/2)
 ```
 
-Crossfade runtime state: `CrossfadeRuntime` tracks `LinearRamp` gain (exponential ramp, 30 ms default), dry scale gain, crossfade arm status, event drop counter. `CrossfadeAuthority` determines whether crossfade is needed from `dspProjection` fields (irLoaded, structuralHash, oversamplingFactor) — no DSPCore dependency.
+Crossfade runtime state: `CrossfadeRuntime` tracks a `convo::LinearRamp` gain (linear ramp, 30 ms default), the dry scale gain, crossfade arm status, and an event drop counter. `CrossfadeAuthority` determines whether crossfade is needed from `dspProjection` fields (irLoaded, structuralHash, oversamplingFactor) — no DSPCore dependency.
 
 ### Bypass Transition (Convolver)
 
@@ -914,7 +923,7 @@ The following directories are external dependencies and must be treated as **str
 - All Atomic operations must use the `AtomicAccess.h` API (`publishAtomic` / `consumeAtomic` / `fetchAddAtomic` / `compareExchangeAtomic`). Direct `std::atomic::load/store` must be reviewed.
 - Preserve the current read-only boundary for external dependencies.
 - Runtime diagnostics (`CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS`) should remain OFF in Release builds; diagnostics use `LockFreeRingBuffer<DiagEvent>` to avoid Logger allocation on the Audio Thread.
-- CI builds set `CONVO_CI_BUILD` environment variable to enable `NUC_DEBUG_GUARDS` and `HeadlessAudioPathVerification`.
+- CI builds define `CONVO_CI_BUILD`, which adds the `NUC_DEBUG_GUARDS` compile definition and forces clang-tidy ON; the same variable **skips** the `HeadlessAudioPathVerification` test because CI runners have no audio device.
 - Intent queue producers are multi-threaded; use `MpscBoundedRing` (not SPSC `LockFreeRingBuffer`) for any queue with >1 producer.
 - Sequence / epoch comparisons must use `SequenceArithmetic.h` helpers, never raw `<` on `uint64_t` counters.
 

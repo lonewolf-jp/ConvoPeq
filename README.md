@@ -24,7 +24,7 @@ ConvoPeq v0.6.11 is built with JUCE 8.0.12 and is designed for low-latency, real
 | SIMD / Math | **AVX2** + **Intel oneMKL** (sequential, static link) + **Intel IPP** |
 | Build System | **CMake 3.22+** + **Ninja Multi-Config** |
 | Language | **C++20** |
-| Source | **385 files** (~6.11 MB) across `src/` + 53 test executables (97 test source files)
+| Source | **385 files** (~6.11 MB) across `src/` + 53 test executables (97 test source files) |
 
 ### Compiler / CPU support matrix (work92 C-8)
 
@@ -142,10 +142,10 @@ ConvoPeq/
 - **IR convolution** (`ConvolverProcessor`, split TU: 12 files in `src/convolver/`)
   - Intel MKL **Non-Uniform Partitioned Convolution (NUC)** engine
   - FFT abstraction: `ConvolverBuilder` → `FFTBackend` (IPP ProductionFft / TestFft) → `FFTExecutionContext`
-  - Phase modes: **As-Is / Minimum / Mixed** with tunable transition (`f1`, `f2`, `tau`)
+  - Phase modes: **As-Is / Minimum / Mixed** with a tunable transition band (`mixedTransitionStartHz`, default 200 Hz, to `mixedTransitionEndHz`, default 1 kHz) and an all-pass `tau`
   - IR loading on dedicated background `LoaderThread` — no audio thread blocking
   - RCU (Read-Copy-Update) pattern for glitch-free IR handoff
-  - Legacy `MKLNonUniformConvolver.{h,cpp}` retained for backward compatibility
+  - `MKLNonUniformConvolver.{h,cpp}` is the active NUC engine (`nucConvolvers[2]` in `ConvolverProcessor`)
 - **Runtime-selectable processing order**: EQ→Convolver or Convolver→EQ
 - **Input oversampling**: 2×/4×/8× via `CustomInputOversampler` (IIRLike / LinearPhase presets)
 - **Output conditioning**: `OutputFilter` applied per active stage — HC/LC on the convolver output and HPF/LPF on the EQ output, independent of processing order — then makeup gain followed by musical soft clipping with `fastTanh` (AVX2 vectorized)
@@ -235,7 +235,7 @@ Downsampling (if OS) → Output DC Block → Dither/Noise Shaping → Output
 
 Convolution algorithm: **Intel MKL NUC (Non-Uniform Partitioned Convolution)** with non-uniform block partitioning (shorter blocks near IR start for low latency, longer blocks toward the tail for efficiency). FFT operations use the `ConvolverBuilder` → `FFTBackend` (Intel IPP) → `FFTExecutionContext` abstraction layer.
 
-Phase modes: **As-Is / Minimum / Mixed**. Mixed mode blends linear-phase (low frequencies) with minimum-phase (high frequencies) per `mixedTransitionStartHz` / `mixedTransitionEndHz` / `tau`.
+Phase modes: **As-Is / Minimum / Mixed**. Mixed mode is **minimum phase at low frequencies and linear phase at high frequencies**: below `mixedTransitionStartHz` (default 200 Hz) the minimum-phase component has full weight, above `mixedTransitionEndHz` (default 1 kHz) it has none, with an all-pass `tau` shaping the transition.
 
 ### 5) EQ Strategy
 
@@ -254,7 +254,7 @@ Additional quality-oriented stages applied around the core EQ/convolution chain:
 
 - **Input oversampling** (`CustomInputOversampler`): 2×/4×/8× via multi-stage Kaiser-windowed FIR interpolation, AVX2/FMA SIMD, denormal flush. DC blocker applied after upsampling.
 - **Output filtering** (`OutputFilter`): applied per active stage, not by routing position. HC/LC runs exactly once on the convolver output whenever the convolver is active (HC: 4th-order Butterworth, 4th-order Linkwitz-Riley, or 2nd-order Q=0.5 at 19 kHz up to 48 kHz and 22 kHz above; LC: 2nd-order HPF at 18 Hz, or Q=0.5 at 15 Hz). HPF/LPF runs after the EQ whenever the EQ is active (HPF 20 Hz 2nd-order; LPF two cascaded 2nd-order sections at 19 kHz up to 48 kHz and 24 kHz above). All coefficients precomputed on the message thread; the audio thread performs only biquad SOS evaluation (no `libm`).
-- **Soft clipping** (`softClipBlockAVX2`): piecewise musical clip (linear → knee `t²(3−2t)` → `fastTanh` saturation), AVX2 vectorized (4 doubles/IP), `prevSampleInOut` scalar feedback across blocks. Anti-inter-sample-peak protection via smooth knee transition.
+- **Soft clipping** (`softClipBlockAVX2`): piecewise musical clip (linear → knee `t²(3−2t)` → `fastTanh` saturation), AVX2 vectorized (4 doubles/IP), with a local 2× halfband stage when input oversampling is 1×. Anti-inter-sample-peak protection via the smooth knee transition.
 - **Dither/noise shaping**: 4 types (Psychoacoustic 12th-order / Fixed 4th-order / Fixed 15th-order / Adaptive 9th-order with CMA-ES). All TPDF dither, 64-byte aligned, lock-free audio thread path. RNG ring buffer pre-filled, worker thread refills.
 
 ### 7) Analyzer Path
@@ -280,8 +280,8 @@ Latency display uses a unified breakdown model from `AudioEngine::getCurrentLate
 
 Two persistence paths:
 
-- **Auto-save** (`device_settings.xml`): device state + compact runtime settings (dither bit depth, oversampling factor/type, input headroom, output makeup).
-- **Manual preset XML** (Save/Load Preset): full `AudioEngine` + `EQ` + `Convolver` state including phase/mixed parameters, Auto/Manual IR-length state.
+- **Auto-save** (`device_settings.xml`): device state plus compact runtime settings (dither bit depth and shaper type, oversampling factor/type, input headroom, output makeup, auto gain staging, thread priority mode, learned coefficient banks).
+- **Manual preset XML** (Save/Load Preset): engine properties (processing order, gains, saturation, bypasses, filter modes, adaptive banks) plus the `EQ` and `Convolver` child states, including phase mode, `mixedF1Hz`/`mixedF2Hz`, IR length and its auto/manual override. The oversampling factor itself stays a device setting.
 
 ### 10) Real-Time Safety Rules
 
@@ -332,7 +332,9 @@ build.bat Release icx          # Intel icx Release (icx: Release only supported 
 # build.bat Debug icx          # NOT SUPPORTED — icx Debug cannot compile (E-G3-1); use MSVC Debug
 build.bat Release clean        # Clean + build
 build.bat Release pgo-gen      # MSVC PGO instrumentation
-build.bat Release pgo-use     # MSVC PGO optimization
+build.bat Release pgo-use      # MSVC PGO optimization
+build.bat Release app          # ConvoPeq.exe only (test targets skipped)
+build.bat Release icx app      # same for icx
 ```
 
 What `build.bat` does:
