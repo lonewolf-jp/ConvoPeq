@@ -47,6 +47,7 @@
 | `HKCU\Environment\OPENCHAMBER_ELECTRON_LOAD_SERVER_UI` | `1` | 値ごと削除 |
 
 - `WM_SETTINGCHANGE`（`Environment`）をブロードキャストし、Explorer の環境ブロックを更新した。
+- Explorer 経由で `cmd` を起動して確認したところ、`%OPENCHAMBER_ELECTRON_LOAD_SERVER_UI%` は空（`[]`）だった。次回のショートカット起動には環境変数が渡らない。
 - 稼働中のプロセスは起動時の環境を保持するため、この起動では従来どおり 63621 の UI が使われる。次回起動から同梱 UI になる。
 
 ## 5. 残る確認と復元手順
