@@ -111,6 +111,38 @@ private:
 //==============================================================================
 // INV-3-1: retire → epoch 安全 → reclaim の順序
 //==============================================================================
+// ★ 2026-11-08: Q2/Q5/Q6 の是正に伴う共通 observation ビルダー。
+//   Q6 は observation 非依存（ShutdownRuntime 内部カウンタ）になったため設定しない。
+//   Q5 は EpochQuiescenceEvidence（観測束）で渡す。
+//==============================================================================
+[[nodiscard]] convo::isr::ShutdownRuntime::QuiescenceObservation
+makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
+                         std::uint32_t activeReaders = 0,
+                         bool registrationClosed = true,
+                         bool evidenceCaptured = true,
+                         std::uint64_t evidenceEpochGen = 0,
+                         std::uint64_t evidenceRegGen = 0)
+{
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
+    obs.admissionReservationsZero = true;
+    obs.allProducersJoined = true;                 // producer 観測（join 済みなら true）
+    obs.readerRegistrationClosed = registrationClosed;
+    obs.activeReadersZero = (activeReaders == 0);
+    obs.noResurrection = true;
+    obs.epochGeneration = epochGen;
+    obs.readerRegistrationGeneration = regGen;
+    obs.epochEvidence.captured = evidenceCaptured;
+    obs.epochEvidence.epoch = epochGen;
+    // 0 は「observation と同じ generation」を意味する省略記法
+    obs.epochEvidence.epochGeneration = (evidenceEpochGen == 0) ? epochGen : evidenceEpochGen;
+    obs.epochEvidence.readerRegistrationGeneration =
+        (evidenceRegGen == 0) ? regGen : evidenceRegGen;
+    obs.epochEvidence.readerRegistrationClosed = registrationClosed;
+    obs.epochEvidence.activeReaders = activeReaders;
+    return obs;
+}
+
+//==============================================================================
 [[nodiscard]] bool testInv3_1RetireEpochSafeReclaim()
 {
     DSPHandleRuntime handleRuntime;
@@ -224,17 +256,9 @@ private:
 
     // --- Precondition 不成立: readersZero 不成立（active reader 残存）→ Proof 生成失敗 ---
     auto makeObservation = [&](bool regClosed, std::uint32_t readers) {
-        convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-        obs.admissionReservationsZero = true;
-        obs.allProducersJoined = true;
-        obs.readerRegistrationClosed = regClosed;   // Q3
-        obs.activeReadersZero = (readers == 0);     // Q4
-        obs.epochSettled = true;
-        obs.postStopEnqueueZero = true;
-        obs.noResurrection = true;
-        obs.epochGeneration = 7;
-        obs.readerRegistrationGeneration = 3;
-        return obs;
+        // ★ 2026-11-08: Q5 は EpochQuiescenceEvidence（観測束）、Q6 は authority 内部カウンタ。
+        return makeQuiescentObservation(/*epochGen=*/7, /*regGen=*/3, readers, regClosed,
+                                        /*evidenceCaptured=*/true);
     };
 
     // Q3 不成立（registration 未 close）→ Proof 生成失敗（precondition 前評価）
@@ -501,7 +525,8 @@ private:
 
 //==============================================================================
 // ★ dash2 §2.2 (Phase A2 — G10/G13/G21/G22): Proof/Permit acceptance テスト
-//   G10: postStopEnqueueZero が Q 条件の一部（observation 経由）
+//   G10: postStopEnqueueZero が Q 条件の一部（2026-11-08 以降は ShutdownRuntime 内部
+//        カウンタで判定 — observation 非依存）
 //   G13: epochSettled が Q 条件の一部
 //   G21: ReclaimPermit::consume() が single-use（2 回目は false）
 //   G22: ShutdownRuntime のみ Proof/Permit を生成可能（外部からは生成不能 = コンパイル不能）
@@ -521,17 +546,8 @@ private:
     if (shutdown.admissionState() != convo::isr::AdmissionState::Closed)
         return false;
 
-    // Q 条件を全成立させる観測値
-    ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;
-    obs.allProducersJoined = true;
-    obs.readerRegistrationClosed = true;
-    obs.activeReadersZero = true;
-    obs.epochSettled = true;            // G13
-    obs.postStopEnqueueZero = true;     // G10
-    obs.noResurrection = true;
-    obs.epochGeneration = 7;            // G19
-    obs.readerRegistrationGeneration = 3;  // G20
+    // Q 条件を全成立させる観測値（Q5 は EpochQuiescenceEvidence、Q6 は authority 内部カウンタ）
+    auto obs = makeQuiescentObservation(/*epochGen=*/7, /*regGen=*/3);
 
     // 全 Q 成立 → valid Proof
     auto proof = shutdown.tryMakeQuiescenceProof(obs);
@@ -547,14 +563,25 @@ private:
         return false;                   // G10: Q6 フラグ
 
     // Q 条件が 1 つでも欠けると nullopt（Q0〜Q7 全条件必須 — 簡易生成禁止）
-    obs.epochSettled = false;           // G13 違反
-    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
-        return false;
-    obs.epochSettled = true;
-    obs.postStopEnqueueZero = false;    // G10 違反
-    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
-        return false;
-    obs.postStopEnqueueZero = true;
+    // ★ 2026-11-08: Q5 は evidence の内容で不成立を作る（bool を false にするだけの
+    //   形式的テストを廃止）。Q6 は authority 内部カウンタなので専用テストで検証する。
+    {
+        auto bad = makeQuiescentObservation(7, 3);
+        bad.epochEvidence.captured = false;          // 観測未実施 → Q5 不成立
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
+    {
+        auto bad = makeQuiescentObservation(7, 3, /*activeReaders=*/1);  // reader 残存 → Q5 不成立
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
+    {
+        auto bad = makeQuiescentObservation(7, 3);
+        bad.epochEvidence.epochGeneration = 99;      // identity との不一致 → Q5 不成立
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
 
     // Proof → Permit 生成（G17〜G20 identity 束縛）
     auto proof2 = shutdown.tryMakeQuiescenceProof(obs);
@@ -604,16 +631,8 @@ private:
     if (shutdown.currentShutdownGeneration() != genN)
         return false;
 
-    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;
-    obs.allProducersJoined = true;
-    obs.readerRegistrationClosed = true;
-    obs.activeReadersZero = true;
-    obs.epochSettled = true;
-    obs.postStopEnqueueZero = true;
-    obs.noResurrection = true;
-    obs.epochGeneration = 10;
-    obs.readerRegistrationGeneration = 4;
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs =
+        makeQuiescentObservation(/*epochGen=*/10, /*regGen=*/4);
 
     // ── T10d: ReclaimAuthority は constructor 固定注入（setReclaimAuthority 廃止 = compile-time）──
     //   Authority Singularization 完了: wiring の public mutator は存在しない（setReclaimAuthority 削除）。
@@ -803,16 +822,8 @@ private:
     shutdown.closeAdmission();
     shutdown.joinProducers();
 
-    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;
-    obs.allProducersJoined = true;
-    obs.readerRegistrationClosed = true;
-    obs.activeReadersZero = true;
-    obs.epochSettled = true;
-    obs.postStopEnqueueZero = true;
-    obs.noResurrection = true;
-    obs.epochGeneration = 5;
-    obs.readerRegistrationGeneration = 2;
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs =
+        makeQuiescentObservation(/*epochGen=*/5, /*regGen=*/2);
 
     auto proof = shutdown.tryMakeQuiescenceProof(obs);
     if (!proof.has_value() || !proof->valid())
@@ -841,6 +852,171 @@ private:
         return false;
 
     return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: Q2（AllProducersJoined）は観測と authority の AND。
+//   - joinProducers() 前: authority 側 evidence が無いため、観測が true でも Proof は出ない
+//   - joinProducers() 後: authority evidence が立ち、観測 true で成立
+//   - join 後でも観測 false（producer が残っているという申告）なら不成立
+//==============================================================================
+[[nodiscard]] bool testQ2ProducerJoinAuthorityGate()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+
+    auto obs = makeQuiescentObservation(/*epochGen=*/1, /*regGen=*/1);
+
+    // (1) close のみ（join 未実施）: Q1=Closing / Q2 evidence なし → Proof 不成立
+    shutdown.closeAdmission();
+    if (shutdown.producersJoined())
+        return false;                         // まだ join していない
+    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
+        return false;
+
+    // (2) join 成功: authority evidence が立つ
+    if (!shutdown.joinProducers())
+        return false;
+    if (!shutdown.producersJoined())
+        return false;
+    auto proof = shutdown.tryMakeQuiescenceProof(obs);
+    if (!proof.has_value() || !proof->valid())
+        return false;
+    if (!proof->allProducersJoined())
+        return false;
+
+    // (3) join 済みでも caller が「producer 残存」と観測したら Q2 不成立（AND 条件）
+    auto noJoinObs = makeQuiescentObservation(/*epochGen=*/1, /*regGen=*/1);
+    noJoinObs.allProducersJoined = false;
+    if (shutdown.tryMakeQuiescenceProof(noJoinObs).has_value())
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: Q5（EpochSettled）は実 EpochDomain / ISRRetireRouter の観測で決まる。
+//   reader を実登録して active にした状態では Proof が出ず、exit + registration close 後に
+//   同じ観測手順で Proof が成立することを確認する。
+//==============================================================================
+[[nodiscard]] bool testQ5EpochEvidenceRealDomain()
+{
+    convo::EpochDomain domain;
+    ISRRetireRouter router(domain);
+
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+    shutdown.closeAdmission();
+    shutdown.joinProducers();
+
+    // reader を実登録して active にする（activeReaderCount == 1）
+    const int readerIndex = domain.registerReaderThread("Q5Test");
+    if (readerIndex < 0)
+        return false;
+    domain.enterReader(readerIndex);
+    if (router.activeReaderCount() != 1)
+        return false;
+
+    auto capture = [&](std::uint32_t observedReaders) {
+        auto obs = makeQuiescentObservation(domain.epochGeneration(),
+                                            domain.readerRegistrationGeneration(),
+                                            observedReaders,
+                                            domain.readerRegistrationClosed());
+        // 実測値を evidence に転写（AudioEngine::captureEpochQuiescenceEvidence と同順）
+        obs.epochEvidence = convo::isr::EpochQuiescenceEvidence{};
+        obs.epochEvidence.captured = true;
+        obs.epochEvidence.epoch = domain.currentEpoch();
+        obs.epochEvidence.epochGeneration = domain.epochGeneration();
+        obs.epochEvidence.readerRegistrationGeneration = domain.readerRegistrationGeneration();
+        obs.epochEvidence.readerRegistrationClosed = domain.readerRegistrationClosed();
+        obs.epochEvidence.activeReaders = observedReaders;
+        obs.epochEvidence.minReaderEpoch = router.minReaderEpoch();
+        return obs;
+    };
+
+    // (1) reader active のまま: Q4 / Q5 ともに不成立 → Proof なし
+    if (shutdown.tryMakeQuiescenceProof(capture(router.activeReaderCount())).has_value())
+        return false;
+
+    // (2) reader 退出 + registration close: Q5 が実状態から成立する
+    domain.exitReader(readerIndex);
+    if (router.activeReaderCount() != 0)
+        return false;
+    domain.closeReaderRegistration();
+    (void)domain.publishEpoch();              // settle epoch（epochGeneration が進む）
+
+    auto proof = shutdown.tryMakeQuiescenceProof(capture(router.activeReaderCount()));
+    if (!proof.has_value() || !proof->valid())
+        return false;
+    if (!proof->epochSettled())
+        return false;
+    if (proof->epochEvidence().activeReaders != 0)
+        return false;
+    if (!proof->epochEvidence().readerRegistrationClosed)
+        return false;
+    if (proof->epochEvidence().epochGeneration != domain.epochGeneration())
+        return false;
+
+    // (3) Q5 単独の拒否: Q4 の観測は true のまま、evidence だけが reader 残存を主張する
+    //     矛盾した入力は Proof に採用されない（observation と evidence の相互検証）。
+    {
+        auto contradictory = capture(router.activeReaderCount());
+        contradictory.epochEvidence.activeReaders = 1;
+        if (shutdown.tryMakeQuiescenceProof(contradictory).has_value())
+            return false;
+    }
+
+    return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: Q6（postStopEnqueue == 0）は authority 内部の実カウンタで決まる。
+//   markPostStopEnqueue() を実行した時点で Proof は出なくなる。
+//==============================================================================
+[[nodiscard]] bool testQ6PostStopEnqueueBlocksProof()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+    shutdown.closeAdmission();
+    shutdown.joinProducers();
+
+    auto obs = makeQuiescentObservation(/*epochGen=*/2, /*regGen=*/1);
+    if (!shutdown.tryMakeQuiescenceProof(obs).has_value())
+        return false;                         // 前提: 0 件なら成立する
+    if (shutdown.postStopEnqueueCount() != 0)
+        return false;
+
+    shutdown.markPostStopEnqueue();           // 実カウンタを増やす
+    if (shutdown.postStopEnqueueCount() != 1)
+        return false;
+    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
+        return false;                         // Q6 不成立 → Proof なし
+
+    // Q6 不成立後の新規 Proof は発行されない（上の判定で確認済み）。
+    // なお Proof は取得時点のスナップショットであり、既発行の Proof から Permit を
+    // 得る経路はここでは扱わない（Q6 は H.11.13.4 の防波堤であり、認可は identity 照合で行う）。
+
+    return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: reclaim 認可失敗の観測性（Release でも残る）。
+//   noteReclaimProofFailure() の累計が collectResult に反映される。
+//==============================================================================
+[[nodiscard]] bool testReclaimProofFailureObservability()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+
+    if (shutdown.reclaimProofFailureCount() != 0)
+        return false;
+    shutdown.noteReclaimProofFailure();
+    shutdown.noteReclaimProofFailure();
+    if (shutdown.reclaimProofFailureCount() != 2)
+        return false;
+
+    const auto result = shutdown.collectResult(static_cast<convo::ISRHealthState>(0), 0);
+    return result.reclaimProofFailureCount == 2;
 }
 
 } // anonymous namespace
@@ -881,6 +1057,14 @@ int main()
             throw std::runtime_error("A2-Step14/T11: setter resurrection 違反");
         if (!convo::isr::testA2Step14DestructionOrderingAudit())
             throw std::runtime_error("A2-Step14/T13: destruction ordering audit 違反");
+        if (!convo::isr::testQ2ProducerJoinAuthorityGate())
+            throw std::runtime_error("Q2 (2026-11-08): producer join の authority gate 違反");
+        if (!convo::isr::testQ5EpochEvidenceRealDomain())
+            throw std::runtime_error("Q5 (2026-11-08): EpochQuiescenceEvidence の実観測違反");
+        if (!convo::isr::testQ6PostStopEnqueueBlocksProof())
+            throw std::runtime_error("Q6 (2026-11-08): post-stop enqueue による Proof 阻止違反");
+        if (!convo::isr::testReclaimProofFailureObservability())
+            throw std::runtime_error("reclaim 失敗観測 (2026-11-08): collectResult 反映違反");
     }
     catch (const std::exception& e)
     {

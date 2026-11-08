@@ -9,8 +9,12 @@
 //   Step 3: ReclaimPermit（move-only / single-use / identity-bound — H.11.11.9.5）
 //   Step 6: ReclaimIdentity（DSPHandle + retireSequence — H.11.11.9.5）
 //
-// ★ 現在は「型のみ・production 未接続」。production reclaim の接続は
-//   Phase A2（15-Step 7-15 / A2-G01〜G23 PASS 後）で行う（H.11.17.5）。
+// ★ 接続状況（実装が正）: Phase A2（15-Step 7-15）で production の shutdown reclaim
+//   経路へ接続済み。呼出チェーンは
+//     AudioEngine::tryShutdownQuiescentReclaim（AudioEngine.h）
+//       → ShutdownRuntime::tryMakeQuiescenceProof / tryMakeReclaimPermit（ISRShutdown.cpp）
+//       → RuntimeIntentCoordinator::reclaimShutdownQuiescent（identity 照合 + permit.consume）
+//   であり、~AudioEngine → releaseResources() から到達する。
 //   ReclaimPermit の生成は ShutdownRuntime のみ（friend / AC-X3-11 / INV-LIFE-4）。
 //
 // ★ 不変条件（H.11.11.7 INV-LIFE）:
@@ -67,6 +71,30 @@ struct ReclaimIdentity {
     [[nodiscard]] bool operator==(const ReclaimIdentity& o) const noexcept = default;
 };
 
+// ── Step 5: EpochQuiescenceEvidence（H.11.13.3 / Q5） ───────────────────────
+//   Q5 EpochSettled を「generation 値」や caller の bool 単独で成立させないための
+//   transactional evidence。epoch の前進・reader 登録の閉鎖・active reader ゼロを
+//   同一の観測点で取得し、ShutdownRuntime が identity（epochGeneration /
+//   readerRegistrationGeneration）と照合して初めて Q5 を成立させる。
+//   ［observer は AudioEngine（EpochDomain / ISRRetireRouter の所有者）。
+//     検証と Proof への格納は ShutdownRuntime の責務（authority singularization）］
+//   ［第七者 C: generation 単独では quiescence を証明できない。quiescent() を必ず要求する］
+struct EpochQuiescenceEvidence {
+    bool          captured{false};                    // 観測を実施したか（false = 未取得 → Q5 不成立）
+    std::uint64_t epoch{0};                           // EpochDomain::currentEpoch()
+    std::uint64_t epochGeneration{0};                 // EpochDomain::epochGeneration()
+    std::uint64_t readerRegistrationGeneration{0};    // EpochDomain::readerRegistrationGeneration()
+    bool          readerRegistrationClosed{false};    // EpochDomain::readerRegistrationClosed()
+    std::uint32_t activeReaders{0};                   // ISRRetireRouter::activeReaderCount()
+    std::uint64_t minReaderEpoch{0};                  // ISRRetireRouter::minReaderEpoch()
+
+    // quiescence の実体（登録閉鎖 + active reader ゼロ）。generation 一致は呼出側で照合する。
+    [[nodiscard]] bool quiescent() const noexcept
+    {
+        return captured && readerRegistrationClosed && activeReaders == 0;
+    }
+};
+
 // ── Step 2: ShutdownQuiescenceProof ─────────────────────────────────────────
 //   「これ以降、新しい lifetime obligation が発生しない」ことの証明（Q0〜Q7, H.11.11.3）。
 //   ⚠️ 循環排除（第五者レビュー）: pendingReclaimIdentities.empty() と
@@ -94,6 +122,8 @@ public:
     [[nodiscard]] bool epochSettled() const noexcept { return qEpochSettled_; }
     [[nodiscard]] bool postStopEnqueueZero() const noexcept { return qPostStopEnqueueZero_; }
     [[nodiscard]] bool noResurrection() const noexcept { return qNoResurrection_; }
+    // Q5 の根拠（quiescence 時に取得した epoch / reader 観測）。Proof の事後監査に使う。
+    [[nodiscard]] const EpochQuiescenceEvidence& epochEvidence() const noexcept { return epochEvidence_; }
 
 private:
     // 生成は ShutdownRuntime のみ（INV-LIFE-3 / AC-X3-11）。簡易生成（if (isFullyDrained()) return ...）
@@ -111,9 +141,10 @@ private:
     bool qAllProducersJoined_{false};          // Q2
     bool qReaderRegClosed_{false};             // Q3
     bool qActiveReadersZero_{false};           // Q4
-    bool qEpochSettled_{false};                // Q5
+    bool qEpochSettled_{false};                // Q5（epochEvidence_ の検証結果）
     bool qPostStopEnqueueZero_{false};         // Q6
     bool qNoResurrection_{false};              // Q7
+    EpochQuiescenceEvidence epochEvidence_{};  // Q5 の根拠（事後監査用）
 };
 
 // ── Step 3: ReclaimPermit ───────────────────────────────────────────────────

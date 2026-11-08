@@ -81,6 +81,8 @@ int runRtMeasureRingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
 // STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
 int runSTG11D12StateIntegerGuardTests();
+// 2026-11-08: D12-6（FrozenRuntimeWorld の release 順序）だけを実行する限定入口。
+int runSTG11D12FrozenWorldOnly();
 // STG11D12NoiseShaperEnumGuardTests.cpp (★ STG-11-D12-2: noiseShaperType setter guard + publish 回復回帰)
 int runSTG11D12NoiseShaperEnumGuardTests();
 int runSTG11D11TotalGainFiniteTests();
@@ -1519,6 +1521,15 @@ int main(int argc, char* argv[])
     // ★ A2 -> A3-a: 二重解放（V1）と誤状態処理（V2）の検証（opt-in）。
     if (std::getenv("A2A3A_TEST") != nullptr)
         return runA2A3aQuarantineTests();
+
+    // ★ 2026-11-08: D12（FrozenRuntimeWorld の release 順序を含む）だけを実行する。
+    //   既定スイートが環境依存の測定区間で停止する場合の限定実行用（opt-in）。
+    if (std::getenv("CONVOPEQ_STG11D12_ONLY") != nullptr)
+        return runSTG11D12StateIntegerGuardTests();
+
+    // ★ 2026-11-08: engine を起動しない D12-6 だけを実行する限定入口（opt-in）。
+    if (std::getenv("CONVOPEQ_D12_FROZEN_ONLY") != nullptr)
+        return runSTG11D12FrozenWorldOnly();
 
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。

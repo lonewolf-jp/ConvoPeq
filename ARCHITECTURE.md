@@ -209,7 +209,7 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,777 lines (315.6
 | `ISREvidenceExporter.{h,cpp}` | 18.7 KB | Evidence export for CI and auditing. |
 | `ISRIntentDispatcher.h` | 5.1 KB | Intent dispatch context / handler boundary. |
 | `ISRCoordinatorLoop.{h,cpp}` | 2.7 KB | Coordinator loop (deferred resubmit producer for intent queue). |
-| `ISRLifetimeProof.h` | 10.4 KB | Shutdown lifetime proof / permit types (`ShutdownRuntimeIdentity`, `ShutdownQuiescenceProof`, `ReclaimPermit`, `ReclaimIdentity`). Currently type-only; production reclaim connection is a later phase. |
+| `ISRLifetimeProof.h` | 10.4 KB | Shutdown lifetime proof / permit types (`ShutdownRuntimeIdentity`, `EpochQuiescenceEvidence`, `ShutdownQuiescenceProof`, `ReclaimPermit`, `ReclaimIdentity`). Production-connected: `~AudioEngine` → `releaseResources()` → `tryShutdownQuiescentReclaim` → `tryMakeQuiescenceProof` / `tryMakeReclaimPermit` → `reclaimShutdownQuiescent`. |
 
 **Runtime Publication Pipeline:**
 
@@ -233,7 +233,7 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,777 lines (315.6
 | `RtMeasureRing.h` | 40.9 KB | RT timing measurement ring (`CONVOPEQ_RT_MEASURE` mode 1; mode 2 stores samples without pushing to the ring). |
 | `IRRuntimeContract.h` | 3.4 KB | Non-RT IR/runtime shape contract (rate and block quantum must match) that rejects a mismatched publish (WORK105). |
 | `RuntimeTransition.h` | 2.1 KB | State transition description. |
-| `FrozenRuntimeWorld.{h,cpp}` | 5.2 KB | Phase-4 frozen world concept. |
+| `FrozenRuntimeWorld.{h,cpp}` | 5.2 KB | Builder-boundary RAII wrapper for the published world. `releaseState()` transfers the `RuntimeState*` only when `isSealedRecursively()` is true (2026-11-08). Immutability is enforced by: (a) const-only accessors, (b) `RuntimeBuilder::freeze()` + commit-time seal validation, (c) the `SealedObject` flag (logical, not memory protection — the only intentional post-seal write is the publication-metadata bake in `RuntimeWorldAuthority::publish`). The Coordinator holds `RuntimeState` directly, so the type-level guarantee does not extend past the builder boundary. |
 | `WorldLifecycleAudit.{h,cpp}` | 9.5 KB | World lifecycle audit trail. |
 | `TelemetryRecorder.{h,cpp}` | 14.9 KB | Telemetry recording (progress, failure, correlation). |
 | `RuntimeDrainAudit.h` | 4.3 KB | Drain audit for shutdown diagnostics. |
@@ -582,7 +582,9 @@ Layer 8    ISRShutdown (FSM)             src/audioengine/ISRShutdown.h
              │   → EpochSettled → ReclaimComplete → [EmergencyDrain]
              │   → VerifyDrained → TimedOut|Failed → ShutdownComplete
              ├─ BlockingReasonStats (alignas(64)) per-reason
-             └─ ISRLifetimeProof: ShutdownQuiescenceProof / ReclaimPermit types
+             └─ ISRLifetimeProof: ShutdownQuiescenceProof / ReclaimPermit (production-connected;
+                Q2 = producer join (authority + observation), Q5 = EpochQuiescenceEvidence,
+                Q6 = postStopEnqueue == 0)
 
 Layer 9    ISRRetire / ISRRetireRouter / OverflowRing / QuarantineStore
              ├─ Router: epoch-coordinated retire entry

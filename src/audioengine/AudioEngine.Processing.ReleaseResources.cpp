@@ -532,15 +532,25 @@ void AudioEngine::releaseResources()
         // ★ C4834 対応: reclaim の戻り値（Proof/Permit 認可結果）を確認。
         //   releaseResources は DrainRetire フェーズで quiescence 成立済みのため true が期待。
         const bool reclaimed = tryShutdownQuiescentReclaim(activeHandle);
-        jassert(reclaimed);
-        juce::ignoreUnused(reclaimed);
+        if (!reclaimed)
+        {
+            // ★ 2026-11-08: Q2/Q5/Q6 を含む Proof が成立しなかった、または Permit が
+            //   reject された。jassert は Release で消えるため、失敗回数を ShutdownRuntime に
+            //   記録して shutdown trace から観測できるようにする（動作は従来どおり継続 —
+            //   物理破棄は retireDetachedCoreForShutdown が handle 台帳経由で行う）。
+            shutdownRuntime_.noteReclaimProofFailure();
+            diagLog("[DIAG] releaseResources: quiescence proof rejected reclaim (active)");
+        }
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
         const bool reclaimed = tryShutdownQuiescentReclaim(fadingHandle);
-        jassert(reclaimed);
-        juce::ignoreUnused(reclaimed);
+        if (!reclaimed)
+        {
+            shutdownRuntime_.noteReclaimProofFailure();
+            diagLog("[DIAG] releaseResources: quiescence proof rejected reclaim (fading)");
+        }
     }
 
     diagLog("[DIAG] releaseResources: before ui processor release");

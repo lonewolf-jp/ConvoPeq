@@ -4882,6 +4882,28 @@ inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
     }
 }
 
+// ★ Q5 (2026-11-08): EpochQuiescenceEvidence の観測点。
+//   epoch / reader registration / active reader を同一の非 RT 点で取得する。
+//   shutdown 経路では producer は join 済み・reader 登録は閉鎖済みのため、
+//   この観測後に新規 reader は増えない（activeReaders は単調減少）。
+//   m_retireRouter が無い場合は captured=false のまま返し、Q5 を成立させない
+//   （観測できない状態を quiescence とみなさない — Q4 の null 既定より厳しくする）。
+[[nodiscard]] convo::isr::EpochQuiescenceEvidence
+captureEpochQuiescenceEvidence() const noexcept
+{
+    convo::isr::EpochQuiescenceEvidence evidence;
+    evidence.epoch = m_epochDomain.currentEpoch();
+    evidence.epochGeneration = m_epochDomain.epochGeneration();
+    evidence.readerRegistrationGeneration = m_epochDomain.readerRegistrationGeneration();
+    evidence.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
+    if (m_retireRouter != nullptr)
+    {
+        evidence.activeReaders = m_retireRouter->activeReaderCount();
+        evidence.minReaderEpoch = m_retireRouter->minReaderEpoch();
+        evidence.captured = true;
+    }
+    return evidence;
+}
 // ★ dash2 §2.2 (Phase A2 — Step 12): Shutdown 時の Proof → Permit → reclaim 供給ヘルパー。
 //   CacheMap / ReleaseResources は「caller-side shutdown 判断」を自身から撤去し（AC-2）、
 //   本ヘルパーに handle を渡すだけで、ShutdownRuntime が Proof 生成 → Permit 発行 →
@@ -4901,15 +4923,23 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
     convo::isr::ShutdownRuntime::QuiescenceObservation obs;
     obs.admissionReservationsZero = (shutdownRuntime_.outstanding() == 0);  // Q0
     // D101-31-B B-6: outstanding() is the authority. AudioEngine must NOT access packedState_ directly.
-    obs.allProducersJoined = true;          // Q2: shutdown 確定 + producer join 完了
+    // ★ Q2 (2026-11-08): 実測。CoordinatorLoop と RebuildThread の join 完了のみを true とする
+    //   （rebuildThreadStopped は join 後に publish — R8。coordinatorLoopStopped は
+    //     stopLoop の join 成功時のみ publish）。ShutdownRuntime 側でも joinProducers() 成功と
+    //     AND されるため、ここが true でも join 未実施なら Proof は成立しない。
+    obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
+                          && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
     obs.activeReadersZero = (m_retireRouter != nullptr)
         ? (m_retireRouter->activeReaderCount() == 0) : true;                  // Q4
-    obs.epochSettled = true;                // Q5: EpochQuiescenceEvidence（shutdown 確定後）
-    obs.postStopEnqueueZero = true;         // Q6: postStopEnqueue == 0（shutdown 確定後）
+    // ★ Q5 (2026-11-08): EpochQuiescenceEvidence（H.11.13.3）。bool ではなく観測束で渡し、
+    //   ShutdownRuntime が quiescent() と generation 一致を検証する。
+    obs.epochEvidence = captureEpochQuiescenceEvidence();
     obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();                 // Q7
-    obs.epochGeneration = m_epochDomain.epochGeneration();                    // G19
-    obs.readerRegistrationGeneration = m_epochDomain.readerRegistrationGeneration();  // G20
+    // ★ G19/G20: identity に束縛する generation は evidence と同じスナップショットを使う
+    //   （別々に読み直すと、同一 transaction 内でも値がずれ得る）。
+    obs.epochGeneration = obs.epochEvidence.epochGeneration;                  // G19
+    obs.readerRegistrationGeneration = obs.epochEvidence.readerRegistrationGeneration;  // G20
 
     auto proof = shutdownRuntime_.tryMakeQuiescenceProof(obs);
     if (!proof.has_value() || !proof->valid())
@@ -5416,6 +5446,10 @@ public:
     //   Non-RT only (called from CoordinatorLoop::run).
     void waitForDrainSignalOrTimeout(int timeoutMs) noexcept;
     std::unique_ptr<convo::isr::CoordinatorLoop> coordinatorLoop_;
+    // ★ Q2 (2026-11-08): CoordinatorLoop の join 完了（stopLoop の stopThread 成功）でのみ true。
+    //   startCoordinatorLoop() で false、shutdownCoordinatorLoop() で join 結果を publish する。
+    //   loop を起動していない場合は「停止済み」として true（producer 不在）。
+    std::atomic<bool> coordinatorLoopStopped { true };
     std::mutex rebuildAdmissionIntentMutex_;
     RebuildAdmissionIntentState rebuildAdmissionPendingIntent_ {};
 

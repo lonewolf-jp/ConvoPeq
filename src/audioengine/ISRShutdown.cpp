@@ -177,6 +177,8 @@ ShutdownResult ShutdownRuntime::collectResult(
                                                     std::memory_order_acquire);
     result.postStopEnqueueCount = convo::consumeAtomic(sh6PostStopEnqueueCount_,
                                                        std::memory_order_acquire);
+    result.reclaimProofFailureCount = convo::consumeAtomic(reclaimProofFailureCount_,
+                                                           std::memory_order_acquire);
     return result;
 }
 
@@ -271,6 +273,9 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     file << "  \"sh4_observerCount\": " << sh4 << ",\n";
     file << "  \"sh5_lateCallbackCount\": " << sh5 << ",\n";
     file << "  \"sh6_postStopEnqueueCount\": " << sh6 << ",\n";
+    // ★ Q2/Q5/Q6 の Proof 不成立 / Permit reject 回数（Release でも観測可能）。
+    file << "  \"reclaimProofFailureCount\": "
+         << convo::consumeAtomic(reclaimProofFailureCount_, std::memory_order_acquire) << ",\n";
 
     // ★ A-2: BlockingReasonStats JSON出力
     file << "  \"blockingReasonStats\": [\n";
@@ -350,15 +355,24 @@ void ShutdownRuntime::markPostStopEnqueue() noexcept
 std::optional<ShutdownQuiescenceProof>
 ShutdownRuntime::tryMakeQuiescenceProof(const QuiescenceObservation& observation) noexcept
 {
-    // Q0〜Q7 を個別に観測（Q1 は ShutdownRuntime 内部の admissionState()==Closed、
-    // Q6 は observation.postStopEnqueueZero、それ以外は observation）
+    // Q0〜Q7 を個別に観測する。Q1/Q2/Q6 は authority（本クラス）側の状態と AND し、
+    // Q5 は EpochQuiescenceEvidence の内容と generation 一致まで検証する
+    // （caller の自己申告だけでは成立させない — A2-G05 の趣旨）。
     const bool q0 = observation.admissionReservationsZero;
     const bool q1 = (admissionState() == AdmissionState::Closed);
-    const bool q2 = observation.allProducersJoined;
+    const bool q2 = observation.allProducersJoined && producersJoined();
     const bool q3 = observation.readerRegistrationClosed;
     const bool q4 = observation.activeReadersZero;
-    const bool q5 = observation.epochSettled;
-    const bool q6 = observation.postStopEnqueueZero;
+    // ★ Q5 (H.11.13.3): generation 単独・bool 単独では成立しない。
+    //   - quiescent(): 観測実施 + reader 登録閉鎖 + active reader ゼロ
+    //   - identity との一致: evidence の generation が本 shutdown transaction の観測と一致
+    const auto& epochEvidence = observation.epochEvidence;
+    const bool q5 = epochEvidence.quiescent()
+                 && epochEvidence.epochGeneration == observation.epochGeneration
+                 && epochEvidence.readerRegistrationGeneration
+                        == observation.readerRegistrationGeneration;
+    // ★ Q6: authority 内部の post-stop enqueue 累計が 0 であること（observation 非依存）。
+    const bool q6 = (postStopEnqueueCount() == 0);
     const bool q7 = observation.noResurrection;
 
     // 全 Q 成立時のみ Proof 生成（quiescence 証明 — new obligation なし）
@@ -395,6 +409,7 @@ ShutdownRuntime::tryMakeQuiescenceProof(const QuiescenceObservation& observation
     proof.qEpochSettled_ = q5;
     proof.qPostStopEnqueueZero_ = q6;
     proof.qNoResurrection_ = q7;
+    proof.epochEvidence_ = epochEvidence;
     return proof;
 }
 
@@ -451,6 +466,9 @@ void ShutdownRuntime::closeAdmission() noexcept
             // ★ dash2 §2.2 (Step 14 — Race B / T10)
             (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
                                         std::memory_order_acq_rel);
+            // ★ Q2: 新しい shutdown transaction の開始点。前回の join evidence を破棄し、
+            //   joinProducers() が成立するまで Q2 を成立させない。
+            convo::publishAtomic(producersJoined_, false, std::memory_order_release);
             break;
         }
         // CAS failed — retry with updated expected
@@ -460,6 +478,29 @@ void ShutdownRuntime::closeAdmission() noexcept
 uint64_t ShutdownRuntime::currentShutdownGeneration() const noexcept
 {
     return convo::consumeAtomic(shutdownGeneration_, std::memory_order_acquire);
+}
+
+// ★ Q2: joinProducers() の Closing→Closed 成功でのみ true（authority 側 evidence）。
+bool ShutdownRuntime::producersJoined() const noexcept
+{
+    return convo::consumeAtomic(producersJoined_, std::memory_order_acquire);
+}
+
+// ★ Q6: post-stop enqueue の累計。markPostStopEnqueue() のみが増加させる。
+uint32_t ShutdownRuntime::postStopEnqueueCount() const noexcept
+{
+    return convo::consumeAtomic(sh6PostStopEnqueueCount_, std::memory_order_acquire);
+}
+
+// ★ reclaim 認可失敗の観測（防波堤）。Proof 不成立 / Permit reject を Release でも残す。
+void ShutdownRuntime::noteReclaimProofFailure() noexcept
+{
+    (void)convo::fetchAddAtomic(reclaimProofFailureCount_, uint32_t{1}, std::memory_order_acq_rel);
+}
+
+uint32_t ShutdownRuntime::reclaimProofFailureCount() const noexcept
+{
+    return convo::consumeAtomic(reclaimProofFailureCount_, std::memory_order_acquire);
 }
 
 bool ShutdownRuntime::joinProducers() noexcept
@@ -480,7 +521,12 @@ bool ShutdownRuntime::joinProducers() noexcept
          | (0u << kReservationShift));
         if (convo::compareExchangeAtomic(packedState_, expected, desired,
                                          std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            // ★ Q2: producer join の authority 側 evidence。caller の観測値だけでは
+            //   Q2 を成立させない（join を実行していない ShutdownRuntime は Proof を出せない）。
+            convo::publishAtomic(producersJoined_, true, std::memory_order_release);
             return true;  // Closing→Closed succeeded
+        }
         // CAS failed — retry
     }
 }
