@@ -396,6 +396,7 @@ All tests registered via `add_test()` in CMakeLists.txt. Many are JUCE-independe
 + External CI: `HeadlessAudioPathVerification` (PowerShell, gated by `$CONVO_CI_BUILD`).
 
 > CMake registers **54 `add_test()`** entries (53 executable-based tests plus the PowerShell `HeadlessAudioPathVerification`, which is not registered when `CONVO_CI_BUILD` is defined).
+
 ### 3.7 `src/tools/` — Build Gate Scripts (1 file)
 
 | File | Role |
@@ -449,7 +450,7 @@ AudioDeviceCallback → AudioProcessorPlayer → AudioEngineProcessor::processBl
     ├─ EngineParameterSnapshot = captureAudioThreadParameterSnapshot(runtimeWorld)
     ├─ Crossfade delay gate (if pending), arm crossfade
     ├─ DSPCore::processDouble(buffer, ...)                                                            [DSP Flow]
-    │   ├─ processInput: headroom gain, DC remove, input level metering
+    │   ├─ processInput: input level metering (+ analyzer tap) → headroom gain → input DC block
     │   ├─ [if OS] processUp: multi-stage AVX2 FIR/IIR upsample
     │   │   └─ UltraHighRateDCBlocker.oversampledL/R
     │   ├─ route(order): EQThenConvolver → eqRt.process → convolverRt.process
