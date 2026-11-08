@@ -1,7 +1,7 @@
 # build.bat のアプリ限定ビルド、CI の文書スキップ、ツール更新、フォルダ整理
 
 - 実施: 2026-11-08 15:00〜
-- 対象: `main` = `969a988e`
+- 対象: 開始時点の `main` = `969a988e`。第 1〜6 節は PR #180 でマージ済み（`main` = `f2995a44`）。第 7 節以降は PR #181 で扱う。
 - 目的: 次の 4 件を実施する。(1) `build.bat` にアプリ限定ビルドのオプションを追加、(2) 文書だけの変更で GitHub Actions をスキップ、(3) context-mode と graphify の更新と学習、(4) プロジェクト内フォルダの扱いの整理。
 
 ## 1. `build.bat` のアプリ限定ビルド（`app`）
@@ -42,7 +42,7 @@
   - それ以外の event と、差分の取得に失敗した場合はビルドする。
 - 文書とみなすパターン: `doc/`、`*.md`、`.memories/`、`.x64dbg-mcp/`、`.zcode/`。
 - パスの取得は `git -c core.quotepath=false diff --name-only -z` と `tr '\0' '\n'` を使う。既定の `git diff --name-only` は非 ASCII のパスを引用符で囲むため、日本語のディレクトリ名を持つこのリポジトリでは文書を文書と判定できない（第 7 節）。
-- 必須ではない `sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` には、`pull_request` の `paths-ignore` を追加した（workflow ごとスキップ）。
+- 必須ではない `sanitizer-ci.yml` と `isr-authority-compliance.yml` には `push` と `pull_request` の両方、`isr-verification.yml` には `pull_request` に `paths-ignore` を追加した（workflow ごとスキップ）。main へ文書だけをマージした場合も重い処理が動かない。
 
 ### 実測
 
@@ -108,15 +108,15 @@
 
 ### 1 回目の結果
 
-文書だけを変更した PR #181 で確認したところ、`Detect changed files` は pass したものの、`Windows MSVC / Release` はスキップされず通常どおりビルドを開始した。
+文書だけを変更した PR #181 で確認した。`Detect changed files` は pass した。しかし `Windows MSVC / Release` はスキップされなかった。通常どおりビルドが始まった。
 
-原因は変更ファイルの取得方法にあった。`git diff --name-only` は既定（`core.quotepath=true`）で非 ASCII のパスを引用符と 8 進エスケープで囲む。
+原因は、変更ファイルの取得方法にある。`git diff --name-only` は既定（`core.quotepath=true`）で、非 ASCII のパスを引用符と 8 進エスケープで囲む。
 
 ```
 "doc/work113/20261108-1530_4\351\240\205\347\233\256\345\257\276\345\277\234/report.md"
 ```
 
-この文字列は先頭が `"` で末尾も `"` のため、`^doc/` にも `\.md$` にも一致しない。その結果「文書ではない」と判定され、`code=true` になっていた。日本語のディレクトリ名を使うこのリポジトリでは、文書だけの PR がすべてビルド対象になってしまう。
+この文字列は先頭が `"` で末尾も `"` だ。`^doc/` にも `\.md$` にも一致しない。誤判定である。日本語のディレクトリ名を使うこのリポジトリでは、文書だけの PR がすべてビルド対象になってしまう。
 
 ### 修正
 
