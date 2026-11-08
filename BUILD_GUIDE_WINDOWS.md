@@ -174,7 +174,7 @@ cmake --preset vs2026-x64
 cmake --build --preset release
 
 cmake --preset icx-x64
-cmake --build --preset release
+cmake --build build-icx --config Release   # only debug/release build presets exist, both bound to vs2026-x64
 ```
 
 ---
@@ -650,8 +650,7 @@ The MSVC toolchain path is added only in the three configurations that launch th
 
 **Fix**:
 - Ensure `JUCE\CMakeLists.txt` exists under repository root
-- Create via symbolic link: `mklink /J JUCE C:\path\to\JUCE`
-- Or junction: `mklink /J JUCE C:\path\to\JUCE`
+- Create a directory junction: `mklink /J JUCE C:\path\to\JUCE` (a real symbolic link would be `mklink /D`)
 - Or copy: `xcopy /E /I C:\path\to\JUCE JUCE`
 
 ### F) ASan causes LNK2038 (runtime library mismatch)
@@ -787,7 +786,7 @@ ConvoPeq.exe sources (CMakeLists.txt target_sources):
   src/MainApplication.cpp
   src/MainWindow.cpp
   src/audioengine/                          (128 files total)
-    AudioEngine.*.cpp         (32 files — Timer, Commit, Rebuild, Processing, etc.)
+    AudioEngine.*.cpp         (31 files — Timer, Commit, Rebuild, Processing, etc.)
     ISR*.cpp                  (17 files — Closure, Retire, Shutdown, Publication, etc.)
     AudioEngineProcessor.cpp
     AutoGainPlanner.cpp
@@ -805,7 +804,7 @@ ConvoPeq.exe sources (CMakeLists.txt target_sources):
     TelemetryRecorder.cpp
     WorldLifecycleAudit.cpp
   src/convolver/
-    ConvolverProcessor.*.cpp  (9 TUs — Lifecycle, Rebuild, LoaderThread, Runtime, etc.)
+    ConvolverProcessor.*.cpp  (8 TUs — Lifecycle, Rebuild, LoaderThread, Runtime, etc.)
   src/eqprocessor/
     EQProcessor.*.cpp         (5 TUs — Core, Parameters, Coefficients, Processing, etc.)
   src/core/
