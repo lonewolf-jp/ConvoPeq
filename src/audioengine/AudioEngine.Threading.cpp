@@ -367,6 +367,8 @@ void AudioEngine::startCoordinatorLoop() noexcept
 {
     jassert(coordinatorLoop_ == nullptr);
     coordinatorLoop_ = std::make_unique<convo::isr::CoordinatorLoop>(*this);
+    // ★ Q2: producer が動き始めた時点で「停止済み」を撤回する。
+    convo::publishAtomic(coordinatorLoopStopped, false, std::memory_order_release);
     coordinatorLoop_->startLoop();
 }
 
@@ -374,8 +376,15 @@ void AudioEngine::shutdownCoordinatorLoop() noexcept
 {
     if (coordinatorLoop_)
     {
-        coordinatorLoop_->stopLoop();
+        // ★ Q2: join の成否を観測可能にする（Q2 は join 成功のみを producer 不在とみなす）。
+        const bool joined = coordinatorLoop_->stopLoop();
         coordinatorLoop_.reset();
+        convo::publishAtomic(coordinatorLoopStopped, joined, std::memory_order_release);
+    }
+    else
+    {
+        // loop を起動していない = producer 不在（停止済みとして扱う）。
+        convo::publishAtomic(coordinatorLoopStopped, true, std::memory_order_release);
     }
 }
 

@@ -63,6 +63,7 @@
 #include <filesystem>
 
 #include "audioengine/AudioEngine.h"
+#include "audioengine/FrozenRuntimeWorld.h"
 #include "audioengine/RuntimePublicationValidator.h"
 #include "AudioEngineHarness.h"
 
@@ -427,6 +428,33 @@ bool checkD12T4UiBitDepthListStaysInSet()
     return world;
 }
 
+// ── D12-6 helper: aligned allocation 版 ──
+//   FrozenRuntimeWorld は aligned_unique_ptr<RuntimeState> を保持し、AlignedObjectDeleter が
+//   aligned_free を呼ぶ。std::make_unique 由来のポインタを渡すと allocator が食い違うため、
+//   Builder と同じ aligned_make_unique 経路（createForBuilder）で作る。
+[[nodiscard]] convo::aligned_unique_ptr<RuntimeState>
+makeMinimalValidWorldAligned(int ditherBitDepth)
+{
+    auto world = RuntimeState::createForBuilder(RuntimeState::BuilderToken{});
+    world->assertMutable();
+    world->generation = 1;
+    world->topology.runtimeUuid = 100;
+    world->generationSemantic.activationEpoch = 100;
+    world->generationSemantic.runtimeGeneration = 1;
+    world->publication.sequenceId = 1;
+    world->execution.transitionActive = false;
+    world->execution.transitionPolicy = 0;
+    world->routing.processingOrder = 0;
+    world->execution.crossfadeStartDelayBlocks = 0;
+    world->execution.crossfadeDryHoldSamples = 0;
+    world->overlap.fadeTimeSec = 0.0;
+    world->overlap.useDryAsOld = false;
+    world->resource.oversamplingFactor = 1;
+    world->resource.noiseShaperType = 0;
+    world->resource.ditherBitDepth = ditherBitDepth;
+    return world;
+}
+
 bool checkD12T5ValidatorResourceContract()
 {
     iso::audio_engine::RuntimePublicationValidator validator;
@@ -475,10 +503,101 @@ bool checkD12T5ValidatorResourceContract()
 
 } // namespace
 
-int runSTG11D12StateIntegerGuardTests()
+// ── D12-6: FrozenRuntimeWorld の publish 境界は seal を要求する ──
+//   releaseState() は「seal 済みの world だけ」を移譲する。未 seal の移譲を許すと
+//   Builder 境界の freeze を迂回した world が publish に進めてしまう。
+// ── D12-6: FrozenRuntimeWorld の release 順序（seal は publish transaction 側）──
+//   実経路では release 時点の world は未 seal で、seal は publish transaction の中で行われる。
+//   releaseState() に seal を要求すると正当な publish が落ちる（2026-11-08 実測 / D12-1-C）。
+//   ここでは「未 seal でも所有権が移る」「移譲後の seal が効く」「二重 seal は冪等」を固定し、
+//   将来 release に前提条件を足す変更を回帰として検出する。
+[[nodiscard]] bool checkD12T6FrozenWorldReleaseOrder()
 {
     bool ok = true;
 
+    // (1) 未 seal のまま release できる（実経路の順序）
+    {
+        auto world = makeMinimalValidWorldAligned(16);
+        convo::FrozenRuntimeWorld frozen(std::move(world));
+        if (frozen.getRaw()->isSealedRecursively())
+        {
+            std::fprintf(stderr, "D12-6: precondition world is unexpectedly sealed\n");
+            ok = false;
+        }
+
+        RuntimeState* raw = frozen.releaseState();
+        if (raw == nullptr)
+        {
+            std::fprintf(stderr,
+                         "D12-6: unsealed world was not released (publish-order regression)\n");
+            ok = false;
+        }
+        else
+        {
+            if (frozen.isValid())
+            {
+                std::fprintf(stderr, "D12-6: wrapper still owns the released world\n");
+                ok = false;
+            }
+            // 実経路: publish transaction が seal する
+            raw->sealRecursively();
+            if (!raw->isSealedRecursively())
+            {
+                std::fprintf(stderr, "D12-6: seal after release failed\n");
+                ok = false;
+            }
+            convo::aligned_unique_ptr<RuntimeState> owner(raw);   // 呼出側が解放する
+        }
+    }
+
+    // (2) seal 済みでも release でき、seal 状態は移譲後も保たれる
+    {
+        auto world = makeMinimalValidWorldAligned(16);
+        world->sealRecursively();
+        convo::FrozenRuntimeWorld frozen(std::move(world));
+        RuntimeState* raw = frozen.releaseState();
+        if (raw == nullptr)
+        {
+            std::fprintf(stderr, "D12-6: sealed world was not released\n");
+            ok = false;
+        }
+        else
+        {
+            if (!raw->isSealedRecursively())
+            {
+                std::fprintf(stderr, "D12-6: released world lost its seal\n");
+                ok = false;
+            }
+            convo::aligned_unique_ptr<RuntimeState> owner(raw);
+        }
+    }
+
+    // (3) seal は冪等（Builder freeze 後の二重 seal が release を壊さない）
+    {
+        auto world = makeMinimalValidWorldAligned(24);
+        world->freeze();
+        world->sealRecursively();
+        convo::FrozenRuntimeWorld frozen(std::move(world));
+        RuntimeState* raw = frozen.releaseState();
+        if (raw == nullptr)
+        {
+            std::fprintf(stderr, "D12-6: double-sealed world was not released\n");
+            ok = false;
+        }
+        else
+        {
+            convo::aligned_unique_ptr<RuntimeState> owner(raw);
+        }
+    }
+
+    if (ok)
+        std::printf("STG11D12StateIntegerGuardTests: D12-6 PASS (release order / seal at commit)\n");
+    return ok;
+}
+
+int runSTG11D12StateIntegerGuardTests()
+{
+    bool ok = true;
     if (!checkD12T1InvalidDitherRejected())
     {
         std::fprintf(stderr, "FAIL: D12-1-A invalid dither rejected\n");
@@ -504,8 +623,27 @@ int runSTG11D12StateIntegerGuardTests()
         std::fprintf(stderr, "FAIL: D12-4 validator resource contract\n");
         ok = false;
     }
+    if (!checkD12T6FrozenWorldReleaseOrder())
+    {
+        std::fprintf(stderr, "FAIL: D12-6 FrozenRuntimeWorld release order\n");
+        ok = false;
+    }
 
     if (ok)
-        std::printf("STG11D12StateIntegerGuardTests: PASS (D12-1-A/D12-1-B/D12-1-C/D12-3/D12-4)\n");
+        std::printf("STG11D12StateIntegerGuardTests: PASS (D12-1-A/D12-1-B/D12-1-C/D12-3/D12-4/D12-6)\n");
+    return ok ? 0 : 1;
+}
+
+// ── 2026-11-08: D12-6 だけを実行する（engine 非依存）。
+//   既定スイートや D12-1〜D12-4（engine を起動する）が環境依存で停止する場合の
+//   限定検証用。FrozenRuntimeWorld の release 前提条件だけを確認する。
+// ── 2026-11-08: D12-6 だけを実行する（engine 非依存）。
+//   既定スイートや D12-1〜D12-4（engine を起動する）が環境依存で停止する場合の
+//   限定検証用。FrozenRuntimeWorld の release 前提条件だけを確認する。
+int runSTG11D12FrozenWorldOnly()
+{
+    const bool ok = checkD12T6FrozenWorldReleaseOrder();
+    std::printf("STG11D12FrozenWorldOnly: %s\n", ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
     return ok ? 0 : 1;
 }

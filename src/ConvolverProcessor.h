@@ -992,8 +992,13 @@ private:
 
     std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle
     std::atomic<bool> isLoading { false };
-    // ★ B-6: Loader validity generation。ConvolverProcessor 破棄時に fetch_add で increment。
-    std::atomic<uint64_t> loaderGeneration_ { 0 };
+    // ★ 2026-11-08: loaderGeneration_（owner-validity generation）は削除した。
+    //   加算するだけで読み出しが 1 箇所も無く、stale completion の拒否には寄与していなかった。
+    //   実際の契約は次の 2 系統で成立している:
+    //   - currency（古い結果の破棄）: convolverStateGeneration（要求開始で bump /
+    //     finalize・commit 直前で isCurrentGeneration 判定）
+    //   - owner lifetime: forceCleanup() の stopThread + callAsync の WeakReference
+    //   詳細は doc の作業報告（2026-11-08 loaderGeneration 調査）を参照。
     std::atomic<bool> isRebuilding { false };
     std::atomic<bool> irFinalized { false };
     std::atomic<bool> useIncrementalRebuild { false };

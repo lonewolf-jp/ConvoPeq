@@ -28,4 +28,19 @@ void FrozenRuntimeWorld::sealRecursively() noexcept
     state_->sealRecursively();
 }
 
+// ★ 2026-11-08: publish 境界の前提条件を強制する。
+//   sealRecursively() 済みでない world は移譲しない（nullptr を返し、所有権は保持）。
+//   呼出側（PublicationExecutor::publishImpl）は nullptr を PublishFailed として扱う。
+RuntimeState* FrozenRuntimeWorld::releaseState() noexcept
+{
+    // ★ 2026-11-08: seal を前提にしない。実経路では world は release 時点では未 seal で、
+    //   publish transaction の中で sealRecursively() → 検証（AudioEngine.Commit.cpp の
+    //   isFrozen / isSealedRecursively）→ commit の順に進む。ここで seal を要求すると
+    //   正当な publish を拒否してしまう（D12-1-C で実測）。
+    //   不変性の強制点は commit 側であり、本メソッドは所有権の移譲だけを担う。
+    if (!state_)
+        return nullptr;
+    return state_.release();
+}
+
 } // namespace convo

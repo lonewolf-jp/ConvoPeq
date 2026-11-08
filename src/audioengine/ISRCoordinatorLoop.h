@@ -22,7 +22,9 @@ public:
     ~CoordinatorLoop() override;
 
     void startLoop() noexcept;
-    void stopLoop() noexcept;
+    // ★ Q2: 戻り値は join 成否（stopThread の結果）。join できなかった場合、
+    //   producer が残っている可能性があるため Q2 を成立させてはならない。
+    [[nodiscard]] bool stopLoop() noexcept;
 
     void run() override;
 

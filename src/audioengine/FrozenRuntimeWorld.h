@@ -25,6 +25,22 @@ namespace convo {
 //   3. const access のみ提供（コンパイル時不変性）
 //   4. Coordinator は RuntimeState を直接使用（FrozenRuntimeWorld 非依存）
 //
+// ★ 不変性保証の層（2026-11-08 調査で明文化）:
+//   (a) 型レベル: get()/operator*/operator-> は const 参照のみ。呼出側が
+//       FrozenRuntimeWorld 経由でフィールドを書き換えることはコンパイルできない。
+//       ただし releaseState() は所有権移譲のため非 const ポインタを返すので、
+//       型レベルの保証は「移譲するまで」に限られる。
+//   (b) 規約 + 実行時ゲート: publish transaction の中で seal し、commit 側が
+//       RuntimeState::isSealedRecursively() を検証する（未 seal は publish 拒否）。
+//       releaseState() は seal を前提にしない — 実経路では release 時点で未 seal のため
+//       （2026-11-08 実測。ここに前提条件を置くと D12-1-C の正当な publish が落ちる）。
+//   (c) 実行時 sealing: SealedObject の flag は論理的な不変条件であり、メモリ保護
+//       ではない。RuntimeState のフィールドは public のため、seal 中の直接書き込みを
+//       型で禁止できない。唯一の意図的な seal 後書き込みは publish 時の publication
+//       metadata bake（RuntimeWorldAuthority::publish — seal-before-bake 順序）。
+//   (d) テスト: seal 済み/未 seal の移譲可否は AudioEngineHarness の
+//       STG11D12（D12-6）で検証する。
+//
 // Retire 時の unseal は bridge.retireRuntimePublishWorldNonRt が担当:
 //   AudioEngine.h 内で ptr->unseal() を呼び出し → aligned_free
 //   これにより FrozenRuntimeWorld が行うべき安全性を代替保証する。
@@ -53,10 +69,13 @@ public:
     //   unseal を実行しない（呼出側が責任を持つ）。
     //   Coordinator の retire 経路 (bridge.retireRuntimePublishWorldNonRt) が
     //   ptr->unseal() → aligned_free(ptr) を実行することを前提とする。
-    [[nodiscard]] RuntimeState* releaseState() noexcept
-    {
-        return state_.release();
-    }
+    // ★ 2026-11-08 調査で確定した順序: 実経路では release 時点で world は未 seal であり、
+    //   seal は publish transaction の中で行われる（publishWorld → sealRecursively →
+    //   commit 検証）。したがって本メソッドは seal を前提にせず、所有権の移譲だけを行う。
+    //   不変性の強制点は commit（AudioEngine.Commit.cpp の isFrozen / isSealedRecursively）
+    //   であり、ここに前提条件を足すと正当な publish を拒否する（D12-1-C で実測）。
+    //   実装は .cpp（RuntimeState 完全型が必要）。
+    [[nodiscard]] RuntimeState* releaseState() noexcept;
 
     // ★ ムーブのみ許可（unique_ptr 所有権モデル準拠）
     FrozenRuntimeWorld(FrozenRuntimeWorld&&) noexcept = default;

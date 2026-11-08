@@ -12,7 +12,7 @@ CoordinatorLoop::CoordinatorLoop(AudioEngine& engine) noexcept
 CoordinatorLoop::~CoordinatorLoop()
 {
     // juce::Thread asserts !isRunning() at destruction — guarantee exit first.
-    stopLoop();
+    (void)stopLoop();
 }
 
 void CoordinatorLoop::startLoop() noexcept
@@ -21,11 +21,11 @@ void CoordinatorLoop::startLoop() noexcept
         startThread();
 }
 
-void CoordinatorLoop::stopLoop() noexcept
+bool CoordinatorLoop::stopLoop() noexcept
 {
     signalThreadShouldExit();
     // Bounded join: the loop exits on the next tick once isShutdownInProgress().
-    stopThread(2000);
+    return stopThread(2000);
 }
 
 void CoordinatorLoop::run()

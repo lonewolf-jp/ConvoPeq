@@ -155,6 +155,8 @@ struct ShutdownResult {
     uint32_t transitionViolations{0};
     uint32_t lateCallbackCount{0};
     uint32_t postStopEnqueueCount{0};
+    // ★ Q2/Q5/Q6 の Proof が成立せず reclaim 認可に失敗した回数（Release でも観測可能）。
+    uint32_t reclaimProofFailureCount{0};
 };
 
 /**
@@ -248,10 +250,14 @@ public:
     //   ReclaimAuthority の wiring は public mutator ではなく constructor 固定注入で行う
     //   （上記コンストラクタ参照）— 外部 caller による wiring 権限は構造的に存在しない。
 
-    // ── ★ dash2 §2.2 (Phase A1 — H.11.17.5 15-Step, type only) ──
-    //   ShutdownQuiescenceProof / ReclaimPermit は「型のみ・production 未接続」。
-    //   production reclaim への接続は Phase A2（15-Step 7-15 / A2-G01〜G23 PASS）で行う。
+    // ── ★ dash2 §2.2 (Phase A2 — production 接続済み) ──
+    //   ShutdownQuiescenceProof / ReclaimPermit は ~AudioEngine → releaseResources() の
+    //   shutdown 経路で production 使用されている（AudioEngine::tryShutdownQuiescentReclaim）。
     //   本メソッド群は ShutdownRuntime のみが生成する（INV-LIFE-3/4 / AC-X3-11）。
+    //   Q2/Q5/Q6 は次の evidence で判定する（2026-11-08 是正）:
+    //     Q2: caller の producer 観測 AND joinProducers() 成功（producersJoined_）
+    //     Q5: EpochQuiescenceEvidence の quiescent() AND identity generation 一致
+    //     Q6: ShutdownRuntime 内部の postStopEnqueueCount() == 0
 
     // ── ★ dash2 §2.2 (Phase A2 — G10/G13/G19/G20): Quiescence 観測値 ──
     //   tryMakeQuiescenceProof が authority から取得・検証する観測値の束（H.11.11.3 Q0〜Q7）。
@@ -261,16 +267,18 @@ public:
     struct QuiescenceObservation {
         // Q0: OutstandingAdmissionReservations == 0（第九者必須修正2 — close vs enqueue race を閉じる）
         bool admissionReservationsZero{false};
-        // Q2: AllProducersJoined（requestShutdown 確定 + producer join 完了）
+        // Q2: AllProducersJoined（AudioEngine が producer スレッドの join 完了を実測して渡す）。
+        //   ShutdownRuntime は自身の joinProducers() 成功（producersJoined_）と AND して検証する
+        //   — caller の自己申告だけでは Q2 を成立させない。
         bool allProducersJoined{false};
         // Q3: ReaderRegistrationClosed（EpochDomain::readerRegistrationClosed()）
         bool readerRegistrationClosed{false};
         // Q4: ActiveReaders == 0（ISRRetireRouter::activeReaderCount() == 0）
         bool activeReadersZero{false};
-        // Q5: EpochSettled（EpochQuiescenceEvidence — H.11.13.3）
-        bool epochSettled{false};
-        // Q6: postStopEnqueueCount == 0（ShutdownRuntime 内部 sh6PostStopEnqueueCount_）
-        bool postStopEnqueueZero{false};
+        // Q5: EpochSettled — EpochQuiescenceEvidence（H.11.13.3）。
+        //   bool 単独ではなく epoch / registration / active reader の観測束で受け取り、
+        //   ShutdownRuntime が generation 一致まで照合する（captured==false は不成立）。
+        EpochQuiescenceEvidence epochEvidence{};
         // Q7: NoResurrection（AdmissionState == Closed 固定）
         bool noResurrection{false};
         // ★ G19: epochGeneration（EpochDomain::epochGeneration()）
@@ -322,6 +330,14 @@ public:
     //   ShutdownRuntimeIdentity::engineInstanceId に束縛し、cross-runtime confusion
     //   （Runtime A/B の generation=1 が同一に見える問題）を防ぐ。
     [[nodiscard]] uint64_t engineInstanceId() const noexcept { return engineInstanceId_; }
+    // ── ★ Q2/Q6/失敗観測（observation 依存の解消） ──
+    //   Q2: joinProducers() の Closing→Closed 成功でのみ true（caller の自己申告と AND する）。
+    [[nodiscard]] bool producersJoined() const noexcept;
+    //   Q6: post-stop enqueue の累計（markPostStopEnqueue()）。0 のときのみ Q6 成立。
+    [[nodiscard]] uint32_t postStopEnqueueCount() const noexcept;
+    //   reclaim 認可の失敗回数（Proof 不成立 / Permit reject）。Release でも観測できる。
+    void noteReclaimProofFailure() noexcept;
+    [[nodiscard]] uint32_t reclaimProofFailureCount() const noexcept;
 
 private:
     // ★ A-2: シャットダウン開始時刻
@@ -350,6 +366,12 @@ private:
     //   シャットダウン回数（単調増加）。ShutdownRuntimeIdentity の generation 源。
     //   tryMakeQuiescenceProof / tryMakeReclaimPermit の実装（Phase A2）で使用。
     std::atomic<uint64_t> shutdownGeneration_{0};
+    // ── ★ Q2: producer join の authority 側 evidence ──
+    //   joinProducers() の CAS 成功（Closing→Closed）でのみ true。caller の
+    //   QuiescenceObservation::allProducersJoined と AND して Q2 を成立させる。
+    std::atomic<bool> producersJoined_{false};
+    // ── ★ reclaim 認可失敗の観測（shutdown trace へ反映） ──
+    std::atomic<uint32_t> reclaimProofFailureCount_{0};
 
     // ── ★ dash2 §2.2 (Phase A2 — AUTH-09/13): Runtime インスタンス一意 ID。
     //   コンストラクタで g_shutdownRuntimeInstanceCounter から割り当てる。

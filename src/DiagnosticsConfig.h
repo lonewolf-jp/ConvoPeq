@@ -11,8 +11,12 @@
 
 // ============================================================================
 // AlignedAllocator abstraction — work72
-// JUCE_DSP_USE_INTEL_MKL が定義されている場合は MKL allocator (mkl_malloc/mkl_free)
-// 定義されていない場合はシステム allocator (_aligned_malloc/_aligned_free on Windows)
+// JUCE_DSP_USE_INTEL_MKL が 1 の場合は MKL allocator (mkl_malloc/mkl_free)
+// それ以外はシステム allocator (_aligned_malloc/_aligned_free on Windows)
+// ★ 2026-11-08: 判定を「defined かどうか」から「値が 1 かどうか」へ修正。
+//   juce_dsp.h は未定義時に `#define JUCE_DSP_USE_INTEL_MKL 0` を行うため、
+//   `defined(...)` だけを見ると juce_dsp.h を先に include した TU だけが MKL 経路を選び、
+//   同じターゲット内で allocator が食い違う（inline 関数の ODR 違反 → aligned_free で AV）。
 // ============================================================================
 
 namespace convo {
@@ -44,8 +48,8 @@ inline void system_aligned_free(void* ptr) noexcept
 } // namespace convo
 
 // ---- Unified interface ----
-// JUCE_DSP_USE_INTEL_MKL が定義されていれば MKL を使用、そうでなければ System allocator
-#if defined(JUCE_DSP_USE_INTEL_MKL)
+// JUCE_DSP_USE_INTEL_MKL が 1 の場合は MKL を使用、そうでなければ System allocator
+#if defined(JUCE_DSP_USE_INTEL_MKL) && JUCE_DSP_USE_INTEL_MKL
     #include <mkl.h>
     #define CONVOPEQ_ALIGNED_MALLOC(size, align) mkl_malloc((size), (align))
     #define CONVOPEQ_ALIGNED_FREE(ptr)           mkl_free(ptr)

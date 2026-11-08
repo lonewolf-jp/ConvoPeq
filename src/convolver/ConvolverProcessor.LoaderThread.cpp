@@ -40,8 +40,13 @@ ConvolverProcessor::LoaderThread::~LoaderThread()
 
 void ConvolverProcessor::LoaderThread::run()
 {
-    // ★ B-6: Generation check is pending implementation in the load loop.
-    //   See REPAIR_PLAN section B-6 for the complete pattern.
+    // ★ B-6（2026-11-08 調査で更新）: ロードループ内に世代チェックは無い。
+    //   stale completion の正当性は commit 直前の通貨判定が担う —
+    //   LoadPipeline.cpp の executePendingCommit が
+    //   convolverStateGeneration.isCurrentGeneration(requestGenId) で破棄する。
+    //   ループ内の中断は externalCancellationCheck（threadShouldExit / caller の shouldCancel）
+    //   が担い、要求世代はリサンプル処理（同 :642-654）でのみ参照する。
+    //   旧コメントの参照先 REPAIR_PLAN は現行リポジトリに存在しない（2026-11-08 削除）。
 
     if (auto* provider = owner.getRcuProvider(); provider != nullptr)
         provider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);

@@ -104,9 +104,10 @@ ConvolverProcessor::ConvolverProcessor()
 // ────────────────────────────────────────────────────────────────
 ConvolverProcessor::~ConvolverProcessor()
 {
-    // ★ B-6: Generation を進めて全 LoaderThread を無効化（Loader は次回起動時に終了）。
-    //   Generation は Owner validity のみ。Thread join は別責務。
-    convo::fetchAddAtomic(loaderGeneration_, 1, std::memory_order_acq_rel);
+    // ★ 2026-11-08: 旧 loaderGeneration_ の加算は削除した（読み出しが無く、owner-validity を
+    //   何も保証していなかった）。loader の停止は stopUpgradeThread() / forceCleanup()
+    //   （stopThread + 破棄）が担い、stale completion は convolverStateGeneration の
+    //   commit 直前ガードが破棄する。callAsync は WeakReference で owner 破棄後に何もしない。
 
     stopUpgradeThread();
     stopTimer();

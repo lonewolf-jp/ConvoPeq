@@ -1048,6 +1048,19 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
+    # ★ 2026-11-08: ローダー世代契約（stale 拒否）の固定。ConvolverProcessor の
+    #   loaderGeneration_ 削除に伴い、実効機構である GenerationManager のセマンティクスを
+    #   engine 非依存のテストで固定する。
+    add_executable(LoaderCurrencyContractTests src/tests/LoaderCurrencyContractTests.cpp)
+    target_include_directories(LoaderCurrencyContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_features(LoaderCurrencyContractTests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(LoaderCurrencyContractTests PRIVATE /EHsc /utf-8)
+    endif()
+    add_test(NAME LoaderCurrencyContract COMMAND LoaderCurrencyContractTests)
     add_test(NAME AdmissionPackedState COMMAND AdmissionPackedStateTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
@@ -2325,6 +2338,13 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         CONVOPEQ_UNIT_TESTS=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
+        # ★ 2026-11-08: 本ターゲットは ConvoPeq と同じエンジン TU をビルドする。
+        #   定義が無いと TUs の間で JUCE_DSP_USE_INTEL_MKL の defined 状態が変わり、
+        #   DiagnosticsConfig.h の allocator 選択（mkl vs system）が TU ごとに食い違って
+        #   ODR 違反 → aligned_free で AV になる（FrozenRuntimeWorld の破棄経路で実測）。
+        #   MKL が無い構成ではリンクできないため、検出時のみ定義する（未定義でも
+        #   DiagnosticsConfig.h 側の値判定により全 TU が system allocator で一貫する）。
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
