@@ -77,6 +77,7 @@
 ### 反映に必要な操作
 
 - 稼働中のアプリは起動時の MCP プロセスを使い続ける。context-mode 2.1.6 と graphify 0.9.104 をセッションに反映するには OpenChamber（OpenCode サーバー）の再起動が必要。
+- OpenCode の `plugins` に書かれた `context-mode@2.1.6` はサーバーが読み込んでいる（`opencode.log` に `loading plugin id=context-mode@2.1.6`、失敗の記録なし）。更新が必要だったのは npm global の MCP サーバー側で、プラグインではない。
 - 更新のため graphify の MCP プロセスを停止した。再起動までは graphify の MCP ツールは利用できない。
 
 ## 4. プロジェクトフォルダの整理
@@ -121,3 +122,22 @@
 ### 修正
 
 `git -c core.quotepath=false diff --name-only -z` に変え、NUL 区切りを `tr '\0' '\n'` で 1 行 1 パスに戻した。`-z` はパスを引用しないため、非 ASCII のパスも `doc/.../report.md` のまま届く。
+
+## 8. 文書のみ PR でのスキップ確認（修正後）
+
+修正を main に取り込んだ後、文書だけを変更した PR #182 で確認した。
+
+| 確認 | 結果 |
+|---|---|
+| Detect changed files | pass（11 秒） |
+| Windows MSVC / Release（必須） | skipping（スキップ。マージを妨げない） |
+| Windows MSVC Build 全体 | success（実行時間は 14 秒） |
+| Sanitizer CI | 起動しない |
+| ISR Authority Compliance | 起動しない |
+| ISR Verification | 起動しない |
+| CodeQL | 起動しない |
+| udioengine-lint / list-compliance | 起動しない（paths が src/** などのため） |
+
+- gh pr checks はスキップした必須チェックを skipping と表示する。必須チェックとしては成功として扱われ、マージはブロックされない。
+- 起動したワークフローは Windows MSVC Build の 1 本だけで、そのうち実行されたのは変更判定のジョブだけである。ビルドもテストも動かない。
+- 文書だけの PR の CI はこれで 14 秒で終わる。以前は同じ PR で約 40 分のビルドが走っていた。
