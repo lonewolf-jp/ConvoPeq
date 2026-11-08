@@ -1,8 +1,8 @@
 # ConvoPeq Build Guide (Windows 11 x64)
 
-This guide reflects the **current repository setup** — `build.bat` (358 lines), `CMakeLists.txt` (v0.6.11, 2,583 lines), `CMakePresets.json`, and `.vscode/tasks.json` (77 task entries).
+This guide reflects the **current repository setup** — `build.bat` (358 lines), `CMakeLists.txt` (v0.6.12, 2,583 lines), `CMakePresets.json`, and `.vscode/tasks.json` (77 task entries).
 
-**Project**: ConvoPeq v0.6.11 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
+**Project**: ConvoPeq v0.6.12 — IR Convolution + 20-band Parametric EQ + Real-Time Analyzer
 **Stack**: JUCE 8.0.12 · Intel oneMKL (sequential) · Intel IPP · AVX2 · C++20 · MSVC 19.44+ / icx 2026.0
 
 ---
@@ -62,9 +62,9 @@ ConvoPeq is a **Windows-only standalone application** (no plugin target).
 ```
 ConvoPeq/
 ├── build.bat                    # Primary build script (358 lines)
-├── CMakeLists.txt               # v0.6.11, 2,583 lines
+├── CMakeLists.txt               # v0.6.12, 2,583 lines
 ├── CMakePresets.json            # 3 configure presets
-├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.11), COMPANY, BUNDLE_ID
+├── ProjectMetadata.cmake        # APP_NAME, VERSION (v0.6.12), COMPANY, BUNDLE_ID
 ├── JUCE/                        # JUCE 8.0.12 (in-tree, required)
 ├── r8brain-free-src/            # IR resampler library
 ├── src/                         # 385 tracked files

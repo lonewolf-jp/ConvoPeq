@@ -1,4 +1,4 @@
-# ConvoPeq Architecture (v0.6.11)
+# ConvoPeq Architecture (v0.6.12)
 
 This document describes the internal architecture of **ConvoPeq**, a Windows-only standalone audio application built with **JUCE 8.0.12** and Intel oneMKL/IPP. It is intended for developers and contributors working on DSP, threading, state transitions, runtime governance, and ISR (Intelligent State Reconstruction) behavior.
 
@@ -930,7 +930,7 @@ The following directories are external dependencies and must be treated as **str
 
 ## 14. Architectural Summary (Current)
 
-ConvoPeq v0.6.11 uses a five-layer architecture:
+ConvoPeq v0.6.12 uses a five-layer architecture:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -980,7 +980,7 @@ Design focus:
 
 ---
 
-*Version: v0.6.11 (Updated 2026-11-08)*
+*Version: v0.6.12 (Updated 2026-11-08)*
 *Compiler: MSVC 19.44+ / Intel icx 2026.0*
 *Platform: Windows 11 x64*
 *JUCE: 8.0.12*

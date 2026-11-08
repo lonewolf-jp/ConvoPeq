@@ -13,7 +13,7 @@
 
 ## Overview
 
-ConvoPeq v0.6.11 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
+ConvoPeq v0.6.12 is built with JUCE 8.0.12 and is designed for low-latency, real-time-safe operation on Windows. All DSP runs in 64-bit double precision with AVX2 acceleration, backed by Intel oneMKL and IPP.
 
 | Aspect | Detail |
 |--------|--------|
@@ -115,12 +115,12 @@ ConvoPeq/
 ├── sampledata/                # Sample IR/EQ files
 ├── JUCE/                      # JUCE 8.0.12 framework source (in-tree)
 ├── r8brain-free-src/          # IR resampler (external dependency)
-├── CMakeLists.txt             # Build configuration (2,583 lines, v0.6.11)
+├── CMakeLists.txt             # Build configuration (2,583 lines, v0.6.12)
 ├── CMakePresets.json          # 3 configure + 2 build presets
 ├── build.bat                  # Primary build script (MSVC + icx, 358 lines)
-├── ProjectMetadata.cmake      # App name, version (v0.6.11), company
+├── ProjectMetadata.cmake      # App name, version (v0.6.12), company
 ├── README.md                  # This file
-├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.11)
+├── ARCHITECTURE.md            # Architecture & ISR governance (v0.6.12)
 ├── SOUND_PROCESSING.md        # Complete signal processing guide
 ├── BUILD_GUIDE_WINDOWS.md     # Windows build instructions
 └── HOW_TO_USE.md              # Practical usage guide (REW + AutoEq)
