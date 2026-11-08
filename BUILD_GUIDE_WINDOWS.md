@@ -121,7 +121,7 @@ build.bat Debug icx -DCONVOPEQ_REQUIRE_MKL=OFF
 
 ### 4.2 What build.bat Does
 
-1. **Parses arguments**: `BUILD_CONFIG` (Debug/Release), `PGO_MODE` (normal/pgo-gen/pgo-use), `DO_CLEAN`, `NO_PAUSE`, `COMPILER_MODE` (msvc/icx/icpx), `CMAKE_EXTRA_FLAGS` (`-DVAR[=VALUE]`)
+1. **Parses arguments**: `BUILD_CONFIG` (Debug/Release), `PGO_MODE` (normal/pgo-gen/pgo-use), `DO_CLEAN`, `NO_PAUSE`, `COMPILER_MODE` (msvc/icx/icpx), `TARGET_MODE` (all/app), `CMAKE_EXTRA_FLAGS` (`-DVAR[=VALUE]`)
 2. **Validates JUCE**: checks `JUCE\CMakeLists.txt` exists
 3. **Cleans juceaide sub-build cache**: removes stale `JUCE/tools/CMakeCache.txt` to prevent generator-mismatch errors
 4. **Environment setup**:
@@ -130,7 +130,7 @@ build.bat Debug icx -DCONVOPEQ_REQUIRE_MKL=OFF
 5. **Cleans** (if `clean`): kills `cmcldeps.exe`, `ninja.exe`, `ConvoPeq.exe`; removes build dir
 6. **Configures CMake**: `Ninja Multi-Config` generator, passes PGO flags + extra `-D` defines. Retries up to 3 times on configure failure (clears `.ninja_log` / `.ninja_deps`)
 7. **Build identity gate**: runs `src/tools/build_identity_gate.py --check` (fail-closed on identity mismatch)
-8. **Builds** selected config with `cmake --build` (icx uses `-j 1`)
+8. **Builds** selected config with `cmake --build` (icx/icpx use `-j 2`). With `app`, the command adds `--target ConvoPeq` and the Phase 8 test-target pass is skipped
 9. **RC1109 auto-retry**: for icx first-build, removes stale RC resource and retries once
 10. **Post-build verification**: checks CMakeCache PGO flags and artifact existence
 

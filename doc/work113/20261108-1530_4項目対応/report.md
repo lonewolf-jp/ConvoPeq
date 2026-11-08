@@ -77,6 +77,7 @@
 ### 反映に必要な操作
 
 - 稼働中のアプリは起動時の MCP プロセスを使い続ける。context-mode 2.1.6 と graphify 0.9.104 をセッションに反映するには OpenChamber（OpenCode サーバー）の再起動が必要。
+- OpenCode の `plugins` に書かれた `context-mode@2.1.6` はサーバーが読み込んでいる（`opencode.log` に `loading plugin id=context-mode@2.1.6`、失敗の記録なし）。更新が必要だったのは npm global の MCP サーバー側で、プラグインではない。
 - 更新のため graphify の MCP プロセスを停止した。再起動までは graphify の MCP ツールは利用できない。
 
 ## 4. プロジェクトフォルダの整理
