@@ -3,13 +3,13 @@
 
 ---
 
-## New in v0.6.11
+## New in v0.6.12
 
-1. Hardened the session and preset restore boundary by validating enum, integer, and floating-point inputs at setter boundaries, rejecting out-of-range and non-finite values while keeping the current state, with regression tests proving invalid restores cannot reach the runtime.
-2. Repaired regressions introduced while splitting commits by restoring accidentally dropped validation guards through forward-fix commits, verified with full Debug/Release test suites and negative controls, without rewriting any existing commit.
-3. Fixed runtime ownership, lifetime, and thread safety including retire routing, snapshot quarantine handling, off-RT-thread observation paths, epoch management, and serialization of concurrent publish producers behind a single facade lock, covered by new concurrency tests.
-4. Published a series of read-only fresh-discovery audits with evidence, correcting one earlier verdict and confirming no-action outcomes elsewhere, while recording remaining observations without promoting unproven concerns into defects.
-5. Fixed the Intel compiler build by aligning the MKL target handling with the existing configuration pattern, released version 0.6.11 through the single version authority, and verified all Debug, Release, and Intel compiler test suites pass completely.
+1. Made the convolver bypass transition tail-preserving: the bypass now crossfades over a dedicated 20 ms window instead of cutting the wet tail, restarts from the current mix after an interrupted fade, and leaves the reported latency and host PDC unchanged, with an N1 audio analysis and pre/post comparison checked in as evidence.
+2. Hardened the EQ coefficient cache: the key now normalizes disabled bands to zero and keeps the gain sign, collision probing was widened to 64 slots, restored EQ inputs reject non-finite values before they reach the runtime, and the duplicated phase-unwrap path is shared.
+3. Strengthened ISR/EBR reader and retire lifetimes: non-RT EQ state readers take a scoped epoch slot, the epoch reader is entered before the published world is loaded, pinning resolves through the registered slot rather than instance visibility, and new V11 engine-retire/reader-reacquire tests plus the STG-8/STG-10 additions pin the contract.
+4. Unified the corrupt-sample boundary: a single 2^53 magnitude limit defined in `CorruptSampleGuard.h` is now shared by the scalar and AVX2 guards, non-finite input can no longer enter the true-peak FIR history, and the true-peak regression coverage was extended.
+5. Added the RT measurement path, mixed-phase cache v3 and build tooling: a fixed-length RT measurement ring with a non-RT aggregator (modes 0/2/1, 1 s drain), the v3 persistent-cache namespace with state/sample-rate/failure coverage, an app-only `build.bat` target, and the clangd compilation database, header ODR check, preflight verifiers, oneAPI-cached Windows Release check and CI gating of the audio test.
 
 ## Overview
 
