@@ -138,7 +138,7 @@ ConvoPeq/
   - Filter structure: **Serial** (default) or **Parallel**
   - Auto Gain Control (AGC): attack 0.2 s, release 2.0 s, smooth 0.2 s
   - Nonlinear saturation via `fastTanh` rational approximation (no libm)
-  - `EQCoeffCache`: refcounted shared coefficient cache (v2.3)
+  - `EQCoeffCache`: hash-keyed shared coefficient cache (v2.3); ownership sits in `DSPHandleRuntime`, there is no refcount
 - **IR convolution** (`ConvolverProcessor`, split TU: 12 files in `src/convolver/`)
   - Intel MKL **Non-Uniform Partitioned Convolution (NUC)** engine
   - FFT abstraction: `ConvolverBuilder` → `FFTBackend` (IPP ProductionFft / TestFft) → `FFTExecutionContext`
@@ -215,7 +215,8 @@ Typical logical flow (exact sequence from `SOUND_PROCESSING.md`):
 Input → Headroom Gain → Input DC Block → Oversampling (optional, + OS-rate DC block) →
 [EQ ↔ Convolver] (order selectable; HC/LC follows the convolver, HPF/LPF follows the EQ) →
 Makeup Gain → Soft Clip (musical, fastTanh, AVX2) →
-Downsampling (if OS) → Output DC Block → Dither/Noise Shaping → Output
+Downsampling (if OS) → Output DC Block → Dither/Noise Shaping → TruePeak/LUFS metering →
+Peak Limiter (−0.5 dB, 1 dB knee) → Hard Clamp (±1 dBFS) → Fixed Latency Delay → Output
 ```
 
 - **Order is runtime-selectable**: EQ→Convolver or Convolver→EQ.
@@ -243,7 +244,7 @@ Phase modes: **As-Is / Minimum / Mixed**. Mixed mode is **minimum phase at low f
 
 - **20-band TPT (Topology-Preserving Transform) SVF** based on Vadim Zavalishin's "The Art of VA Filter Design" — smooth parameter modulation, low noise.
 - **RCU-based coefficient handoff**: UI/worker thread creates new `EQState` / `BandNode`, publishes via `publishAtomic(currentStateBits, ...)`. Audio thread loads via `loadCurrentState(acquire)`.
-- **EQCoeffCache**: refcounted shared coefficient cache — multiple snapshots share coefficients when parameters are identical.
+- **EQCoeffCache**: hash-keyed shared coefficient cache — multiple snapshots share coefficients when parameters are identical (ownership in `EQCacheManager` → `DSPHandleRuntime`; no refcount).
 - **Nonlinear saturation**: `fastTanh` rational polynomial approximation applied per-sample within the SVF loop (no `libm`, branchless for |x| < CLIP_THRESHOLD).
 - **AGC** (Auto Gain Control): envelope-tracking automatic gain adjustment with precomputed attack/release/smooth coefficient lookup tables.
 - **M/S (Mid-Side) processing**: supports per-band Left/Right/Mid/Side channel modes via `kFilterChannels=4`.
@@ -375,7 +376,7 @@ For `CMakePresets.json` usage, VS Code task reference, CTest suite commands, and
 - Default daily workflow: `build.bat` or VS Code tasks (77 entries in `.vscode/tasks.json`)
 - MSVC and icx build directories are fully isolated (`build/` vs `build-icx/`) — can coexist
 - PGO (Profile-Guided Optimization) is MSVC-only; not supported for icx
-- RNG ring buffer for dither is pre-filled by worker thread — no RNG generation on audio thread
+- Psychoacoustic dither draws from an RNG ring pre-filled by the timer (message) thread; the fixed 4th/16th and adaptive 9th shapers run an inline xoshiro256 generator on the audio thread
 - All coefficients (EQ SVF, filter biquad, AGC tables, noise shaper) precomputed in message thread
 - 53 CTest regression executables available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
 - Do not modify external dependency trees directly:
