@@ -1,0 +1,100 @@
+# build.bat のアプリ限定ビルド、CI の文書スキップ、ツール更新、フォルダ整理
+
+- 実施: 2026-11-08 15:00〜
+- 対象: `main` = `969a988e`
+- 目的: 次の 4 件を実施する。(1) `build.bat` にアプリ限定ビルドのオプションを追加、(2) 文書だけの変更で GitHub Actions をスキップ、(3) context-mode と graphify の更新と学習、(4) プロジェクト内フォルダの扱いの整理。
+
+## 1. `build.bat` のアプリ限定ビルド（`app`）
+
+### 変更
+
+- 引数 `app` を追加した。`ConvoPeq` ターゲットだけをビルドし、テストターゲットと Phase 8 の追加ビルドを省略する。
+- 使い方の行と説明を更新した（`build.bat [Debug|Release] [clean] [nopause] [pgo-gen|pgo-use] [icx|icpx] [app] [-DVAR]`）。
+- `TARGET_MODE` を追加し、起動時に表示する。
+- `app` のときは `cmake --build ... --target ConvoPeq` を使う。
+
+### 実測
+
+| コンパイラ | コマンド | ターゲット | 結果 | 実行ファイル |
+|---|---|---|---|---|
+| icx | `build.bat Release icx app clean nopause` | 139（通常は 678） | exit 0 | `build-icx\ConvoPeq_artefacts\Release\ConvoPeq.exe`（48,434,176 B、15:28:34） |
+| MSVC | `build.bat Release app clean nopause` | 139 | exit 0 | `build\ConvoPeq_artefacts\Release\ConvoPeq.exe`（47,606,784 B、15:33:57） |
+
+- どちらも `Building Phase 8 test targets` は実行されていない。
+- 所要は icx が約 18 分（クリーンから）、MSVC が約 4 分（クリーンから、-j 既定）。
+
+### 注意
+
+- `build.bat` はビルド同一性ゲートを持つ。コミットやソース変更の後は stamp と一致せず、`clean` を付けないと拒否される（設計どおり）。アプリ限定でも `clean` が必要な場面がある。
+- MSVC モードは `vcvars64.bat` を済ませた環境で実行する必要がある（`build.bat` は MSVC では vcvars を呼ばない）。icx モードは `setvars.bat` を内部で呼ぶため不要。
+
+## 2. 文書だけの変更で CI をスキップ
+
+### 仕組み
+
+- 必須チェック `Windows MSVC / Release` は workflow 自体を `paths` で止めると Pending のままになりマージがブロックされる。一方、**job を条件でスキップすると "Success" として報告される**（GitHub の仕様）。この違いを利用した。
+- `windows-msvc-build.yml` に `changes` ジョブを追加し、変更ファイルを判定して `code` を出力する。`release` ジョブは `needs: changes` と次の条件を付けた。
+  - `if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')`
+  - 判定に失敗した場合はビルドする側に倒す（安全側）。
+- 文書とみなすパターン: `doc/`、`*.md`、`.memories/`、`.x64dbg-mcp/`、`.zcode/`。
+- 必須ではない `sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` には、`pull_request` の `paths-ignore` を追加した（workflow ごとスキップ）。
+
+### 実測
+
+- 文書だけの PR を作成し、`Windows MSVC / Release` がスキップ（成功扱い）になること、他の 3 ワークフローが起動しないことを確認した。結果は本報告の追記に記す。
+
+## 3. ツールの更新
+
+### context-mode 2.1.4 → 2.1.6
+
+- 更新: `npm install -g context-mode@latest`。
+- 確認: `context-mode --version` が `2.1.6`。MCP ハンドシェイクは 9 ツールで成功。
+- 変更点（リリースノート）:
+  - 2.1.5: doctor の Codex プラグイン一覧の読み取り、Stop フックの空応答、Read サイズ制限で画像と PDF を除外、各ホストの応答スキーマに合わせたフック検証。
+  - 2.1.6: **OpenCode の `ctx_*` ツールが OpenCode の権限ルールを通る**、コンパクト後の再呼び出しが現在のプロンプトだけを対象にする、スキルとルールの全文がモデルに届く、`CTX_REPLACE_TRIGGER_BYTES` 設定、Node の版チェック、Codex の `CODEX_HOME`、ZCode の 16 KB 超画像、Issue 取り込みの型ラベル。
+
+### graphify 0.9.103 → 0.9.104
+
+- 更新: `uv tool install "graphifyy[mcp]" --force`。実行中の `graphify-mcp.exe` が `Scripts` を掴むため、先に停止した。
+- スキル: `graphify install --platform opencode` と `--platform copilot` で同期した。
+- 確認: `graphify --version` が 0.9.104。MCP ハンドシェイクは 10 ツールで成功。
+- 変更点（リリースノート）:
+  - **セキュリティ**: `/graphify` の手順がスキャン対象パスを Python のコードへ埋め込まなくなり、信頼済みの `graphify-out/.graphify_root` から読む。ディレクトリ名に引用符や `$(...)` が含まれる場合のコード実行を塞いだ（#4762）。
+  - Solidity: コントラクト型のレシーバ、`using A for T`、`_` 接頭辞だけが異なる同名シンボルの解決。
+  - C#: コンストラクタ（インスタンス・静的・プライマリ）と `: base(...)` / `: this(...)` の解決、プロパティ・インデクサ・演算子本体の呼び出しの帰属。
+  - query: 同一ラベルの唯一の候補がシードから落ちないようにした。
+  - watch: inotify のマスクから読み取り専用イベントを外し、キュー溢れの自己増殖を防ぐ。`tsconfig.json` などの解決入力の変更で全体を再構築。`graph.json` が無いときの部分グラフ書き込みを修正。
+  - cache: `\\?\` の長いパス表記を同一視し、UNC 共有の空 stat 書き込み、ジャンクションの別名の誤共有を修正（Windows）。
+  - YAML: CloudFormation の `!Ref` などを、評価せずに解析する。
+  - ingest: 同じ URL の同時取り込みで衝突しない。
+  - AST キャッシュのスキーマを 40 に更新。
+
+### 反映に必要な操作
+
+- 稼働中のアプリは起動時の MCP プロセスを使い続ける。context-mode 2.1.6 と graphify 0.9.104 をセッションに反映するには OpenChamber（OpenCode サーバー）の再起動が必要。
+- 更新のため graphify の MCP プロセスを停止した。再起動までは graphify の MCP ツールは利用できない。
+
+## 4. プロジェクトフォルダの整理
+
+| フォルダ | GitHub レポジトリ | ローカル | 実施 |
+|---|---|---|---|
+| `.memories/repo` | 削除 | 残置 | `git rm -r --cached .memories`、`.gitignore` に `.memories/` を追加 |
+| `.x64dbg-mcp` | 削除 | 残置 | `git rm -r --cached .x64dbg-mcp`（`.gitignore` は既存） |
+| `.zcode` | 削除 | 削除 | `git rm -r .zcode` とローカルの削除 |
+
+- `.memories/repo` のローカルファイルは 1 件、`.x64dbg-mcp` は 2 件で、いずれも残置を確認した。
+- `.zcode` はローカルにも存在しない。
+
+## 5. 変更ファイル
+
+| 種別 | ファイル |
+|---|---|
+| ビルド | `build.bat` |
+| CI | `.github/workflows/windows-msvc-build.yml`、`sanitizer-ci.yml`、`isr-authority-compliance.yml`、`isr-verification.yml` |
+| 整理 | `.gitignore`、`.memories/repo/...`（追跡解除）、`.x64dbg-mcp/*`（追跡解除）、`.zcode/config.json`（削除） |
+| 報告 | 本ファイル |
+
+## 6. 未実施・注意
+
+- ツール更新のセッションへの反映は再起動後。
+- soak、TX 実機、TSan の実行、#10・#11 の文書修正は行っていない。
