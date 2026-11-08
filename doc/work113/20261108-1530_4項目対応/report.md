@@ -1,7 +1,7 @@
 # build.bat のアプリ限定ビルド、CI の文書スキップ、ツール更新、フォルダ整理
 
 - 実施: 2026-11-08 15:00〜
-- 対象: 開始時点の `main` = `969a988e`。第 1〜6 節は PR #180 でマージ済み（`main` = `f2995a44`）。第 7 節以降は PR #181 で扱う。
+- 対象: 開始時点の `main` = `969a988e`。第 1〜6 節は PR #180 でマージ済み（`main` = `f2995a44`）。第 7 節と CI の修正は PR #181、第 8 節は PR #182 で扱う。
 - 目的: 次の 4 件を実施する。(1) `build.bat` にアプリ限定ビルドのオプションを追加、(2) 文書だけの変更で GitHub Actions をスキップ、(3) context-mode と graphify の更新と学習、(4) プロジェクト内フォルダの扱いの整理。
 
 ## 1. `build.bat` のアプリ限定ビルド（`app`）
@@ -109,7 +109,7 @@
 
 ### 1 回目の結果
 
-文書だけを変更した PR #181 で確認した。`Detect changed files` は pass した。しかし `Windows MSVC / Release` はスキップされなかった。通常どおりビルドが始まった。
+文書だけを変更した PR #181 で確認した。`Detect changed files` は pass した。しかし `Windows MSVC / Release` はスキップされなかった。ビルドが始まった。
 
 原因は、変更ファイルの取得方法にある。`git diff --name-only` は既定（`core.quotepath=true`）で、非 ASCII のパスを引用符と 8 進エスケープで囲む。
 
@@ -141,3 +141,18 @@
 - gh pr checks はスキップした必須チェックを skipping と表示する。必須チェックとしては成功として扱われ、マージはブロックされない。
 - 起動したワークフローは Windows MSVC Build の 1 本だけで、そのうち実行されたのは変更判定のジョブだけである。ビルドもテストも動かない。
 - 文書だけの PR の CI はこれで 14 秒で終わる。以前は同じ PR で約 40 分のビルドが走っていた。
+
+### 8.1 main へのマージ後（push）
+
+文書だけの PR #182 を main にマージした直後の push でも、同じ判定が働いた。
+
+| 確認 | 結果 |
+|---|---|
+| Detect changed files | success（11 秒、efore..sha の判定） |
+| Windows MSVC / Release | skipped |
+| Sanitizer CI | 起動しない |
+| ISR Authority Compliance | 起動しない |
+| ISR Verification | 起動しない |
+| CodeQL | 起動する（変更判定を持たないワークフロー） |
+
+- 参考として、直前のマージ c4f50ef はワークフロー自体を変更していたため、push でも約 40 分のビルドが走った。差分が文書だけなら 11 秒で終わる。
