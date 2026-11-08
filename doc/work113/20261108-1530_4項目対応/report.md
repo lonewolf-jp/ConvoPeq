@@ -78,7 +78,7 @@
 
 - 稼働中のアプリは起動時の MCP プロセスを使い続ける。context-mode 2.1.6 と graphify 0.9.104 をセッションに反映するには OpenChamber（OpenCode サーバー）の再起動が必要。
 - OpenCode の `plugins` に書かれた `context-mode@2.1.6` はサーバーが読み込んでいる（`opencode.log` に `loading plugin id=context-mode@2.1.6`、失敗の記録なし）。更新が必要だったのは npm global の MCP サーバー側で、プラグインではない。
-- 更新のため graphify の MCP プロセスを停止した。再起動までは graphify の MCP ツールは利用できない。
+- 更新のため graphify の MCP プロセスを停止した。再起動後に復帰している（第 9 節）。
 
 ## 4. プロジェクトフォルダの整理
 
@@ -167,11 +167,11 @@ OpenChamber を再起動した後、更新したツールが実際に読み込�
 | context-mode の MCP | 9 ツールで接続。`ctx_stats` と `ctx_doctor` が応答する |
 | context-mode の索引 | 55 sources / 242 chunks（D9 PASS） |
 | context-mode の適用モード | deny-reason（D10 PASS） |
-| graphify の MCP | 10 ツールで接続。`graph_stats` が 57,380 nodes / 71,653 edges を返す |
+| graphify の MCP | 10 ツールで接続。`graph_stats` と `query_graph` が応答する |
 | graphify のスキル | 0.9.104 に更新済み（opencode / copilot。初回実行時に codex / claude も自動更新） |
 | その他の MCP | box 117、dropbox 41、obscura 37、serena 32、aidex 31、firecrawl 27、notion 24、mcp-windbg 12、brave 8、ddgs 6、headroom 3、context7 2、semble 2、cocoindex 1 |
 
-- graphify のグラフ: `graphify update .` で HEAD `fb10111` に一致させた。63,344 nodes / 80,669 edges / 3,318 communities になり、`graph.html` と `GRAPH_REPORT.md` も同時に更新された。更新前のグラフは `graphify-out/2026-11-08/` に退避されている。
+- graphify のグラフ: `graphify update .` を実行し、当時の HEAD `fb10111` に一致させた（以降の変更は文書のみ）。63,344 nodes / 80,669 edges / 3,318 communities になり、`graph.html` と `GRAPH_REPORT.md` も同時に更新された。更新前のグラフは `graphify-out/2026-11-08/` に退避されている。
 
 ### グラフ再構築時の注意
 
