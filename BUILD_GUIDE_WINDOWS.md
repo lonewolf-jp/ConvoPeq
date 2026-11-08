@@ -208,9 +208,10 @@ call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
 cmake -S . -B build-icx -G "Ninja Multi-Config" ^
   -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx
 
-cmake --build build-icx --config Debug
 cmake --build build-icx --config Release
 ```
+
+> icx is officially supported for **Release only**. `cmake --build build-icx --config Debug` is not offered because `/QxCORE-AVX2` is gated to Release while AVX2 intrinsics are unguarded, so the icx Debug target does not link (E-G3-1). Use MSVC for Debug verification.
 
 **Note**: On Windows, `icx.exe` handles both C and C++ (unlike Linux which uses `icx` for C and `icpx` for C++). Both `CMAKE_C_COMPILER` and `CMAKE_CXX_COMPILER` are set to `icx`.
 

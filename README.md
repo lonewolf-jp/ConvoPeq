@@ -138,7 +138,7 @@ ConvoPeq/
   - Filter structure: **Serial** (default) or **Parallel**
   - Auto Gain Control (AGC): attack 0.2 s, release 2.0 s, smooth 0.2 s
   - Nonlinear saturation via `fastTanh` rational approximation (no libm)
-  - `EQCoeffCache`: refcounted shared coefficient cache (v2.3)
+  - `EQCoeffCache`: hash-keyed shared coefficient cache (v2.3); ownership sits in `DSPHandleRuntime`, there is no refcount
 - **IR convolution** (`ConvolverProcessor`, split TU: 12 files in `src/convolver/`)
   - Intel MKL **Non-Uniform Partitioned Convolution (NUC)** engine
   - FFT abstraction: `ConvolverBuilder` → `FFTBackend` (IPP ProductionFft / TestFft) → `FFTExecutionContext`
@@ -215,7 +215,8 @@ Typical logical flow (exact sequence from `SOUND_PROCESSING.md`):
 Input → Headroom Gain → Input DC Block → Oversampling (optional, + OS-rate DC block) →
 [EQ ↔ Convolver] (order selectable; HC/LC follows the convolver, HPF/LPF follows the EQ) →
 Makeup Gain → Soft Clip (musical, fastTanh, AVX2) →
-Downsampling (if OS) → Output DC Block → Dither/Noise Shaping → Output
+Downsampling (if OS) → Output DC Block → Dither/Noise Shaping → TruePeak/LUFS metering →
+Peak Limiter (−0.5 dB, 1 dB knee) → Hard Clamp (±1 dBFS) → Fixed Latency Delay → Output
 ```
 
 - **Order is runtime-selectable**: EQ→Convolver or Convolver→EQ.
@@ -243,7 +244,7 @@ Phase modes: **As-Is / Minimum / Mixed**. Mixed mode is **minimum phase at low f
 
 - **20-band TPT (Topology-Preserving Transform) SVF** based on Vadim Zavalishin's "The Art of VA Filter Design" — smooth parameter modulation, low noise.
 - **RCU-based coefficient handoff**: UI/worker thread creates new `EQState` / `BandNode`, publishes via `publishAtomic(currentStateBits, ...)`. Audio thread loads via `loadCurrentState(acquire)`.
-- **EQCoeffCache**: refcounted shared coefficient cache — multiple snapshots share coefficients when parameters are identical.
+- **EQCoeffCache**: hash-keyed shared coefficient cache — multiple snapshots share coefficients when parameters are identical (ownership in `EQCacheManager` → `DSPHandleRuntime`; no refcount).
 - **Nonlinear saturation**: `fastTanh` rational polynomial approximation applied per-sample within the SVF loop (no `libm`, branchless for |x| < CLIP_THRESHOLD).
 - **AGC** (Auto Gain Control): envelope-tracking automatic gain adjustment with precomputed attack/release/smooth coefficient lookup tables.
 - **M/S (Mid-Side) processing**: supports per-band Left/Right/Mid/Side channel modes via `kFilterChannels=4`.
@@ -255,7 +256,7 @@ Additional quality-oriented stages applied around the core EQ/convolution chain:
 - **Input oversampling** (`CustomInputOversampler`): 2×/4×/8× via multi-stage Kaiser-windowed FIR interpolation, AVX2/FMA SIMD, denormal flush. DC blocker applied after upsampling.
 - **Output filtering** (`OutputFilter`): applied per active stage, not by routing position. HC/LC runs exactly once on the convolver output whenever the convolver is active (HC: 4th-order Butterworth, 4th-order Linkwitz-Riley, or 2nd-order Q=0.5 at 19 kHz up to 48 kHz and 22 kHz above; LC: 2nd-order HPF at 18 Hz, or Q=0.5 at 15 Hz). HPF/LPF runs after the EQ whenever the EQ is active (HPF 20 Hz 2nd-order; LPF two cascaded 2nd-order sections at 19 kHz up to 48 kHz and 24 kHz above). All coefficients precomputed on the message thread; the audio thread performs only biquad SOS evaluation (no `libm`).
 - **Soft clipping** (`softClipBlockAVX2`): piecewise musical clip (linear → knee `t²(3−2t)` → `fastTanh` saturation), AVX2 vectorized (4 doubles/IP), with a local 2× halfband stage when input oversampling is 1×. Anti-inter-sample-peak protection via the smooth knee transition.
-- **Dither/noise shaping**: 4 types (Psychoacoustic 12th-order / Fixed 4th-order / Fixed 15th-order / Adaptive 9th-order with CMA-ES). All TPDF dither, 64-byte aligned, lock-free audio thread path. RNG ring buffer pre-filled, worker thread refills.
+- **Dither/noise shaping**: 4 types (Psychoacoustic 12th-order / Fixed 4th-order / Fixed 15th-order GUI label, internally ORDER=16 / Adaptive 9th-order with CMA-ES). All TPDF dither, lock-free audio thread path with no allocation; coefficient tables are 64-byte aligned. The RNG ring buffer is pre-filled from the timer thread.
 
 ### 7) Analyzer Path
 
@@ -375,7 +376,7 @@ For `CMakePresets.json` usage, VS Code task reference, CTest suite commands, and
 - Default daily workflow: `build.bat` or VS Code tasks (77 entries in `.vscode/tasks.json`)
 - MSVC and icx build directories are fully isolated (`build/` vs `build-icx/`) — can coexist
 - PGO (Profile-Guided Optimization) is MSVC-only; not supported for icx
-- RNG ring buffer for dither is pre-filled by worker thread — no RNG generation on audio thread
+- Psychoacoustic dither draws from an RNG ring pre-filled by the timer (message) thread; the fixed 4th/16th and adaptive 9th shapers run an inline xoshiro256 generator on the audio thread
 - All coefficients (EQ SVF, filter biquad, AGC tables, noise shaper) precomputed in message thread
 - 53 CTest regression executables available (`cmake --build build --config Debug && cd build && ctest -C Debug`)
 - Do not modify external dependency trees directly:

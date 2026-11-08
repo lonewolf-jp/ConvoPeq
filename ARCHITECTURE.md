@@ -69,7 +69,7 @@ src/
 | `MainWindow.{h,cpp}` | 70.3 KB | JUCE DocumentWindow. Owns AudioEngine, EQControlPanel, ConvolverControlPanel, SpectrumAnalyzer, DeviceSettings. |
 | `DeviceSettings.{h,cpp}` | 59.9 KB | ASIO/WASAPI persistence (`device_settings.xml`). Adaptive coefficient persistence. Channel mask auto-recovery. ASIO driver blacklist wrapper class. |
 | `AsioBlacklist.h` | 1.5 KB | Compatibility guard for known-broken ASIO drivers. |
-| `CorruptSampleGuard.h` | 2.0 KB | Detection/handling policy for corrupt (NaN/Inf/denormal) input samples. |
+| `CorruptSampleGuard.h` | 2.0 KB | Single definition of the corrupt-magnitude limit (2^53, plus NaN/Inf) shared by the scalar and AVX2 sample guards (RES2-02). |
 | `ConvolverProcessor.h` | 72.7 KB | Public API header for IR convolution. BuildSnapshot, IRLoadPreview, PhaseMode, TailMode enums. |
 | `ConvolverBuilder.h` | 3.1 KB | ISR Plan Builder (Non-RT Authority). Sole creator/destroyer of FFT Plans; injects Plan into FFTExecutionContext. |
 | `FFTBackend.{h,cpp}` | 12.4 KB | FFT abstraction layer (C++20 Concept). `ProductionFft` (Intel IPP) + `TestFft` injectable backend. Plan lifecycle owned by Builder; RT calls are const & noexcept. |
@@ -230,8 +230,8 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,777 lines (315.6
 | `RuntimeBuilder.{h,cpp}` | 41.0 KB | Only entity that can construct `RuntimeState` (via `BuilderToken`). |
 | `RuntimeBuildTypes.h` | 15.4 KB | Build snapshot and fingerprint types. |
 | `RuntimeGraph.h` | 4.9 KB | Runtime graph representation. `validateDecisionCoverageContract()`. |
-| `RtMeasureRing.h` | 40.9 KB | Ring buffer for RT measurement samples (latency/overhead telemetry). |
-| `IRRuntimeContract.h` | 3.4 KB | Contract types between IR load/rebuild and the runtime world. |
+| `RtMeasureRing.h` | 40.9 KB | RT timing measurement ring (`CONVOPEQ_RT_MEASURE` mode 1; mode 2 stores samples without pushing to the ring). |
+| `IRRuntimeContract.h` | 3.4 KB | Non-RT IR/runtime shape contract (rate and block quantum must match) that rejects a mismatched publish (WORK105). |
 | `RuntimeTransition.h` | 2.1 KB | State transition description. |
 | `FrozenRuntimeWorld.{h,cpp}` | 5.2 KB | Phase-4 frozen world concept. |
 | `WorldLifecycleAudit.{h,cpp}` | 9.5 KB | World lifecycle audit trail. |
@@ -256,8 +256,8 @@ The architectural heart of ConvoPeq. `AudioEngine.h` alone is 5,777 lines (315.6
 | `.ResampleAndFallback.cpp` | 19.1 KB | r8brain resampling and fallback paths. |
 | `.Runtime.cpp` | 53.3 KB | Audio-thread runtime (process, bypass, latency). |
 | `.StateAndUI.cpp` | 50.9 KB | Preset save/load, UI bridge, serialization. |
-| `IRLoadAdmission.h` | 8.5 KB | Admission rules for starting an IR load/rebuild. |
-| `IRTrimTestHooks.h` | 0.5 KB | Test hooks for IR trim/level checks. |
+| `IRLoadAdmission.h` | 8.5 KB | Single source of the IR load admission contract (byte/channel/INT32/degenerate/resample/hash bounds, WORK102). |
+| `IRTrimTestHooks.h` | 0.5 KB | Test/measurement-only hook to disable the tail fade (default false, referenced only by the non-RT trim step). |
 
 > `MKLNonUniformConvolver.cpp` (~94.4 KB) is the active NUC engine and is compiled unconditionally; only its diagnostic blocks are `#ifdef`-guarded.
 
@@ -287,7 +287,7 @@ Cross-cutting foundation delivered in phases (v13.0 redesign):
 | File | Size | Role |
 |---|---|---|
 | `EpochDomain.h` | **35.6 KB** | 64 named reader slots, `globalEpoch` management, quiescent-state-based reader registration/tracking. |
-| `ScopedEpochReader.h` | 5.9 KB | RAII scoped epoch reader (enter/exit with a fixed reader slot). |
+| `ScopedEpochReader.h` | 5.9 KB | RAII reader scope for non-RT readers of EBR-managed objects (takes a fixed reader slot from `IReaderEpochProvider`). |
 | `RCUReader.h` | 9.3 KB | RAII reader epoch enter/exit. |
 | `SnapshotCoordinator.{h,cpp}` | 14.8 KB | Thread-safe snapshot publication and fade. |
 | `SnapshotFactory.{h,cpp}` | 8.4 KB | Snapshot creation and destruction. |
@@ -699,12 +699,12 @@ RT Path (Audio Thread):
 
 ### 6.4 NoiseShaperLearner
 
-- Dedicated worker thread for adaptive noise shaper learning.
+- One coordinator thread (`std::jthread`) drives the learner and fans candidate evaluation out to up to 6 worker threads (`kMaxParallelEvaluators`).
 - Audio thread pushes `AudioBlock` structs (256 samples, 2ch) to `LockFreeRingBuffer<AudioBlock, 4096>`.
-- CMA-ES optimization of 9th-order IIR coefficients (180 coefficient banks).
+- CMA-ES optimization of 9th-order IIR coefficients, with 180 coefficient banks (10 sample rates × 3 bit depths × 6 modes).
 - Multi-level normalization (4 target levels: -40/-30/-20/-10 dBFS).
 - Progress, error, and best coefficients reported via atomic variables to engine/UI.
-- All memory handoff and state transitions are real-time safe (RCU + lock-free).
+- Coefficient handoff uses the double-buffered `CoeffSet` (`coeffSetA`/`coeffSetB`) plus an atomic generation counter; the audio thread reads it through the `ProcessingState` snapshot. No locks or allocation on the audio thread.
 
 ### 6.5 SpectrumAnalyzerComponent
 
@@ -768,9 +768,8 @@ ConvoPeq follows a staged update model:
      - Check shutdown state
      - Check generation monotonicity
      - Check IR-finalized, retire pressure, and fading state
-   - If accepted: `RuntimeBuilder.buildRuntimePublishWorld()` → `RuntimePublishExecutor.executePublish()` → `RuntimeWorldAuthority::commit()`.
+   - If accepted: `RuntimeBuilder.buildRuntimePublishWorld()` → `RuntimePublishExecutor.executePublish()` → `RuntimeWorldAuthority::commit()` (the executor is the only ISR gateway to the commit).
    - `RuntimePublicationOrchestrator` selects the `TransitionPolicy` (HardReset by default, SmoothOnly when a fade is possible); `CrossfadeAuthority` only decides *whether* a crossfade is needed and for how long.
-   - `RuntimePublishExecutor` commits via `RuntimeWorldAuthority` on the ISR path.
 
 4. **Apply/swap phase (real-time-safe boundary)**
    - `DSPTransition` atomically swaps active/fading DSPCore pointers.
@@ -782,7 +781,7 @@ ConvoPeq follows a staged update model:
 - `device_settings.xml` (`DeviceSettings::saveSettings/loadSettings`)
   - Restores device state, ditherBitDepth, oversamplingFactor/Type, inputHeadroomDb, outputMakeupDb, adaptive noise shaper coefficients.
 - Manual preset XML (`AudioEngine::getCurrentState()/requestLoadState()`)
-  - Full processing-state portability: processing order, bypass, gain staging, filter modes, EQ 20-band parameters, Convolver params.
+  - Portable processing state: processing order, bypass, gain staging, saturation, dither/shaper selection, filter modes, the adaptive coefficient banks, and the EQ 20-band and Convolver child states (phase, mixed transition, IR length). The oversampling factor itself stays in `device_settings.xml`.
   - Load order is staged to prevent mode-dependent defaults from overwriting restored gain settings.
 
 ---

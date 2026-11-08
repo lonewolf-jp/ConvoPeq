@@ -74,11 +74,16 @@ Input conditioning is the first DSP stage after buffer alignment. It prepares th
   ```cpp
   inline void scaleBlockFallback(double* data, int numSamples, double gain) noexcept
   {
-      // AVX2: 4 doubles per instruction
+      int i = 0;
+      const int vEnd = numSamples / 4 * 4;
       const __m256d vGain = _mm256_set1_pd(gain);
-      for (int i = 0; i < numSamples/4*4; i += 4)
-          _mm256_storeu_pd(data+i, _mm256_mul_pd(_mm256_loadu_pd(data+i), vGain));
-      // scalar tail
+      for (; i < vEnd; i += 4)
+      {
+          __m256d vData = _mm256_loadu_pd(data + i);
+          _mm256_storeu_pd(data + i, _mm256_mul_pd(vData, vGain));
+      }
+      for (; i < numSamples; ++i)
+          data[i] *= gain;
   }
   ```
 - **No `libm` calls**: the gain is pre-converted from dB to linear in the message thread; the audio thread only performs multiplication.
@@ -135,7 +140,7 @@ juce::dsp::AudioBlock<double> processUp(juce::dsp::AudioBlock<double>& inputBloc
 - For each 2× stage, calls `interpolateStage()` per channel:
   - Applies FIR interpolation using precomputed coefficients.
   - Uses **AVX2/FMA** SIMD for dot product operations.
-  - Explicitly flushes denormal numbers to zero (`killDenormal`).
+  - Flushes tiny accumulation results to zero (`fastAbs(acc) < kDenormThreshold`), and zeroes any non-finite result while setting the corruption flag.
 - Each stage doubles the sample count.
 - Final output: double-precision, planar, 64-byte aligned buffer.
 
@@ -302,10 +307,11 @@ The main chain can process in two orders, controlled by the atomic `ProcessingSt
 
 **Audio Thread Runtime** (`ConvolverProcessor.Runtime.cpp`):
 ```cpp
-// At block start (audio thread): RCU load of latest IR state
-auto* currentIR = irState.load(std::memory_order_acquire);
-// For each channel: MKL NUC partitioned convolution
-mklNUC.process(channelBuffer, currentIR, ...);
+// At block start (audio thread): scoped RCU read, then load the active engine
+convo::RCUReaderGuard guard(runtimeRcuReader);
+auto* conv = loadActiveEngine(std::memory_order_acquire);
+// For each channel: StereoConvolver drives the MKL NUC partitions
+conv->process(channelBuffer, ...);   // nucConvolvers[ch]->Add() / Get()
 // Dry/wet mix, crossfade, latency compensation — all atomic, no allocation
 ```
 
@@ -429,7 +435,7 @@ return num / den;
 
 All four noise shaper types share these properties:
 - Double-precision processing throughout.
-- All state and buffers are pre-allocated; only the coefficient tables are explicitly 64-byte aligned (`alignas(64)`).
+- All state and buffers are pre-allocated. The coefficient tables, the dither RNG ring, the 15-tap coefficient/error/RNG arrays and the lattice coefficient/state arrays are explicitly `alignas(64)`; the 4th-order fixed shaper's state is not.
 - **No dynamic allocation, no locks** on the audio thread.
 - **TPDF (Triangular Probability Density Function) dither** — two uniform random samples summed.
 - **Error-feedback** topology: the quantization error is fed back and shaped by the noise shaper coefficients.
@@ -481,7 +487,7 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 - **4th-order error-feedback** noise shaper (ORDER = 4).
 - Coefficients: psychoacoustically tuned, sum to 1.0 for stability (e.g., `{0.46, 0.28, 0.17, 0.09}`).
 - TPDF dither added before quantization.
-- State is pre-allocated but not `alignas(64)`; the quantization step uses SSE2 (`_mm_round_sd`), and this shaper has no AVX2 path.
+- State is pre-allocated but not `alignas(64)`; quantization uses the SSE4.1 `_mm_round_sd`, and this shaper has no AVX2 path.
 - Diagnostics (RMS/peak error) accumulate on the audio thread from each block and are published atomically for the UI.
 
 ### 6.3 Fixed15TapNoiseShaper (GUI: "15th-order")
@@ -491,7 +497,7 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 - **16th-order error-feedback** noise shaper (class name retains "15Tap" for legacy consistency, but ORDER = 16).
 - Coefficients: `kFixed15TapNoiseShaperTunedCoeffs` (psychoacoustically optimized).
 - TPDF dither added before quantization.
-- State is pre-allocated but not `alignas(64)`.
+- `coeffs`, `errors`, `rngState` and the diagnostic buffers are `alignas(64)`; quantization uses SSE4.1 rounding.
 - Diagnostics (RMS/peak error) accumulate on the audio thread; the error FIFO has no reader in the current tree.
 
 ### 6.4 AdaptiveNoiseShaper — NoiseShaperLearner (GUI: "9th-order adaptive")
@@ -506,8 +512,8 @@ The device-settings entry is labelled **"12th-order"**, matching the implementat
 **CMA-ES Optimization**:
 - Covariance Matrix Adaptation Evolution Strategy running off the audio thread: one dedicated coordinator (`std::jthread`) fans candidate evaluation out to up to **6** worker threads (`kMaxParallelEvaluators`).
 - Receives `AudioBlock` structs (256 samples, planar L/R) via `LockFreeRingBuffer<AudioBlock, 4096>` from the audio thread, assembled into `AudioSegment` (4096 samples + masking thresholds) for spectral evaluation.
-  - `AudioBlock`: `double L[256]`, `double R[256]`, sampleRate, bitDepth, coeffBankIndex, sessionId (defined in `AudioEngine.h`).
-  - `AudioSegment`: `double left[4096]`, `double right[4096]`, masking thresholds (2049 bins via MKL FFT). 64-byte aligned.
+  - `AudioBlock`: `double L[256]`, `double R[256]`, `numSamples`, `sampleRateHz`, `bitDepth`, `adaptiveCoeffBankIndex`, `sessionId` (defined in `AudioEngine.h`).
+  - `AudioSegment`: `double left[4096]`, `double right[4096]`, masking thresholds over 2049 bins computed with an Intel IPP FFT (`MklFftEvaluator`; the class name keeps the MKL prefix, the backend is IPP). 64-byte aligned.
   - `AudioSegmentBuffer` (`src/AudioSegmentBuffer.h`) — heap-allocated aligned ring for segment assembly (5 s @ 768 kHz capacity).
   - `SpectralType`: `Broadband` / `Tonal` / `Transient` classification with per-segment gain normalization.
 - Six learning modes: **Shortest, Short, Middle, Long, Ultra, Continuous** (gradated convergence quality).
@@ -729,7 +735,7 @@ The ISR (Intelligent State Reconstruction) runtime governance layer manages DSP 
 [JUCE Audio Device Callback]
         │
         ▼
-[AudioEngineProcessor::processBlock (float or double)]
+[AudioEngineProcessor::processBlock(double) — standalone build]
         │
         ▼
 [AudioEngine::processBlockDouble]
