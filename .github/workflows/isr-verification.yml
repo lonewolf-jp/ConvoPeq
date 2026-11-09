@@ -118,6 +118,8 @@ permissions:
 jobs:
   isr-verify:
     runs-on: windows-latest
+    env:
+      ONEAPI_ROOT_DIR: "C:\\Program Files (x86)\\Intel\\oneAPI"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -161,6 +163,124 @@ jobs:
           if ($probe -notmatch [regex]::Escape($astGrepVersion)) {
             throw "Unexpected ast-grep version: '$probe' (expected $astGrepVersion)"
           }
+
+      # ★ Part 8 G: clang-tidy 監査は build/compile_commands.json と JUCE 生成ヘッダを必要とする。
+      #   exhaustive tier（週次 cron と明示指定）は承認済みポリシーで enforce されるため、
+      #   DB が無いと監査が失敗する（実測: run 42513179942）。monitor の tier では
+      #   導入コストを払わないよう、監査が enforce される場合のみ前提を整える。
+      - name: Set up MSVC (cl.exe) environment for clang-tidy audit
+        if: ${{ inputs.requireClangTidyAudit || inputs.verificationTier == 'exhaustive' || github.event.schedule == '0 19 * * 0' }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja (clang-tidy audit prerequisite)
+        if: ${{ inputs.requireClangTidyAudit || inputs.verificationTier == 'exhaustive' || github.event.schedule == '0 19 * * 0' }}
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            try { choco install ninja -y --no-progress } catch { Write-Host "choco install failed: $_" }
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            python -m pip install --quiet ninja
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            throw "ninja is not available - the clang-tidy audit cannot be prepared."
+          }
+          ninja --version
+
+      - name: Restore oneAPI (MKL + IPP) cache
+        if: ${{ inputs.requireClangTidyAudit || inputs.verificationTier == 'exhaustive' || github.event.schedule == '0 19 * * 0' }}
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          # latest は Intel インストーラが作るシンボリックリンクのため、
+          # 実体のバージョン付きディレクトリを保存する（復元後に junction を作り直す）。
+          path: |
+            C:\Program Files (x86)\Intel\oneAPI\mkl\2025.1
+            C:\Program Files (x86)\Intel\oneAPI\ipp\2022.1
+          key: oneapi-mkl-ipp-${{ runner.os }}-mkl2025.1-ipp2022.1-v2
+
+      - name: Install Intel oneAPI (MKL + IPP) via winget
+        if: ${{ inputs.requireClangTidyAudit || inputs.verificationTier == 'exhaustive' || github.event.schedule == '0 19 * * 0' }}
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          Write-Host "oneAPI cache hit: ${{ steps.oneapi-cache.outputs.cache-hit }}"
+          # latest が無い（キャッシュ復元直後）場合は実体への junction を作る。
+          foreach ($comp in @('mkl','ipp')) {
+            $latest = Join-Path $oneapi "$comp\latest"
+            if (Test-Path $latest) { continue }
+            $ver = Get-ChildItem (Join-Path $oneapi $comp) -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match '^\d{4}\.\d+$' } |
+                   Sort-Object Name -Descending | Select-Object -First 1
+            if ($ver) {
+              cmd /c mklink /J "$latest" "$($ver.FullName)" | Out-Null
+              Write-Host "created junction: $latest -> $($ver.FullName)"
+            }
+          }
+          # 必要物: ヘッダだけでなく import ライブラリも確認する（ヘッダのみで成功扱いにしない）。
+          $required = [ordered]@{
+            'mkl.h'        = "$oneapi\mkl\latest\include\mkl.h"
+            'ipp.h'        = "$oneapi\ipp\latest\include\ipp.h"
+            'mkl_core.lib' = "$oneapi\mkl\latest\lib\mkl_core.lib"
+            'ippcore.lib'  = "$oneapi\ipp\latest\lib\ippcore.lib"
+          }
+          function Get-Missing {
+            @($required.GetEnumerator() | Where-Object { -not (Test-Path $_.Value) } | ForEach-Object { $_.Key })
+          }
+          $missing = Get-Missing
+          if ($missing.Count -eq 0) {
+            Write-Host "oneAPI (MKL + IPP) already present and complete (headers + import libraries)."
+            exit 0
+          }
+          Write-Host "missing before install: $($missing -join ', ')"
+          winget --version
+          winget install --id Intel.OneAPI.BaseToolkit -e --silent `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+          # winget の終了コードは成功判定に使わない（導入済み・部分成功でも非 0 を返す実測がある）。
+          Write-Host "winget exit=$LASTEXITCODE (not the success criterion)"
+          $missing = Get-Missing
+          if ($missing.Count -ne 0) {
+            Get-ChildItem "$oneapi" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  oneAPI dir: $($_.Name)" }
+            throw ("Intel oneAPI (MKL + IPP) is not usable: missing " + ($missing -join ', ') + " - refusing to skip the audit.")
+          }
+          Write-Host "oneAPI verified: headers and import libraries present."
+
+      - name: Export oneAPI environment
+        if: ${{ inputs.requireClangTidyAudit || inputs.verificationTier == 'exhaustive' || github.event.schedule == '0 19 * * 0' }}
+        shell: pwsh
+        run: |
+          $oneapi = $env:ONEAPI_ROOT_DIR
+          $mkl = Join-Path $oneapi 'mkl\latest'
+          $ipp = Join-Path $oneapi 'ipp\latest'
+          "MKLROOT=$mkl"        | Out-File -Append -FilePath $env:GITHUB_ENV
+          "IPPROOT=$ipp"        | Out-File -Append -FilePath $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$mkl;$mkl\lib\cmake\mkl;$ipp;$ipp\lib\cmake\ipp" |
+            Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Configure compile database for clang-tidy audit
+        if: ${{ inputs.requireClangTidyAudit || inputs.verificationTier == 'exhaustive' || github.event.schedule == '0 19 * * 0' }}
+        shell: pwsh
+        env:
+          # CMakeLists.txt は CONVO_CI_BUILD 定義時に音声デバイス前提のテストを登録しない。
+          CONVO_CI_BUILD: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCONVOPEQ_REQUIRE_MKL=ON 2>&1 | Tee-Object -FilePath configure-audit.log
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
+          $db = Join-Path $PWD 'build/compile_commands.json'
+          if (-not (Test-Path $db)) { throw "compile_commands.json was not generated: $db" }
+          Write-Host "[INFO] compile database: $db"
+          # clang-tidy は TU のインクルードを解決するため JuceHeader.h を必要とする。
+          # configure だけでは生成されないため、単一出力をビルドして用意する（数秒）。
+          ninja -C build -f build-Release.ninja ConvoPeq_artefacts/JuceLibraryCode/JuceHeader.h
+          if ($LASTEXITCODE -ne 0) { throw "JuceHeader generation failed ($LASTEXITCODE)" }
+          $hdr = Join-Path $PWD 'build/ConvoPeq_artefacts/JuceLibraryCode/JuceHeader.h'
+          if (-not (Test-Path $hdr)) { throw "JuceHeader.h was not generated: $hdr" }
+          Write-Host "[INFO] generated header: $hdr"
 
       - name: Run ISR V1-V10 verification scripts
         shell: pwsh
