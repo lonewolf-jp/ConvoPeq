@@ -127,6 +127,10 @@ endif()
 #------------------------------------------------------------
 option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
 option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.)" OFF)
+# IR ロード経路の診断出力（stderr）。既定 OFF。
+# stderr が未ドレインのパイプの場合、LoaderThread の書き込みが止まり IR ロードが失敗するため、
+# 通常ビルドでは出力しない。調査時のみ ON にする（既定ビルドで stderr 出力ゼロを保証する）。
+option(CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS "Enable IR load-chain diagnostics on stderr (investigation builds only)" OFF)
 option(CONVOPEQ_ENABLE_TEST_HOOKS "Compile the audio-block test hook (verification builds only; default OFF)" OFF)
 
 # work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 OFF。
@@ -1674,6 +1678,7 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
     $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS}>:CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS=1>
     $<$<BOOL:${CONVOPEQ_ENABLE_TEST_HOOKS}>:CONVOPEQ_ENABLE_TEST_HOOKS=1>
     $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
     # CONVOPEQ_DIAG_SAMPLE_MASK は DiagnosticsConfig.h で自動設定 (Release:0xFF, Debug:0x3F)。
@@ -2354,6 +2359,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
         $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS}>:CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS=1>
     $<$<BOOL:${CONVOPEQ_ENABLE_TEST_HOOKS}>:CONVOPEQ_ENABLE_TEST_HOOKS=1>
         $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
         JUCE_DONT_DEFINE_MIN_MAX_MACROS=1

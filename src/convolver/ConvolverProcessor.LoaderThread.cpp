@@ -10,6 +10,13 @@
 
 #include "audioengine/AtomicAccess.h"
 
+// IR ロード経路の診断出力（既定 OFF）。stderr が未ドレインのパイプの場合に
+// LoaderThread の書き込みが止まり IR ロードが失敗するため、通常ビルドでは出力しない。
+// 調査時は -DCONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS=ON で従来の出力を再現できる。
+#ifndef CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
+ #define CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS 0
+#endif
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD)
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
@@ -498,6 +505,7 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
 }
 
 // ★ WORK112 112-1: transform chain checkpoint（NonRT 観測のみ・値の変更なし）
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
 static void printChainCheckpoint(const char* tag, const juce::AudioBuffer<double>& buf, double sr)
 {
     if (buf.getNumSamples() <= 0 || buf.getNumChannels() <= 0 || sr <= 0.0)
@@ -543,6 +551,9 @@ static void printChainCheckpoint(const char* tag, const juce::AudioBuffer<double
         tag, n, sr, peak, rms, dc, sum2, nonfinite, subnormal,
         e[0], e[1] - e[0], e[2] - e[1], e[3] - e[2]);
 }
+#else
+static void printChainCheckpoint(const char*, const juce::AudioBuffer<double>&, double) {}
+#endif
 
 bool ConvolverProcessor::LoaderThread::doTrimStep()
 {
@@ -688,6 +699,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
                 if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; postArg = i; }
         }
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
             "[IR_RATE_GEN] gen=%llu sourceSr=%.0f targetSr=%.0f actualSr=%.0f "
             "sourceLen=%d convertedLen=%d ratio=%.4f resampled=%s srcArgmax=%d convArgmax=%d\n",
@@ -695,6 +707,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             preSr, sampleRate, stepResult.loadedSR, preLen, postLen,
             static_cast<double>(postLen) / static_cast<double>(preLen > 0 ? preLen : 1),
             didResample ? "yes" : "no", preArg, postArg);
+#endif
     }
 
     if (ConvolverProcessorInternal::checkCancellation(shouldStop, nullptr)) return false;
@@ -768,6 +781,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         const uint64_t genDbg =
             static_cast<unsigned long long>(owner.convolverStateGeneration.getCurrentGeneration());
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
             "[IR_TAIL_GEOM] gen=%llu loadedSr=%.0f loadedLen=%d targetLength=%d copySamples=%d "
             "fadeSamples=%d fadeStart=%d fadeEnd=%d fadeMs=%.4f fadeDisabled=%d\n",
@@ -776,6 +790,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             copySamples, fadeSamples, fadeStart, fadeEnd,
             1000.0 * static_cast<double>(fadeSamples) / stepResult.loadedSR,
             fadeDisabled ? 1 : 0);
+#endif
 
         const auto* pre  = stepResult.loadedIR.getReadPointer(0); // Tukey 後 / fade 前
         const auto* post = stepTrimmed.getReadPointer(0);         // fade 後
@@ -788,10 +803,12 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             if (i < 0 || i >= copySamples) continue;
             const double a = static_cast<double>(pre[i]);
             const double b = static_cast<double>(post[i]);
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
             std::fprintf(stderr,
                 "[IR_TAIL_ENV] i=%d tMs=%.4f afterTukey=%.8e afterFade=%.8e gain=%.6f\n",
                 i, 1000.0 * static_cast<double>(i) / stepResult.loadedSR, a, b,
                 (std::abs(a) > 1.0e-30) ? b / a : 0.0);
+#endif
         }
 
         // energy split（全帯域）+ 1-pole 100Hz LP 相当の低域 energy
@@ -810,12 +827,14 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             lpTot += sy;
             if (i < fadeStart) lpPre += sy; else lpBand += sy;
         }
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
             "[IR_TAIL_ENERGY] gen=%llu total=%.8e preFade=%.8e fadeBand=%.8e bandFrac=%.6f "
             "lp100Total=%.8e lp100Pre=%.8e lp100Band=%.8e lp100BandFrac=%.6f\n",
             static_cast<unsigned long long>(genDbg), eTot, ePre, eBand,
             (eTot > 1.0e-30) ? eBand / eTot : 0.0,
             lpTot, lpPre, lpBand, (lpTot > 1.0e-30) ? lpBand / lpTot : 0.0);
+#endif
     }
 
 #if defined(__AVX2__)
@@ -891,8 +910,10 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
     }
 
     printChainCheckpoint("E_phase", stepTrimmed, sampleRate);
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
     std::fprintf(stderr, "[IR_CHAIN] F_scale scaleFactor=%.8f phaseMode=%d (scale は engine 内の周波数領域で乗算)\n",
                  stepResult.scaleFactor, static_cast<int>(phaseMode));
+#endif
 
     return true;
 }
