@@ -636,16 +636,21 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
     // ★ WORK109 109-1/109-2: resample 世代ペア + 実データ密度（non-zero index）の記録。
     //   Numeric trace only (NonRT LoaderThread). RT には一切出力しない。
     {
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         const double preSr = stepResult.loadedSR;
         const int preLen = stepResult.loadedIR.getNumSamples();
-        int preArg = -1;
-        if (preLen > 0 && stepResult.loadedIR.getNumChannels() > 0)
+        const int preArg = [&]() -> int
         {
+            int best = -1;
+            if (preLen <= 0 || stepResult.loadedIR.getNumChannels() <= 0)
+                return best;
             const double* d = stepResult.loadedIR.getReadPointer(0);
             double bv = 0.0;
             for (int i = 0; i < preLen; ++i)
-                if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; preArg = i; }
-        }
+                if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; best = i; }
+            return best;
+        }();
+#endif
 
         bool didResample = false;
 
@@ -689,6 +694,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             didResample = true;
         }
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         const int postLen = stepResult.loadedIR.getNumSamples();
         int postArg = -1;
         if (postLen > 0 && stepResult.loadedIR.getNumChannels() > 0)
@@ -698,6 +704,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             for (int i = 0; i < postLen; ++i)
                 if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; postArg = i; }
         }
+#endif
 
 #if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
@@ -772,7 +779,9 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
 
     printChainCheckpoint("D_trimfade", stepTrimmed, stepResult.loadedSR);
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
     // ★ WORK111: 末尾 fade geometry / envelope / energy（NonRT trace のみ・出力は stderr）
+    //   Part 8: 診断 OFF では走査・エネルギー計算も行わない（キャンセル応答を遅らせない）。
     if (stepResult.loadedSR > 0.0 && copySamples > 0
         && stepResult.loadedIR.getNumChannels() > 0)
     {
@@ -836,6 +845,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             lpTot, lpPre, lpBand, (lpTot > 1.0e-30) ? lpBand / lpTot : 0.0);
 #endif
     }
+#endif
 
 #if defined(__AVX2__)
     _mm256_zeroupper();
