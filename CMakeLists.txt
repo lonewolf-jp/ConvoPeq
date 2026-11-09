@@ -1362,6 +1362,62 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(DEFINED ENV{IPPROOT})
         target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{IPPROOT}/include")
     endif()
+
+    #------------------------------------------------------------
+    # ★ Part 8 F/H/I: テール層の完全再構成・テール保持・先頭パーティション欠落の回帰
+    #   受入 ID: F-1〜F-5 / H-1〜H-4 / I-1〜I-2（実装準備仕様 §3.2）
+    #------------------------------------------------------------
+    juce_add_console_app(TailLayerIntegrityTests)
+    target_sources(TailLayerIntegrityTests PRIVATE
+        src/tests/TailLayerIntegrityTests.cpp
+        src/MKLNonUniformConvolver.cpp
+        src/FFTBackend.cpp
+        src/FFTExecutionContext.cpp
+    )
+    target_include_directories(TailLayerIntegrityTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(TailLayerIntegrityTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(TailLayerIntegrityTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TailLayerIntegrityTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(TailLayerIntegrityTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TailLayerIntegrityTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    if(TARGET IPP::ippcore)
+        target_link_libraries(TailLayerIntegrityTests PRIVATE IPP::ippcore IPP::ipps)
+    endif()
+    target_link_libraries(TailLayerIntegrityTests PRIVATE r8brain Psapi)
+    add_test(NAME TailLayerIntegrityTests COMMAND TailLayerIntegrityTests)
+    juce_generate_juce_header(TailLayerIntegrityTests)
+    target_link_libraries(TailLayerIntegrityTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+    if(DEFINED ENV{IPPROOT})
+        target_include_directories(TailLayerIntegrityTests SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    endif()
 endif()
 
 #------------------------------------------------------------

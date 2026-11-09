@@ -681,9 +681,12 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // - Layer Tail Contouring: enforce robust lower bounds and shape layer gains for contour clarity.
     if (!tailEnabled)
     {
-        tailStrength = 0.0;
-        layer1Gain = 0.0;
-        layer2Gain = 0.0;
+        // Part 8 F: Bypass は「テール整形をしない」であり「層を切る」ではない。
+        //   層は等倍で維持し、L0 被覆も tail 側と同じ 0.12 秒下限に揃える。
+        tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.12));
+        tailStrength = 1.0;
+        layer1Gain = 1.0;
+        layer2Gain = 1.0;
     }
     else if (tailMode == 0)
     {
@@ -715,8 +718,8 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         layer2Gain = 0.0;
     }
 
-    m_tailEnabled = tailEnabled;
-    m_tailStrength = tailEnabled ? tailStrength : 0.0;
+    m_tailEnabled = true; // Part 8 F: L1/L2 の出力を常に加算する（Bypass はゲイン 1.0）
+    m_tailStrength = tailStrength;
     m_maxBlockSize = blockSize;
     m_tailLayerGain[0] = 1.0;
     m_tailLayerGain[1] = layer1Gain;
@@ -795,10 +798,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   pow2 切り上げは行わない（契約: partSize 倍数のみ — work96 §3 / 不要な 2× 膨張の回避）。
     const int l0CoverageAligned =
         ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
-    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, tailEnabled);
+    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, true);
     const int l0MaxLen = l0MaxParts * l0Part;
     const int l0LenTarget = juce::jlimit(l0Part, l0MaxLen, l0CoverageAligned);
-    const int l0Len = std::min(irLen, tailEnabled ? l0LenTarget : l0MaxLen);
+    // Part 8 F: tail 無効（Bypass）でも L0 + L1 + L2 で IR 全体を覆う。
+    const int l0Len = std::min(irLen, l0LenTarget);
 
     // ★ SR-02 (S-4): 拡大 / cap 発動の可視化（NonRT ログのみ。RT 側ログは禁止）。
     //   ※ juce::String::formatted の %s は引数をワイド文字列として解釈するため（B13-GATE と同注記）、
@@ -817,10 +821,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     }
 
     const int l1Offset = l0Len;
-    const int l1Len    = tailEnabled ? std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)) : 0;
+    const int l1Len    = std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)); // Part 8 F
 
     const int l2Offset = l0Len + l1Len;
-    const int l2Len    = tailEnabled ? std::max(0, irLen - l0Len - l1Len) : 0;
+    const int l2Len    = std::max(0, irLen - l0Len - l1Len); // Part 8 F
 
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     const LayerCfg cfgs[kNumLayers] = {
@@ -2034,3 +2038,4 @@ void MKLNonUniformConvolver::Reset()
 }
 
 } // namespace convo
+
