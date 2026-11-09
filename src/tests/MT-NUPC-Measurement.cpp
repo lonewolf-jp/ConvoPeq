@@ -80,9 +80,14 @@ LayerCfgTheo computeLayerCfg (int irLen, bool tailEnabled)
 {
     LayerCfgTheo cfg;
     const int l0Part  = nextPow2 (std::max (kBlockSize, 64));   // 64
-    const int l1Part  = l0Part * kTailL1L2Mult;                 // 512
-    const int l2Part  = l1Part * kTailL1L2Mult;                 // 4096
     const int l0LenByTailStart = static_cast<int> (std::llround (kTheoTailStartClamped * kSampleRate)); // 5760
+    // Part 8 H/I: production と同じ倍率制限（2 の冪・上限 4・L0 保持長以下）。
+    int l1Mult = 1;
+    while (l1Mult * 2 <= kTailL1L2Mult && l1Mult * 2 <= 4
+           && l1Mult * 2 * l0Part <= std::max (l0Part, l0LenByTailStart))
+        l1Mult *= 2;
+    const int l1Part  = l0Part * l1Mult;
+    const int l2Part  = l1Part * kTailL1L2Mult;
     // ★ I5 保証アライン（production cpp:758-764と同式）。5760 は 64 の倍数のため本構成では無変。
     const int l0CoverageAligned = ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
     const int l0MaxParts = convo::MKLNonUniformConvolver::computeL0MaxParts (l0Part, l0CoverageAligned, true);

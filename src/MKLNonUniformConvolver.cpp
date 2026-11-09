@@ -655,6 +655,16 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     if (impulse == nullptr || irLen <= 0 || blockSize <= 0)
         return false;
 
+    // Part 8: 対応上限（64〜32768）を超えるブロック長は性能保証外。幾何は常に健全に保つが、
+    //   NonRT のこの関数でのみ 1 回警告する（Add/Get の RT 経路にはログも分岐も追加しない）。
+    if (blockSize > kMaxSupportedBlockSize
+        && !m_blockSizeWarned.exchange(true, std::memory_order_relaxed))
+    {
+        juce::Logger::writeToLog("MKLNonUniformConvolver: blockSize " + juce::String(blockSize)
+            + " exceeds the supported maximum (" + juce::String(kMaxSupportedBlockSize)
+            + "). Geometry stays valid; performance is not qualified.");
+    }
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t diagSeq   = globalDiagSeq.fetch_add(1, std::memory_order_relaxed) + kDiagSeqFirstRuntime;
     const uint64_t beforeMkl = convo::diag::allocatedBytes();
@@ -787,11 +797,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   構成は required=90 の意図的例外 — work57 期待値表を同一サイクルで更新）。
     const int l0LenByTailStart = static_cast<int>(std::llround(tailStartSec * sampleRateForTail));
 
-    // ★ Part 8 H: L1 のパート長は L0 の保持長を超えないこと。
-    //   超えるとテール層の先頭パーティションが欠落する（block >= 1024 / 48 kHz で実測）。
-    //   倍率は 2 の冪で下げ、下限は 1（= l0Part）。L0 保持長は広げない（整形領域を変えない）。
+    // ★ Part 8 H/I: L1 のパート長は L0 の保持長を超えないこと、かつ倍率は 4 以下に制限する。
+    //   倍率 8（block 512 で 4096）では 13 分割以上の IR で先頭パーティションが欠落する（実測）。
     int l1Mult = 1;
-    while (l1Mult * 2 <= tailL1L2Mult && l1Mult * 2 * l0Part <= std::max(l0Part, l0LenByTailStart))
+    while (l1Mult * 2 <= tailL1L2Mult && l1Mult * 2 <= 4
+           && l1Mult * 2 * l0Part <= std::max(l0Part, l0LenByTailStart))
         l1Mult *= 2;
     const int l1Part = l0Part * l1Mult;
     const int l2Part = l1Part * tailL1L2Mult;

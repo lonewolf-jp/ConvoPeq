@@ -203,15 +203,18 @@ public:
     // ★ SR-02 (S-1) — L0 coverage 上限式（doc/work96 契約凍結 2026-09-14）
     //   純関数（NonRT）。SetImpulse / 境界テスト / UI 表示の単一権威。
     //
-    //   l0MaxParts = tailEnabled ? clamp(ceil(coverageSamples / l0Part), 32, 256) : 32
+    //   l0MaxParts = clamp(ceil(coverageSamples / l0Part), 32, 256)
     //     - floor 32 = 現行幾何（kL0MaxParts）。required ≤ 32 の全構成は現行とビット一致。
     //     - hard cap 256 = RT ceiling（processLayerBlock の partition-ops 線形成長に対する
     //       実測保証: work96 §2.2 / T-SR02-6 wall-clock 契約）。
-    //     - tailEnabled=false (Bypass) は tailStart 非依存で現行不変。
+    //     - Part 8 F: tailEnabled=false（Bypass）も同じ被覆計算を使う（L0 + L1 + L2 で IR 全体）。
     //   int 演算のみ（double 丸みに依存しない）。pow2 切り上げは禁止（最大 2× 膨張、不採用）。
     //----------------------------------------------------------
     static constexpr int kL0PartsFloor = 32;
     static constexpr int kL0PartsHardCap = 256;
+    // Part 8: 実測で受入済みのブロック長上限（64〜32768）。上限超でも幾何は健全に保ち、
+    //   SetImpulse（NonRT）で 1 回だけ警告する（RT 経路には何も追加しない）。
+    static constexpr int kMaxSupportedBlockSize = 32768;
     [[nodiscard]] static int computeL0MaxParts(int l0Part, int coverageSamples, bool tailEnabled) noexcept;
 
     //----------------------------------------------------------
@@ -533,6 +536,7 @@ private:
 
     std::atomic<bool> m_ready { false };
     bool    m_tailEnabled = true;
+    std::atomic<bool> m_blockSizeWarned { false }; // Part 8: 上限超過の警告をインスタンス 1 回に制限
     int     m_maxBlockSize = 0;  // ★ B13: コールバックブロックサイズ (EnsureCapacity 算出用)
     double  m_tailStrength = 1.0;
     double  m_tailLayerGain[kNumLayers] { 1.0, 1.0, 1.0 };
@@ -561,3 +565,4 @@ private:
 #endif
 
 } // namespace convo
+

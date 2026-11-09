@@ -264,6 +264,30 @@ void checkH (int block, double baselineDb, double tolDb, const char* id)
                          block, r.eFixedDb, baselineDb, tolDb));
 }
 
+void checkI (const std::vector<double>& ir, int block)
+{
+    const auto off = runCase (ir, block, false);
+    report ("I-1", off.ok && off.firstErr < 0,
+            fmt ("block=%d ir=%d firstErr=%d maxErr=%.3e",
+                 block, (int) ir.size(), off.firstErr, off.maxErr));
+
+    const auto on = runCase (ir, block, true);
+    const bool geomOk = on.ok
+                        && (on.layers == 1
+                            || (on.partSize[1] <= 4 * on.partSize[0]
+                                && on.partSize[1] <= on.heldSamples));
+    report ("I-2", geomOk, fmt ("block=%d l0=%d/%d l1=%d/%d",
+                                block, on.partSize[0], on.numPartsIR[0],
+                                on.partSize[1], on.numPartsIR[1]));
+}
+
+void checkH4 (const std::vector<double>& ir, int block)
+{
+    const auto r = runCase (ir, block, true);
+    report ("H-4", r.ok && r.eFixedDb > -60.0,
+            fmt ("block=%d ir=%d eFixed=%.2f dB", block, (int) ir.size(), r.eFixedDb));
+}
+
 void checkGeometryAtMaxBlock()
 {
     using convo::MKLNonUniformConvolver;
@@ -296,7 +320,7 @@ int main()
         { 64,   24000 }, { 64,   48000 }, { 64,   144000 },
         { 128,  24000 }, { 128,  48000 }, { 128,  144000 },
         { 256,  24000 }, { 256,  48000 }, { 256,  144000 },
-        { 512,  24000 }, { 512,  48000 },
+        { 512,  24000 }, { 512,  48000 }, { 512, 144000 },
         { 1024, 24000 }, { 1024, 48000 }, { 1024, 144000 },
         { 2048, 24000 }, { 2048, 48000 }, { 2048, 144000 },
         { 4096, 24000 }, { 4096, 48000 }, { 4096, 144000 },
@@ -311,6 +335,16 @@ int main()
         checkF (ir, c.block);
     }
     checkGeometryAtMaxBlock();
+
+    // ── I: block 512 の 3.0 秒 IR（先頭パーティション欠落の回帰） ──
+    {
+        const auto ir = makeIr (144000);
+        checkI (ir, 512);
+    }
+
+    // ── H-4: 3.0 秒 IR のテール保持（無音区間がないこと） ──
+    for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 })
+        checkH4 (makeIr (144000), b);
 
     // ── H: 既定 tailMode=1 のテール保持（IR 1.0 秒・固定区間 0.5〜1.0 秒） ──
     {
@@ -331,5 +365,6 @@ int main()
     std::printf ("[SUMMARY] failures=%d\n", gFailures);
     return (gFailures == 0) ? 0 : 1;
 }
+
 
 
