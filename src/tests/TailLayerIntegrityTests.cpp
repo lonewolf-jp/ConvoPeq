@@ -120,6 +120,7 @@ struct RunResult
     int firstErr = -1;
     double maxErr = 0.0;
     double tailEnergyDeltaDb = 0.0;
+    double eFixedDb = 0.0;
     double minWindowRatio = 0.0;
     double cpuMsPerAudioSec = 0.0;
     double memDeltaMB = 0.0;
@@ -190,6 +191,7 @@ RunResult runCase (const std::vector<double>& ir, int block, bool tailEnabled)
 
     // 末尾 100 ms の保持（F-2）
     const int tailStart = std::max (0, irLen - (int) (0.1 * kSampleRate));
+    r.eFixedDb = energyDb (out, r.lag + irLen / 2, r.lag + irLen);
     r.tailEnergyDeltaDb = energyDb (out, r.lag + tailStart, r.lag + irLen)
                         - energyDb (ir, tailStart, irLen);
 
@@ -248,6 +250,20 @@ void checkF (const std::vector<double>& ir, int block)
                  r.cpuMsPerAudioSec, r.memDeltaMB));
 }
 
+void checkH (int block, double baselineDb, double tolDb, const char* id)
+{
+    const auto ir = makeIr (48000);
+    const auto r = runCase (ir, block, true);
+    if (! r.ok)
+    {
+        report (id, false, fmt ("block=%d SetImpulse failed", block));
+        return;
+    }
+    const bool ok = std::fabs (r.eFixedDb - baselineDb) <= tolDb;
+    report (id, ok, fmt ("block=%d eFixed=%.3f dB baseline=%.3f dB tol=%.2f",
+                         block, r.eFixedDb, baselineDb, tolDb));
+}
+
 void checkGeometryAtMaxBlock()
 {
     using convo::MKLNonUniformConvolver;
@@ -281,6 +297,12 @@ int main()
         { 128,  24000 }, { 128,  48000 }, { 128,  144000 },
         { 256,  24000 }, { 256,  48000 }, { 256,  144000 },
         { 512,  24000 }, { 512,  48000 },
+        { 1024, 24000 }, { 1024, 48000 }, { 1024, 144000 },
+        { 2048, 24000 }, { 2048, 48000 }, { 2048, 144000 },
+        { 4096, 24000 }, { 4096, 48000 }, { 4096, 144000 },
+        { 8192, 24000 }, { 8192, 48000 }, { 8192, 144000 },
+        { 16384, 24000 }, { 16384, 48000 }, { 16384, 144000 },
+        { 32768, 24000 }, { 32768, 48000 }, { 32768, 144000 },
     };
 
     for (const auto& c : cases)
@@ -290,7 +312,24 @@ int main()
     }
     checkGeometryAtMaxBlock();
 
+    // ── H: 既定 tailMode=1 のテール保持（IR 1.0 秒・固定区間 0.5〜1.0 秒） ──
+    {
+        const auto ir = makeIr (48000);
+        const auto base = runCase (ir, 256, true);
+        if (base.ok)
+        {
+            std::printf ("[record] H baseline block=256 eFixed=%.3f dB\n", base.eFixedDb);
+            for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 })
+                checkH (b, base.eFixedDb, (b <= 128) ? 2.5 : 0.1, (b <= 128) ? "H-2" : "H-1");
+        }
+        else
+        {
+            report ("H-1", false, "baseline block=256 SetImpulse failed");
+        }
+    }
+
     std::printf ("[SUMMARY] failures=%d\n", gFailures);
     return (gFailures == 0) ? 0 : 1;
 }
+
 

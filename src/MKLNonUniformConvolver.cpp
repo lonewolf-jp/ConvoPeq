@@ -778,8 +778,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // レイヤー構成決定 (Non-Uniform Partitioned Convolution)
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
-    const int l1Part = l0Part * tailL1L2Mult;
-    const int l2Part = l1Part * tailL1L2Mult;
 
     // ★ SR-02 (S-1): l0MaxLen は秒ベース上限式へ（doc/work96 契約凍結 2026-09-14）。
     //   l0LenByTailStart = mode clamp 後の実効 tailStartSec（:630-670）のサンプル数。
@@ -788,6 +786,15 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   floor 32 により低 SR の全既構成は現行幾何とビット一致（48k/bs64 の MT-NUPC
     //   構成は required=90 の意図的例外 — work57 期待値表を同一サイクルで更新）。
     const int l0LenByTailStart = static_cast<int>(std::llround(tailStartSec * sampleRateForTail));
+
+    // ★ Part 8 H: L1 のパート長は L0 の保持長を超えないこと。
+    //   超えるとテール層の先頭パーティションが欠落する（block >= 1024 / 48 kHz で実測）。
+    //   倍率は 2 の冪で下げ、下限は 1（= l0Part）。L0 保持長は広げない（整形領域を変えない）。
+    int l1Mult = 1;
+    while (l1Mult * 2 <= tailL1L2Mult && l1Mult * 2 * l0Part <= std::max(l0Part, l0LenByTailStart))
+        l1Mult *= 2;
+    const int l1Part = l0Part * l1Mult;
+    const int l2Part = l1Part * tailL1L2Mult;
 
     // ★ I5 保証（B13 gate: o_L % B == 0 / P % B == 0）: llround による partSize 非整除を
     //   production 側で排除する（air 48k: 0.085×48000=4080 は 512 の倍数でなく o_L=4080 →
