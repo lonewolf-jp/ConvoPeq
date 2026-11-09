@@ -3,6 +3,12 @@
 
 ---
 
+---
+
+## Compatibility notice — oversampling gain (next release)
+
+**Gain convention change (default).** The input oversampler now has unity round-trip gain. Before this change the gain was 0.75 / 0.5625 / 0.421875 at 2× / 4× / 8× (−2.50 / −5.00 / −7.50 dB). Projects made with earlier versions therefore play 2.5–7.5 dB louder at unchanged settings; preset values are not modified. Check output make-up gain and limiter activity after updating. `-DCONVOPEQ_CORRECT_POLYPHASE_GAIN=OFF` restores the old behaviour.
+
 ## New in v0.6.12
 
 1. Made the convolver bypass transition tail-preserving: the bypass now crossfades over a dedicated 20 ms window instead of cutting the wet tail, restarts from the current mix after an interrupted fade, and leaves the reported latency and host PDC unchanged, with an N1 audio analysis and pre/post comparison checked in as evidence.
@@ -147,7 +153,7 @@ ConvoPeq/
   - RCU (Read-Copy-Update) pattern for glitch-free IR handoff
   - `MKLNonUniformConvolver.{h,cpp}` is the active NUC engine (`nucConvolvers[2]` in `ConvolverProcessor`)
 - **Runtime-selectable processing order**: EQ→Convolver or Convolver→EQ
-- **Input oversampling**: 2×/4×/8× via `CustomInputOversampler` (IIRLike / LinearPhase presets)
+- **Input oversampling**: 2×/4×/8× via `CustomInputOversampler` (IIRLike / LinearPhase presets), with unity round-trip gain (corrected polyphase gain convention, default since Part 8 E)
 - **Output conditioning**: `OutputFilter` applied per active stage — HC/LC on the convolver output and HPF/LPF on the EQ output, independent of processing order — then makeup gain followed by musical soft clipping with `fastTanh` (AVX2 vectorized)
 
 ### Noise Shaping & Dithering

@@ -80,16 +80,23 @@ LayerCfgTheo computeLayerCfg (int irLen, bool tailEnabled)
 {
     LayerCfgTheo cfg;
     const int l0Part  = nextPow2 (std::max (kBlockSize, 64));   // 64
-    const int l1Part  = l0Part * kTailL1L2Mult;                 // 512
-    const int l2Part  = l1Part * kTailL1L2Mult;                 // 4096
     const int l0LenByTailStart = static_cast<int> (std::llround (kTheoTailStartClamped * kSampleRate)); // 5760
+    // Part 8 H/I: production と同じ倍率制限（2 の冪・上限 4・L0 保持長以下）。
+    int l1Mult = 1;
+    while (l1Mult * 2 <= kTailL1L2Mult && l1Mult * 2 <= 4
+           && l1Mult * 2 * l0Part <= std::max (l0Part, l0LenByTailStart))
+        l1Mult *= 2;
+    const int l1Part  = l0Part * l1Mult;
+    const int l2Part  = l1Part * kTailL1L2Mult;
     // ★ I5 保証アライン（production cpp:758-764と同式）。5760 は 64 の倍数のため本構成では無変。
     const int l0CoverageAligned = ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
-    const int l0MaxParts = convo::MKLNonUniformConvolver::computeL0MaxParts (l0Part, l0CoverageAligned, tailEnabled);
-    const int l0MaxLen = l0MaxParts * l0Part;                   // tail on: 5760 / tail off: 2048
-    const int l0Len    = std::min (irLen, l0MaxLen);
-    const int l1Len    = tailEnabled ? std::max (0, std::min (irLen - l0Len, kL1MaxParts * l1Part)) : 0;
-    const int l2Len    = tailEnabled ? std::max (0, irLen - l0Len - l1Len) : 0;
+    const int l0MaxParts = convo::MKLNonUniformConvolver::computeL0MaxParts (l0Part, l0CoverageAligned, true);
+    const int l0MaxLen = l0MaxParts * l0Part;
+    // Part 8 F: tail 無効（Bypass）でも同じ L0 被覆（0.12 秒下限）と L1/L2 で IR 全体を覆う。
+    const int l0LenTarget = juce::jlimit (l0Part, l0MaxLen, l0CoverageAligned);
+    const int l0Len    = std::min (irLen, l0LenTarget);
+    const int l1Len    = std::max (0, std::min (irLen - l0Len, kL1MaxParts * l1Part));
+    const int l2Len    = std::max (0, irLen - l0Len - l1Len);
 
     cfg.partSize[0] = l0Part; cfg.partSize[1] = l1Part; cfg.partSize[2] = l2Part;
     cfg.len[0] = l0Len;  cfg.len[1] = l1Len;  cfg.len[2] = l2Len;
@@ -1051,7 +1058,7 @@ int main()
             if (! pass) ++structuralFailures;
         };
         geometryCheck ("768k/bs512 contour default(0.12 clamp)", 768000.0, 512, 200000, 0.085, true, 180);
-        geometryCheck ("768k/bs512 bypass",                       768000.0, 512, 200000, 0.085, false,  32);
+        geometryCheck ("768k/bs512 bypass",                       768000.0, 512, 200000, 0.085, false, 180);
         geometryCheck ("48k/bs64 ts0.80 hard cap",                 48000.0,  64, 100000, 0.80,  true,  256);
 
         // (3) S-4 ログ検証（拡大発動 + hard cap 到達）

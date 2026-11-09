@@ -413,7 +413,7 @@ Result: `build\ConvoPeq_artefacts\Release\ConvoPeq.exe` (PGO-optimized)
 
 ## 12. CTest Regression Suite
 
-**53 test executables** are defined in CMakeLists.txt (50 `add_executable` + 3 `juce_add_console_app`), registering **54 `add_test()`** entries (enabled by default, `CONVOPEQ_ENABLE_ISR_TESTS=ON`; `HeadlessAudioPathVerification` is skipped when `CONVO_CI_BUILD` is defined).
+**54 test executables** are defined in CMakeLists.txt (50 `add_executable` + 4 `juce_add_console_app`), registering **56 `add_test()`** entries (enabled by default, `CONVOPEQ_ENABLE_ISR_TESTS=ON`; `HeadlessAudioPathVerification` is skipped when `CONVO_CI_BUILD` is defined).
 
 ### 12.1 Test List
 
@@ -693,14 +693,14 @@ The MSVC toolchain path is added only in the three configurations that launch th
 |--------|---------|-------------|
 | `CONVOPEQ_ENABLE_CLANG_TIDY` | OFF | Run clang-tidy during build |
 | `CONVOPEQ_REQUIRE_MKL` | ON | Require Intel MKL for MSVC builds (OFF → system aligned allocator) |
-| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | Build CTest regression suite (53 executables / 54 tests) |
+| `CONVOPEQ_ENABLE_ISR_TESTS` | ON | Build CTest regression suite (54 executables / 56 tests) |
 | `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` | OFF | Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD) |
 | `CONVOPEQ_PGO_INSTRUMENT` | OFF | PGO instrumentation build |
 | `CONVOPEQ_PGO_USE` | OFF | PGO optimized build |
 | `ENABLE_ASAN` | OFF | AddressSanitizer (mutually exclusive with PGO and TSAN) |
 | `ENABLE_TSAN` | OFF | ThreadSanitizer (Clang only; mutually exclusive with ASAN) |
 | `CONVOPEQ_ENABLE_TEST_HOOKS` | OFF | Compile the audio-block test hook (verification builds only) |
-| `CONVOPEQ_CORRECT_POLYPHASE_GAIN` | OFF | Correct polyphase gain convention (B-1) |
+| `CONVOPEQ_CORRECT_POLYPHASE_GAIN` | ON | Correct polyphase gain convention (B-1; Part 8 E). OFF restores the legacy 0.75^n attenuation |
 | `CONVOPEQ_PGO_PGD` (cache var) | — | Path of the `.pgd` used by `CONVOPEQ_PGO_USE` |
 
 ### Convolver Split Feature Flags (all ON)
@@ -860,3 +860,5 @@ out/build/<presetName>/              # CMakePresets custom build dir
 - **Manual**: call `vcvarsall.bat x64` yourself before running `build.bat`
 
 For icx mode, `build.bat` calls `setvars.bat intel64` automatically.
+
+

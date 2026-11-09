@@ -655,6 +655,16 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     if (impulse == nullptr || irLen <= 0 || blockSize <= 0)
         return false;
 
+    // Part 8: 対応上限（64〜32768）を超えるブロック長は性能保証外。幾何は常に健全に保つが、
+    //   NonRT のこの関数でのみ 1 回警告する（Add/Get の RT 経路にはログも分岐も追加しない）。
+    if (blockSize > kMaxSupportedBlockSize
+        && !m_blockSizeWarned.exchange(true, std::memory_order_relaxed))
+    {
+        juce::Logger::writeToLog("MKLNonUniformConvolver: blockSize " + juce::String(blockSize)
+            + " exceeds the supported maximum (" + juce::String(kMaxSupportedBlockSize)
+            + "). Geometry stays valid; performance is not qualified.");
+    }
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t diagSeq   = globalDiagSeq.fetch_add(1, std::memory_order_relaxed) + kDiagSeqFirstRuntime;
     const uint64_t beforeMkl = convo::diag::allocatedBytes();
@@ -681,9 +691,12 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // - Layer Tail Contouring: enforce robust lower bounds and shape layer gains for contour clarity.
     if (!tailEnabled)
     {
-        tailStrength = 0.0;
-        layer1Gain = 0.0;
-        layer2Gain = 0.0;
+        // Part 8 F: Bypass は「テール整形をしない」であり「層を切る」ではない。
+        //   層は等倍で維持し、L0 被覆も tail 側と同じ 0.12 秒下限に揃える。
+        tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.12));
+        tailStrength = 1.0;
+        layer1Gain = 1.0;
+        layer2Gain = 1.0;
     }
     else if (tailMode == 0)
     {
@@ -715,8 +728,8 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         layer2Gain = 0.0;
     }
 
-    m_tailEnabled = tailEnabled;
-    m_tailStrength = tailEnabled ? tailStrength : 0.0;
+    m_tailEnabled = true; // Part 8 F: L1/L2 の出力を常に加算する（Bypass はゲイン 1.0）
+    m_tailStrength = tailStrength;
     m_maxBlockSize = blockSize;
     m_tailLayerGain[0] = 1.0;
     m_tailLayerGain[1] = layer1Gain;
@@ -775,8 +788,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // レイヤー構成決定 (Non-Uniform Partitioned Convolution)
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
-    const int l1Part = l0Part * tailL1L2Mult;
-    const int l2Part = l1Part * tailL1L2Mult;
 
     // ★ SR-02 (S-1): l0MaxLen は秒ベース上限式へ（doc/work96 契約凍結 2026-09-14）。
     //   l0LenByTailStart = mode clamp 後の実効 tailStartSec（:630-670）のサンプル数。
@@ -785,6 +796,15 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   floor 32 により低 SR の全既構成は現行幾何とビット一致（48k/bs64 の MT-NUPC
     //   構成は required=90 の意図的例外 — work57 期待値表を同一サイクルで更新）。
     const int l0LenByTailStart = static_cast<int>(std::llround(tailStartSec * sampleRateForTail));
+
+    // ★ Part 8 H/I: L1 のパート長は L0 の保持長を超えないこと、かつ倍率は 4 以下に制限する。
+    //   倍率 8（block 512 で 4096）では 13 分割以上の IR で先頭パーティションが欠落する（実測）。
+    int l1Mult = 1;
+    while (l1Mult * 2 <= tailL1L2Mult && l1Mult * 2 <= 4
+           && l1Mult * 2 * l0Part <= std::max(l0Part, l0LenByTailStart))
+        l1Mult *= 2;
+    const int l1Part = l0Part * l1Mult;
+    const int l2Part = l1Part * tailL1L2Mult;
 
     // ★ I5 保証（B13 gate: o_L % B == 0 / P % B == 0）: llround による partSize 非整除を
     //   production 側で排除する（air 48k: 0.085×48000=4080 は 512 の倍数でなく o_L=4080 →
@@ -795,10 +815,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   pow2 切り上げは行わない（契約: partSize 倍数のみ — work96 §3 / 不要な 2× 膨張の回避）。
     const int l0CoverageAligned =
         ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
-    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, tailEnabled);
+    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, true);
     const int l0MaxLen = l0MaxParts * l0Part;
     const int l0LenTarget = juce::jlimit(l0Part, l0MaxLen, l0CoverageAligned);
-    const int l0Len = std::min(irLen, tailEnabled ? l0LenTarget : l0MaxLen);
+    // Part 8 F: tail 無効（Bypass）でも L0 + L1 + L2 で IR 全体を覆う。
+    const int l0Len = std::min(irLen, l0LenTarget);
 
     // ★ SR-02 (S-4): 拡大 / cap 発動の可視化（NonRT ログのみ。RT 側ログは禁止）。
     //   ※ juce::String::formatted の %s は引数をワイド文字列として解釈するため（B13-GATE と同注記）、
@@ -817,10 +838,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     }
 
     const int l1Offset = l0Len;
-    const int l1Len    = tailEnabled ? std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)) : 0;
+    const int l1Len    = std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)); // Part 8 F
 
     const int l2Offset = l0Len + l1Len;
-    const int l2Len    = tailEnabled ? std::max(0, irLen - l0Len - l1Len) : 0;
+    const int l2Len    = std::max(0, irLen - l0Len - l1Len); // Part 8 F
 
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     const LayerCfg cfgs[kNumLayers] = {
@@ -2034,3 +2055,4 @@ void MKLNonUniformConvolver::Reset()
 }
 
 } // namespace convo
+

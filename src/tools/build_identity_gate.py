@@ -440,14 +440,14 @@ def emit_build_id(build_dir, source_root, shadow_candidate):
     wt = ('production src/ diff = 0 (tests only)' if not prod_diff
           else 'PRODUCTION src DIFF: ' + prod_diff.splitlines()[0] + ' (+more)')
 
-    # (d) production_flag: Phase 0 は token 不在、Phase 1 以降は CMakeCache の option 実値を表示
+    # (d) production_flag: CMakeCache の option 実値を表示（Part 8 E で既定 ON）
     #     （R15-2: flag token の定義解禁は Phase 1 から。identity 判定ロジック自体は変更しない）
-    flag = 'undefined/off (Phase 0: R15-2 — CMake 未登録)'
+    flag = 'undefined/off (CMake 未登録)'
     cache_flag = cmake_cache_field(build_dir, 'CONVOPEQ_CORRECT_POLYPHASE_GAIN')
     if cache_flag is not None:
         _v = cache_flag.strip().upper()
-        flag = ('ON (Phase 1: 明示指定 — characterization 用)' if _v in ('ON', '1', 'TRUE')
-                else 'OFF (Phase 1: default OFF)')
+        flag = ('ON (production default: corrected gain convention, Part 8 E)' if _v in ('ON', '1', 'TRUE')
+                else 'OFF (legacy gain convention: explicit -DCONVOPEQ_CORRECT_POLYPHASE_GAIN=OFF)')
     else:
         try:
             with open(os.path.join(source_root, 'CMakeLists.txt'), 'r',

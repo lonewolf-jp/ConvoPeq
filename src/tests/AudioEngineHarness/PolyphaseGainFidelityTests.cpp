@@ -38,6 +38,13 @@ namespace
 constexpr int kBlockSize = 8192;     // 全検証共通の 1 ブロック入力数
 constexpr double kDcTol = 1.0e-9;    // DC 期待値の float 許容（bitwise 比較とは別系統）
 
+// Part 8 E: production は補正済み利得規約（既定 ON）。OFF ビルドでは従来値を検証する。
+#if defined(CONVOPEQ_CORRECT_POLYPHASE_GAIN) && (CONVOPEQ_CORRECT_POLYPHASE_GAIN)
+constexpr bool kProdCorrected = true;
+#else
+constexpr bool kProdCorrected = false;
+#endif
+
 // ── deterministic PRNG（seed 固定・libm 不使用 → ビルド構成非依存） ─────────
 struct DeterministicPRNG
 {
@@ -104,10 +111,10 @@ void emitBuildIdBlock()
     std::printf("  snapshot_identity : (runner: build_identity_gate.py --emit-build-id)\n");
     std::printf("  git_head          : (runner 補完)\n");
     std::printf("  working_tree      : (runner 補完)\n");
-#ifdef CONVOPEQ_CORRECT_POLYPHASE_GAIN
-    std::printf("  production_flag   : 1 (UNEXPECTED — Phase 0 契約違反: R15-2)\n");
+#if defined(CONVOPEQ_CORRECT_POLYPHASE_GAIN) && (CONVOPEQ_CORRECT_POLYPHASE_GAIN)
+    std::printf("  production_flag   : 1 (production default: corrected gain convention, Part 8 E)\n");
 #else
-    std::printf("  production_flag   : undefined/off (macro absent in this TU / Phase 0 R15-2)\n");
+    std::printf("  production_flag   : undefined/off (legacy gain convention; build with -DCONVOPEQ_CORRECT_POLYPHASE_GAIN=ON)\n");
 #endif
     std::printf("  shadow_candidate  : %d (CONVOPEQ_POLYPHASE_REF_CANDIDATE)\n",
                 CONVOPEQ_POLYPHASE_REF_CANDIDATE);
@@ -431,7 +438,7 @@ void runPhase0Tests()
         for (const auto& lc : lats)
         {
             CustomInputOversampler prod;
-            Shadow base{ false };
+            Shadow base{ kProdCorrected };
             Shadow cand{ true };
             if (lc.single)
             {
@@ -480,7 +487,7 @@ void runPhase0Tests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         base.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
@@ -492,8 +499,9 @@ void runPhase0Tests()
         cand.reset();
         runShadowRoundTrip(cand, inP, kBlockSize, cUpP, cDnP, c.ratio);
         const int stages = (c.ratio == 8) ? 3 : ((c.ratio == 4) ? 2 : 1);
-        double expect = 1.0;
-        for (int i = 0; i < stages; ++i) expect *= 0.75;
+        double expectLegacy = 1.0;
+        for (int i = 0; i < stages; ++i) expectLegacy *= 0.75;
+        const double expect = kProdCorrected ? 1.0 : expectLegacy;
         const double dcBase = steadyMean(bDn[0].data(), bDn[0].size());
         const double dcCand = steadyMean(cDn[0].data(), cDn[0].size());
         const bool ok = r.first
@@ -551,7 +559,8 @@ void runPhase0Tests()
             }
             const double ripple = rMax - rMin;
 
-            const double devTerm = 20.0 * rc.N * std::log10(4.0 / 3.0);
+            // 補正規約では production と candidate が同一の応答になる（devTerm は旧規約の差のみ）。
+            const double devTerm = kProdCorrected ? 0.0 : 20.0 * rc.N * std::log10(4.0 / 3.0);
             static constexpr double devPts[] = { 50.0, 1000.0, 10000.0, 48000.0, 86400.0, 94080.0 };
             double maxDev = 0.0;
             for (double fq : devPts)
@@ -662,8 +671,10 @@ void runPhase0Tests()
                 const double iC = dftMag(cUp[0].data(), 2 * kBlockSize, (1.0 - fh) / 2.0);
                 const double d1C = 20.0 * std::log10(iC / (tC + 1.0e-300));
 
-                if (fh <= 0.30 + 1.0e-12
-                    && std::fabs(d1B - (-9.542425)) > 0.01)
+                std::printf("  [record] E-1 d1B %d/%.0f fh=%.2f d1B=%.6f d1C=%.6f\n", dTaps, dAtten, fh, d1B, d1C);
+                // 補正規約では up 段の image はフィルタ減衰で決まる（旧値 −9.542425 は 0.75 規約の参照）。
+                // 受入は「旧参照より悪化しない」こと（≤ −9.442 dB）。
+                if (fh <= 0.30 + 1.0e-12 && d1B > -9.442)
                 {
                     e1Ok = false;
                     detail = fmt("E-1 %d/%.0f f̂=%.2f d1B=%.6f", dTaps, dAtten, fh, d1B);
@@ -679,7 +690,7 @@ void runPhase0Tests()
                 }
             }
         }
-        report("P0-E E-1 base D1 −9.542425 ±0.01 @f̂≤0.30 (prod 31/127/511 ×4 f̂)", e1Ok, detail);
+        report("P0-E E-1 production D1 ≤ −9.442 @f̂≤0.30 (corrected convention; legacy reference −9.542425)", e1Ok, detail);
         report("P0-E E-1c cand D1 ≤ −9.442 @f̂≤0.35 (shadow 31/127/511 ×5 f̂)", e1cOk,
                fmt("min margin=%.1f dB", minMarginC));
         std::printf("  [record] E-1b cand D1 は rect / Hann+trim8 併記（手法感度帯・gate 不使用）\n");
@@ -736,7 +747,7 @@ void runPhase0Tests()
     // ═══ T17: P0-I SoftClip local OS per-phase attribution（R17-1 完全契約） ═══
     {
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepareSingleStage(31, 90.0, kBlockSize);
         base.prepareSingleStageModel(31, 90.0, kBlockSize);
@@ -756,11 +767,11 @@ void runPhase0Tests()
             runShadowRoundTrip(cand, inP, kBlockSize, cUpP, cDnP, 2);
             const double dcB = steadyMean(bDn[0].data(), bDn[0].size());
             const double dcC = steadyMean(cDn[0].data(), cDn[0].size());
-            // A=0.5 入力に対する利得比で gate（base 0.75 / cand 1.0）
+            // A=0.5 入力に対する利得比で gate（補正 ON: 1.0 / OFF: 従来 0.75）
             const bool ok = r.first
-                         && std::fabs(dcB / 0.5 - 0.75) <= 1.0e-6
+                         && std::fabs(dcB / 0.5 - (kProdCorrected ? 1.0 : 0.75)) <= 1.0e-6
                          && std::fabs(dcC / 0.5 - 1.0) <= 1.0e-6;
-            report("P0-I I-a OS-only DC (SoftClip 無効・A=0.5): base 0.75 / cand 1.0 ±1e-6", ok,
+            report("P0-I I-a OS-only DC (SoftClip 無効・A=0.5): base = corrected ? 1.0 : 0.75 / cand 1.0 ±1e-6", ok,
                    fmt("dcB=%.12f dcC=%.12f", dcB, dcC));
         }
 
@@ -823,15 +834,15 @@ void runPhase0Tests()
                 const int pc = 2 * i + cPar;
                 const int pv = 2 * i + vPar;
 
-                // I-0: conv 位相 bitwise 一致 / center 位相 bitwise 2×（denorm 帯例外）
+                // I-0: conv 位相 bitwise 一致 / center 位相も一致（補正規約の採用後は base も candidate と同じ）
                 if (std::bit_cast<std::uint64_t>(cUp[0][pv]) != std::bit_cast<std::uint64_t>(bUp[0][pv]))
                 { c1Ok = false; detail = fmt("I-0 conv mismatch @%d", pv); break; }
 
                 const double xbc = bUp[0][pc];
                 const double xcc = cUp[0][pc];
                 if (std::fabs(xbc) >= 2.0e-20
-                    && std::bit_cast<std::uint64_t>(xcc) != std::bit_cast<std::uint64_t>(2.0 * xbc))
-                { c1Ok = false; detail = fmt("I-0 center not 2x @%d", pc); break; }
+                    && std::bit_cast<std::uint64_t>(xcc) != std::bit_cast<std::uint64_t>(xbc))
+                { c1Ok = false; detail = fmt("I-0 center mismatch @%d", pc); break; }
 
                 const double e1B = std::fabs(xbc) >= (kP0iOp.threshold - kP0iOp.knee);
                 const double e1C = std::fabs(xcc) >= (kP0iOp.threshold - kP0iOp.knee);
@@ -840,9 +851,9 @@ void runPhase0Tests()
                 // (c3): candidate のみの event は envelope |x_b| ≥ θ_evt/2
                 if (e1C && !e1B && std::fabs(xbc) < 0.5 * (kP0iOp.threshold - kP0iOp.knee))
                 { c3Ok = false; detail = fmt("c3 envelope violated @%d (|xb|=%.3g)", pc, xbc); break; }
-                // (c4): candidate center 出力 = F(2·x_b)（点wise 参照と bitwise 一致）
+                // (c4): center 出力 = F(x_center)（補正規約では center は 2 倍済みの production 値が基準）
                 if (std::bit_cast<std::uint64_t>(yc[pc])
-                    != std::bit_cast<std::uint64_t>(musicalSoftClipRef(2.0 * xbc, kP0iOp)))
+                    != std::bit_cast<std::uint64_t>(musicalSoftClipRef(xcc, kP0iOp)))
                 { c4Ok = false; detail = fmt("c4 pointwise mismatch @%d", pc); break; }
 
                 // (c1) conv 位相出力 bitwise 一致
@@ -1013,7 +1024,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         shadow.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
         prod.reset(); shadow.reset();
@@ -1035,7 +1046,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         base.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
@@ -1048,8 +1059,9 @@ int runAllTests()
         const auto r = compareRoundTrip(prod, base, inPtrs, kBlockSize,
                                         prodUpP, prodDnP, shadowUpP, shadowDnP);
         const int stages = (c.ratio == 8) ? 3 : ((c.ratio == 4) ? 2 : 1);
-        double expect = 1.0;
-        for (int i = 0; i < stages; ++i) expect *= 0.75;
+        double expectLegacy = 1.0;
+        for (int i = 0; i < stages; ++i) expectLegacy *= 0.75;
+        const double expect = kProdCorrected ? 1.0 : expectLegacy;
         const double dcBase = steadyMean(prodDn[0].data(), prodDn[0].size());
 
         // candidate は予測系（R12-8）: production を触らず shadow cand のみ再実行
@@ -1067,7 +1079,7 @@ int runAllTests()
     {
         // 単段 S1 (31/90): h_rt = 2·(conv⋆conv) + 0.25·δ[15]
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepareSingleStage(31, 90.0, kBlockSize);
         base.prepareSingleStageModel(31, 90.0, kBlockSize);
@@ -1114,21 +1126,22 @@ int runAllTests()
             if (k >= 0 && k < static_cast<std::ptrdiff_t>(s1.convCoeffs.size()))
                 cc15 += s1.convCoeffs[r] * s1.convCoeffs[static_cast<std::size_t>(k)];
         }
-        const double expectPeak = 2.0 * cc15 + 0.25;
+        // 補正時は center 枝が 2 倍になるため δ 項は 0.5（従来 0.25）。
+        const double expectPeak = 2.0 * cc15 + (kProdCorrected ? 0.5 : 0.25);
 
         const bool ok = r.first
                      && peakIdx == w + 15
                      && std::fabs(prodDn[0][w + 15] - expectPeak) <= kDcTol
-                     && std::fabs(sumBase - 0.75) <= kDcTol
+                     && std::fabs(sumBase - (kProdCorrected ? 1.0 : 0.75)) <= kDcTol
                      && std::fabs(sumCand - 1.0) <= kDcTol;
-        report("R17-4(D) impulse warm-start S1(31/90): h_rt=2·(conv⋆conv)+0.25δ[15] / Σ≈0.75 / cand Σ≈1.0 / bitwise",
+        report("R17-4(D) impulse warm-start S1(31/90): h_rt=2·(conv⋆conv)+0.25δ[15] / Σ≈1.0 (corrected) / legacy 0.75 / bitwise",
                ok, fmt("peak@%d expectPeak=%.12f sumBase=%.12f sumCand=%.12f | %s",
                        peakIdx - w, expectPeak, sumBase, sumCand, r.second.c_str()));
     }
     {
-        // IIR3 r=8: Σh_rt = 0.75³ / peak ∈ [floor(290.25), floor+1]
+        // IIR3 r=8: Σh_rt = 1.0（補正）/ 従来 0.75³ / peak ∈ [floor(290.25), floor+1]
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         prod.prepare(kBlockSize, 8, CustomInputOversampler::Preset::IIRLike);
         base.prepare(kBlockSize, 8, Shadow::Preset::IIRLike);
         prod.reset(); base.reset();
@@ -1154,9 +1167,9 @@ int runAllTests()
             }
         }
         const bool ok = r.first
-                     && std::fabs(sum - 0.421875) <= kDcTol
+                     && std::fabs(sum - (kProdCorrected ? 1.0 : 0.421875)) <= kDcTol
                      && peakIdx >= w + 290 && peakIdx <= w + 291;
-        report("R17-4(D) impulse warm-start IIR3 r=8: Σ≈0.75³ / peak∈[290,291] / bitwise",
+        report("R17-4(D) impulse warm-start IIR3 r=8: Σ≈1.0 (corrected) / legacy 0.75³ / peak∈[290,291] / bitwise",
                ok, fmt("peak offset=%d sum=%.12f", peakIdx - w, sum));
     }
 
@@ -1164,7 +1177,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         shadow.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
 
@@ -1287,7 +1300,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         shadow.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
 
@@ -1327,7 +1340,7 @@ int runAllTests()
     // ── scalar↔scalar 経路: 3-tap synthetic stage（convCount=2 → 両側 scalar 経路） ──
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepareSingleStage(3, 90.0, kBlockSize);
         shadow.prepareSingleStageModel(3, 90.0, kBlockSize);
         prod.reset(); shadow.reset();
@@ -1373,3 +1386,5 @@ int main()
     std::printf("=== summary: PASS=%zu FAIL=%zu ===\n", g_pass, g_fail);
     return rc;
 }
+
+
