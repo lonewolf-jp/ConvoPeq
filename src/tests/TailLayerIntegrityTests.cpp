@@ -121,6 +121,8 @@ struct RunResult
     double maxErr = 0.0;
     double tailEnergyDeltaDb = 0.0;
     double eFixedDb = 0.0;
+    bool   hasFirstTailGain = false;
+    double eFirstTailGainDb = 0.0;
     double minWindowRatio = 0.0;
     double cpuMsPerAudioSec = 0.0;
     double memDeltaMB = 0.0;
@@ -192,6 +194,15 @@ RunResult runCase (const std::vector<double>& ir, int block, bool tailEnabled)
     // 末尾 100 ms の保持（F-2）
     const int tailStart = std::max (0, irLen - (int) (0.1 * kSampleRate));
     r.eFixedDb = energyDb (out, r.lag + irLen / 2, r.lag + irLen);
+
+    // I: 最初の L1 パーティションのゲイン（テール整形の有無を波形で確認する）
+    if (r.layers > 1 && r.heldSamples > 0 && r.heldSamples < irLen)
+    {
+        const int a = r.heldSamples;
+        const int b = std::min (irLen, a + r.partSize[1]);
+        r.eFirstTailGainDb = energyDb (out, r.lag + a, r.lag + b) - energyDb (ir, a, b);
+        r.hasFirstTailGain = true;
+    }
     r.tailEnergyDeltaDb = energyDb (out, r.lag + tailStart, r.lag + irLen)
                         - energyDb (ir, tailStart, irLen);
 
@@ -276,9 +287,18 @@ void checkI (const std::vector<double>& ir, int block)
                         && (on.layers == 1
                             || (on.partSize[1] <= 4 * on.partSize[0]
                                 && on.partSize[1] <= on.heldSamples));
-    report ("I-2", geomOk, fmt ("block=%d l0=%d/%d l1=%d/%d",
-                                block, on.partSize[0], on.numPartsIR[0],
-                                on.partSize[1], on.numPartsIR[1]));
+
+    // 先頭 L1 パーティションの出力を、block 256 の同じ層ゲインと比較する（波形での直接検出）。
+    const auto ref = runCase (makeIr ((int) ir.size()), 256, true);
+    const bool partOk = on.hasFirstTailGain && ref.hasFirstTailGain
+                        && on.eFirstTailGainDb > 0.0
+                        && std::fabs (on.eFirstTailGainDb - ref.eFirstTailGainDb) <= 1.0;
+
+    report ("I-2", geomOk && partOk,
+            fmt ("block=%d l0=%d/%d l1=%d/%d gain=%.2f dB ref=%.2f dB",
+                 block, on.partSize[0], on.numPartsIR[0],
+                 on.partSize[1], on.numPartsIR[1],
+                 on.eFirstTailGainDb, ref.eFirstTailGainDb));
 }
 
 void checkH4 (const std::vector<double>& ir, int block)
@@ -365,6 +385,7 @@ int main()
     std::printf ("[SUMMARY] failures=%d\n", gFailures);
     return (gFailures == 0) ? 0 : 1;
 }
+
 
 
 
