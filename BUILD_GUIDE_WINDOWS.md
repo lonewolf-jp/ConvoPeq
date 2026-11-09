@@ -700,7 +700,7 @@ The MSVC toolchain path is added only in the three configurations that launch th
 | `ENABLE_ASAN` | OFF | AddressSanitizer (mutually exclusive with PGO and TSAN) |
 | `ENABLE_TSAN` | OFF | ThreadSanitizer (Clang only; mutually exclusive with ASAN) |
 | `CONVOPEQ_ENABLE_TEST_HOOKS` | OFF | Compile the audio-block test hook (verification builds only) |
-| `CONVOPEQ_CORRECT_POLYPHASE_GAIN` | OFF | Correct polyphase gain convention (B-1) |
+| `CONVOPEQ_CORRECT_POLYPHASE_GAIN` | ON | Correct polyphase gain convention (B-1; Part 8 E). OFF restores the legacy 0.75^n attenuation |
 | `CONVOPEQ_PGO_PGD` (cache var) | — | Path of the `.pgd` used by `CONVOPEQ_PGO_USE` |
 
 ### Convolver Split Feature Flags (all ON)
@@ -860,3 +860,4 @@ out/build/<presetName>/              # CMakePresets custom build dir
 - **Manual**: call `vcvarsall.bat x64` yourself before running `build.bat`
 
 For icx mode, `build.bat` calls `setvars.bat intel64` automatically.
+

@@ -43,7 +43,9 @@ The tabs at the top of the screen let you choose the filter characteristics used
 | Item | Description |
 |------|-------------|
 | **Type** | Displays the filter type selected in the Oversampling Filter Type tabs (IIR or Linear Phase). |
-| **Factor** | Choose from Auto / 1x / 2x / 4x / 8x. **Auto automatically selects the highest factor allowed for the current sample rate** (8x up to 96 kHz, 4x up to 192 kHz, 2x up to 384 kHz, 1x above 384 kHz).<br>**Visible factor limit**: The combo box shows only factors that are allowed for the current sample rate:<br>- ≤96 kHz: up to 8x<br>- ≤192 kHz: up to 4x<br>- ≤384 kHz: up to 2x<br>- >384 kHz: only 1x<br>Factors beyond the limit are not shown and cannot be selected. |
+| **Factor** | Choose from Auto / 1x / 2x / 4x / 8x. **Auto automatically selects the highest factor allowed for the current sample rate** (8x up to 96 kHz, 4x up to 192 kHz, 2x up to 384 kHz, 1x above 384 kHz).<br>**Visible factor limit**: The combo box shows only factors that are allowed for the current sample rate:<br>- ≤96 kHz: up to 8x<br>- ≤192 kHz: up to 4x<br>- ≤384 kHz: up to 2x<br>- >384 kHz: only 1x<br>Factors beyond the limit are not shown and cannot be selected. |
+
+The oversampler applies the corrected gain convention: a full up/down round trip has unity gain at 2x, 4x and 8x. Versions before this change attenuated the signal by 2.50, 5.00 and 7.50 dB respectively; existing sessions therefore play 2.5–7.5 dB louder at unchanged settings. Preset values are not modified.
 
 ---
 

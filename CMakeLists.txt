@@ -129,9 +129,10 @@ option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" O
 option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.)" OFF)
 option(CONVOPEQ_ENABLE_TEST_HOOKS "Compile the audio-block test hook (verification builds only; default OFF)" OFF)
 
-# work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 OFF。
-# ON は characterization 用の明示指定のみ（default ON 化は別判断・HOLD）。
-option(CONVOPEQ_CORRECT_POLYPHASE_GAIN "Correct polyphase gain convention (B-1)" OFF)
+# work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 ON（Part 8 E）。
+# 旧挙動（2×/4×/8× で 0.75 / 0.5625 / 0.421875 = −2.50 / −5.00 / −7.50 dB）は
+# -DCONVOPEQ_CORRECT_POLYPHASE_GAIN=OFF で再現できる。
+option(CONVOPEQ_CORRECT_POLYPHASE_GAIN "Correct polyphase gain convention (B-1)" ON)
 
 if(CONVOPEQ_ENABLE_ISR_TESTS)
     enable_testing()

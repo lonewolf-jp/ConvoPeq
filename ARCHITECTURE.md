@@ -875,7 +875,7 @@ The convolver bypass is not a `CrossfadeAuthority` trigger. It is evaluated insi
 | `CONVOPEQ_REQUIRE_MKL` | ON | Require Intel MKL for MSVC builds (OFF → system aligned allocator) |
 | `CONVOPEQ_ENABLE_ISR_TESTS` | ON | CTest regression suite (53 test executables / 54 tests) |
 | `CONVOPEQ_ENABLE_TEST_HOOKS` | OFF | Compiles the audio-block test hook (verification builds only) |
-| `CONVOPEQ_CORRECT_POLYPHASE_GAIN` | OFF | Correct polyphase gain convention (B-1) |
+| `CONVOPEQ_CORRECT_POLYPHASE_GAIN` | ON | Correct polyphase gain convention (B-1; Part 8 E). OFF restores the legacy 0.75^n attenuation |
 | `CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS` | OFF | Runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.) |
 | `ENABLE_ASAN` | OFF | AddressSanitizer (Debug only, forces /MDd; mutually exclusive with PGO and TSAN) |
 | `ENABLE_TSAN` | OFF | ThreadSanitizer (Clang only; mutually exclusive with ASAN) |
@@ -987,3 +987,4 @@ Design focus:
 *Platform: Windows 11 x64*
 *JUCE: 8.0.12*
 *MKL: oneAPI sequential (static)*
+
