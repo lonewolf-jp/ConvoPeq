@@ -473,7 +473,7 @@ makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
 //   本テストでは登録封鎖の決定性のみを検証する。
 [[nodiscard]] bool testInvX3_4ReaderRegistrationClosed()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
 
     // close 前: 登録成功
     const int idx = domain.registerReaderThread("X3Test");
@@ -501,7 +501,7 @@ makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
 //==============================================================================
 [[nodiscard]] bool testA2G19G20EpochGenerationSupply()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
 
     const auto gen0 = domain.epochGeneration();
     (void)domain.publishEpoch();
@@ -901,7 +901,7 @@ makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
 //==============================================================================
 [[nodiscard]] bool testQ5EpochEvidenceRealDomain()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(domain);
 
     auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();

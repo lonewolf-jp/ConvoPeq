@@ -46,6 +46,7 @@
 #include "eqprocessor/EQProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EpochDomain.h"
+#include "audioengine/ISRRetireLatency.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
 
@@ -326,8 +327,8 @@ static bool checkTD14aRouterBoundToPrivateDomain()
 // =============================================================================
 static bool checkTD14bReclaimGatedOnlyOnBoundProvider()
 {
-    convo::EpochDomain eqLike;
-    convo::EpochDomain foreign;
+    convo::EpochDomain eqLike(convo::RetireDomainId::Unknown);
+    convo::EpochDomain foreign(convo::RetireDomainId::Unknown);
     convo::isr::ISRRetireRouter router(eqLike);
     TD11Tracker tracker;
 
@@ -681,6 +682,660 @@ static bool checkUnwrapContract()
     return ok;
 }
 
+// =============================================================================
+// ★ Gate 1 (2026-11-11, Owner 承認): RCU 入場失敗時に退役対象を参照しないことの検証
+//   (a) 入場成功: 状態参照は従来どおり（unprotectedReadCount は 0 のまま）
+//   (b) 入場失敗: currentStateBits を読まない（カウンタ +1・出力は「状態未公開」の挙動）
+//   (c) reclaim 完了: 解放済みの退役対象を参照しない（ASan ビルドで UAF 無し）
+//   EQProcessor の private へはテスト専用 friend（製品 API は追加しない）で到達する。
+// =============================================================================
+struct EQProcessorGate1TestAccess
+{
+    static const EQProcessor::EQState* currentState(EQProcessor& eq) noexcept
+    {
+        return eq.loadCurrentState(std::memory_order_acquire);
+    }
+    // ★ 段階① v2: 理由は引数で明示（デフォルトなし）
+    static void flushPendingEpochAdvance(EQProcessor& eq,
+                                         EQProcessor::PublishReason reason) noexcept
+    {
+        eq.flushPendingEpochAdvance(reason);
+    }
+    static void closeReaderRegistration(EQProcessor& eq) noexcept
+    {
+        eq.m_epochDomain->closeReaderRegistration();
+    }
+    // ★ 段階①: pending を立てずに滞留を作る（reclaim のみの経路を検証するため）
+    //   epoch は呼出し側が明示する（現在 epoch より古い値にすると、
+    //   publish なしでも reclaim 可能になる）。
+    static bool enqueueTestRetire(EQProcessor& eq, void* ptr, void (*deleter)(void*),
+                                  std::uint64_t epoch) noexcept
+    {
+        return eq.enqueueDeferredDeleteWithFallback(ptr, deleter, epoch);
+    }
+    static std::uint64_t currentEpoch(EQProcessor& eq) noexcept
+    {
+        return eq.m_epochDomain->currentEpoch();
+    }
+};
+
+// ★ 段階①: 検証用 deleter（実際に解放されたことを数える）
+namespace {
+std::atomic<int> g_driverProbeDeletes{0};
+void driverProbeDeleter(void* p) noexcept
+{
+    g_driverProbeDeletes.fetch_add(1, std::memory_order_relaxed);
+    delete static_cast<int*>(p);
+}
+}
+
+namespace
+{
+constexpr int    kGate1BlockSize = 256;
+constexpr double kGate1SampleRate = 48000.0;
+
+void gate1FillInput(juce::AudioBuffer<double>& buf)
+{
+    const int n = buf.getNumSamples();
+    const double twoPi = 6.283185307179586476925286766559;
+    for (int i = 0; i < n; ++i)
+    {
+        // 飽和（soft clip）の差が出るよう振幅 3.0（|x| > 1）で入れる
+        const double s = 3.0 * std::sin(twoPi * 1000.0 * static_cast<double>(i) / kGate1SampleRate);
+        for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+            buf.setSample(ch, i, s);
+    }
+}
+
+void gate1Configure(EQProcessor& eq)
+{
+    eq.prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+    eq.setBandType(0, EQBandType::Peaking);
+    eq.setBandFrequency(0, 1000.0f);
+    eq.setBandGain(0, 9.0f);
+    eq.setBandQ(0, 0.7f);
+    eq.setBandEnabled(0, true);
+    eq.setBandType(1, EQBandType::HighShelf);
+    eq.setBandFrequency(1, 6000.0f);
+    eq.setBandGain(1, -9.0f);
+    eq.setBandQ(1, 0.7f);
+    eq.setBandEnabled(1, true);
+}
+
+bool gate1Render(EQProcessor& eq, std::vector<double>& outL, std::vector<double>& outR)
+{
+    std::vector<double> lastL, lastR;
+    bool finite = true;
+    juce::AudioBuffer<double> in(2, kGate1BlockSize);
+    for (int b = 0; b < 3; ++b)
+    {
+        gate1FillInput(in);
+        juce::dsp::AudioBlock<double> block(in);
+        eq.process(block);
+        lastL.assign(in.getReadPointer(0), in.getReadPointer(0) + kGate1BlockSize);
+        lastR.assign(in.getReadPointer(1), in.getReadPointer(1) + kGate1BlockSize);
+        for (double v : lastL) if (!std::isfinite(v)) finite = false;
+        for (double v : lastR) if (!std::isfinite(v)) finite = false;
+    }
+    outL.swap(lastL);
+    outR.swap(lastR);
+    return finite;
+}
+
+double gate1MaxAbs(const std::vector<double>& v)
+{
+    double m = 0.0;
+    for (double x : v) m = std::max(m, std::abs(x));
+    return m;
+}
+
+double gate1MaxAbsDiff(const std::vector<double>& a, const std::vector<double>& b)
+{
+    if (a.size() != b.size()) return std::numeric_limits<double>::infinity();
+    double m = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) m = std::max(m, std::abs(a[i] - b[i]));
+    return m;
+}
+} // namespace
+
+static bool checkGate1ProcessIsolation()
+{
+    bool ok = true;
+
+    // ---- (a) 正常入場: 状態と BandNode を従来どおり参照する（カウンタ 0・出力は非無音・有限） ----
+    {
+        auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eq = std::make_unique<EQProcessor>();
+        eq->setRetireCoordinator(coordinator.get());   // retire authority（null だと drop される）
+        gate1Configure(*eq);
+
+        std::vector<double> l, r;
+        if (!gate1Render(*eq, l, r))
+        {
+            std::fprintf(stderr, "G1-1: non-finite output\n");
+            ok = false;
+        }
+        if (eq->unprotectedReadCount() != 0)
+        {
+            std::fprintf(stderr, "G1-1: unprotectedReadCount=%u (expected 0)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()));
+            ok = false;
+        }
+        if (EQProcessorGate1TestAccess::currentState(*eq) == nullptr)
+        {
+            std::fprintf(stderr, "G1-1: currentState is null\n");
+            ok = false;
+        }
+        if (gate1MaxAbs(l) < 1.0e-9)
+        {
+            std::fprintf(stderr, "G1-1: output is silent (state not applied?)\n");
+            ok = false;
+        }
+    }
+
+    // ---- (b) 入場失敗 + reclaim 完了後: 状態も BandNode も参照しない ----
+    {
+        // 参考 1: バンドを全て無効にした「素通し」参照（同じ EQProcessor 履歴で比較する）
+        auto coordRef = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eqRef = std::make_unique<EQProcessor>();
+        eqRef->setRetireCoordinator(coordRef.get());
+        gate1Configure(*eqRef);
+        eqRef->setBandEnabled(0, false);
+        eqRef->setBandEnabled(1, false);
+        std::vector<double> lRef, rRef;
+        if (!gate1Render(*eqRef, lRef, rRef))
+        {
+            std::fprintf(stderr, "G1-2: non-finite output (reference passthrough)\n");
+            ok = false;
+        }
+
+        // 参考 2: バンド有効（= 失敗経路が退役対象を参照した場合に見えるはずの出力）
+        auto coordBand = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eqBand = std::make_unique<EQProcessor>();
+        eqBand->setRetireCoordinator(coordBand.get());
+        gate1Configure(*eqBand);
+        eqBand->setNonlinearSaturation(0.9f);
+        eqBand->setBandGain(1, -6.0f);
+        std::vector<double> lBand, rBand;
+        if (!gate1Render(*eqBand, lBand, rBand))
+        {
+            std::fprintf(stderr, "G1-2: non-finite output (reference banded)\n");
+            ok = false;
+        }
+
+        // 被験体: saturatuin 0.9 の状態と BandNode を退役・reclaim させてから入場失敗で process する
+        auto coord = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eq = std::make_unique<EQProcessor>();
+        eq->setRetireCoordinator(coord.get());
+        gate1Configure(*eq);
+        eq->setNonlinearSaturation(0.9f);
+        eq->setBandGain(1, -6.0f);      // 参考 2 と同じ最終係数
+
+        const EQProcessor::EQState* retired = EQProcessorGate1TestAccess::currentState(*eq);
+        if (retired == nullptr)
+        {
+            std::fprintf(stderr, "G1-2: retired state is null\n");
+            ok = false;
+        }
+
+        eq->setBandGain(0, 6.0f);                                    // 交換 → 直前の状態を退役
+        EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);    // publish + reclaim
+
+        if (eq->eqOwnedPendingRetire() != 0)
+        {
+            std::fprintf(stderr, "G1-2: pendingRetire=%u (reclaim not completed)\n",
+                         static_cast<unsigned>(eq->eqOwnedPendingRetire()));
+            ok = false;
+        }
+        if (eq->eqRetireDropCount() != 0)
+        {
+            std::fprintf(stderr, "G1-2: retire dropped (%u) - coordinator not effective\n",
+                         static_cast<unsigned>(eq->eqRetireDropCount()));
+            ok = false;
+        }
+        const EQProcessor::EQState* current = EQProcessorGate1TestAccess::currentState(*eq);
+        if (current == nullptr || current == retired)
+        {
+            std::fprintf(stderr, "G1-2: state was not exchanged (current=%p retired=%p)\n",
+                         static_cast<const void*>(current), static_cast<const void*>(retired));
+            ok = false;
+        }
+
+        // Reader 登録を閉じる → EQ の RCUReader は入場できない（決定的な失敗注入）
+        EQProcessorGate1TestAccess::closeReaderRegistration(*eq);
+
+        // 解放済みブロックを再利用して毒を入れる（誤って退役対象を読んだ場合に必ず観測できるようにする）
+        std::vector<std::unique_ptr<EQProcessor::EQState>> poison;
+        for (int i = 0; i < 8; ++i)
+        {
+            poison.push_back(std::make_unique<EQProcessor::EQState>());
+            poison.back()->nonlinearSaturation = 1.0f;
+            for (int b = 0; b < EQProcessor::NUM_BANDS; ++b) poison.back()->bands[static_cast<size_t>(b)].gain = 24.0f;
+        }
+
+        std::vector<double> lFail, rFail;
+        if (!gate1Render(*eq, lFail, rFail))
+        {
+            std::fprintf(stderr, "G1-2: non-finite output (failure path)\n");
+            ok = false;
+        }
+        if (eq->unprotectedReadCount() != 3)
+        {
+            std::fprintf(stderr, "G1-2: unprotectedReadCount=%u (expected 3)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()));
+            ok = false;
+        }
+
+        // 失敗経路は「バンド無効の素通し」と一致し、「バンド有効」とは一致しない。
+        const double dRef = gate1MaxAbsDiff(lFail, lRef);
+        const double dBand = gate1MaxAbsDiff(lFail, lBand);
+        std::printf("  G1-2: dRef=%.6g dBand=%.6g (amplitude=%.3f)\n",
+                    dRef, dBand, gate1MaxAbs(lFail));
+        if (!(dRef < 1.0e-5))
+        {
+            std::fprintf(stderr, "G1-2: failure path is not passthrough (dRef=%.6g)\n", dRef);
+            ok = false;
+        }
+        if (!(dBand > 1.0e-3))
+        {
+            std::fprintf(stderr, "G1-2: probe has no discriminating power (dBand=%.6g)\n", dBand);
+            ok = false;
+        }
+
+        // ---- (d) 入場失敗のまま reclaim を反復しても退役対象に触れない ----
+        const std::uint32_t before = eq->unprotectedReadCount();
+        for (int i = 0; i < 5; ++i)
+        {
+            eq->setBandGain(0, 3.0f + static_cast<float>(i));
+            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);
+            std::vector<double> lx, rx;
+            if (!gate1Render(*eq, lx, rx))
+            {
+                std::fprintf(stderr, "G1-3: non-finite output (repeat %d)\n", i);
+                ok = false;
+                break;
+            }
+        }
+        if (eq->unprotectedReadCount() != before + 15u)
+        {
+            std::fprintf(stderr, "G1-3: unprotectedReadCount=%u (expected %u)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()),
+                         static_cast<unsigned>(before + 15u));
+            ok = false;
+        }
+    }
+
+    // ---- (e) reclaim と入場失敗の同時進行（非 RT スレッドが交換 + publish + reclaim） ----
+    {
+        auto coordC = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eq = std::make_unique<EQProcessor>();
+        eq->setRetireCoordinator(coordC.get());
+        gate1Configure(*eq);
+        EQProcessorGate1TestAccess::closeReaderRegistration(*eq);   // 音声側は常に入場失敗
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> swaps{0};
+        std::thread driver([&] {
+            for (int i = 0; i < 300 && !stop.load(std::memory_order_acquire); ++i)
+            {
+                eq->setBandGain(0, 3.0f + static_cast<float>(i % 7));
+                EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);   // publish + reclaim
+                swaps.fetch_add(1, std::memory_order_relaxed);
+            }
+            stop.store(true, std::memory_order_release);
+        });
+
+        bool finite = true;
+        int blocks = 0;
+        std::vector<double> l, r;
+        juce::AudioBuffer<double> in(2, kGate1BlockSize);
+        while (!stop.load(std::memory_order_acquire) || blocks < 300)
+        {
+            if (blocks >= 4000) break;                    // 暴走防止
+            gate1FillInput(in);
+            juce::dsp::AudioBlock<double> block(in);
+            eq->process(block);                            // 毎回入場失敗 → 何も参照しない
+            for (int ch = 0; ch < 2 && finite; ++ch)
+                for (int i = 0; i < kGate1BlockSize; ++i)
+                    if (!std::isfinite(in.getSample(ch, i))) finite = false;
+            ++blocks;
+        }
+        driver.join();
+
+        std::printf("  G1-4: concurrent blocks=%d swaps=%d unprotected=%u\n",
+                    blocks, swaps.load(), static_cast<unsigned>(eq->unprotectedReadCount()));
+        if (!finite)
+        {
+            std::fprintf(stderr, "G1-4: non-finite output during concurrent reclaim\n");
+            ok = false;
+        }
+        if (eq->unprotectedReadCount() != static_cast<std::uint32_t>(blocks))
+        {
+            std::fprintf(stderr, "G1-4: unprotectedReadCount=%u (expected %d)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()), blocks);
+            ok = false;
+        }
+        if (swaps.load() <= 0)
+        {
+            std::fprintf(stderr, "G1-4: no concurrent reclaim happened\n");
+            ok = false;
+        }
+        if (eq->eqRetireDropCount() != 0)
+        {
+            std::fprintf(stderr, "G1-4: retire dropped (%u)\n",
+                         static_cast<unsigned>(eq->eqRetireDropCount()));
+            ok = false;
+        }
+    }
+
+    return ok;
+}
+
+// =============================================================================
+// ★ 段階① (2026-11-11, Owner 承認): reclaim ドライバの契約検証（7 項目）
+//   1 pending あり  2 pending なし・滞留あり  3 pending なし・滞留なし
+//   5 publish 理由 4 区分  6 競合・寿命  7 RT（Message Thread）制約
+// =============================================================================
+static bool checkRetireDriverContract()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;   // MessageManager（main thread = message thread）
+    bool ok = true;
+
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto eq = std::make_unique<EQProcessor>();
+    eq->setRetireCoordinator(coordinator.get());
+    gate1Configure(*eq);
+
+    auto fail = [&ok](const char* what) {
+        std::fprintf(stderr, "DRV: %s\n", what);
+        ok = false;
+    };
+
+    // ---- 1) pending あり: epoch 前進 + reclaim ----
+    {
+        const auto before = eq->retireDriverStats();
+        eq->setBandGain(0, 6.0f);                       // pending = true
+        eq->driveRetireReclaimNonRt();
+        const auto after = eq->retireDriverStats();
+
+        if (after.currentEpoch != before.currentEpoch + 1) fail("1: epoch did not advance by 1");
+        if (after.publishTimerPending != before.publishTimerPending + 1) fail("1: timerPending publish not counted");
+        if (after.pendingRetire != 0) fail("1: D queue not drained");
+        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns) fail("1: publish path must not count as reclaim-only");
+    }
+
+    // ---- 2) pending なし・滞留あり: epoch は前進せず reclaim のみ ----
+    //   滞留は「publish 済みの古い epoch」で作る。つまり
+    //   epoch を進めなくても safe-below に入っている entry である。
+    {
+        const std::uint64_t epochNow = EQProcessorGate1TestAccess::currentEpoch(*eq);
+        if (epochNow < 2)
+            fail("2: epoch must be >= 2 before the reclaim-only probe");
+
+        const auto before = eq->retireDriverStats();
+        const int deletesBefore = g_driverProbeDeletes.load(std::memory_order_relaxed);
+        if (! EQProcessorGate1TestAccess::enqueueTestRetire(*eq, new int(7), driverProbeDeleter,
+                                                            epochNow - 1))
+            fail("2: enqueue of probe entry failed (coordinator?)");
+
+        const auto enqueued = eq->retireDriverStats();
+        if (enqueued.pendingRetire == 0) fail("2: probe entry is not resident in D queue");
+
+        eq->driveRetireReclaimNonRt();
+        const auto after = eq->retireDriverStats();
+
+        if (after.currentEpoch != before.currentEpoch) fail("2: epoch advanced without pending");
+        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns + 1) fail("2: reclaim-only run not counted");
+        if (g_driverProbeDeletes.load(std::memory_order_relaxed) != deletesBefore + 1)
+            fail("2: probe entry was not reclaimed");
+        if (after.pendingRetire != 0) fail("2: D queue not drained by reclaim-only run");
+    }
+
+    // ---- 3) pending なし・滞留なし: 何もしない ----
+    {
+        const auto before = eq->retireDriverStats();
+        eq->driveRetireReclaimNonRt();
+        const auto after = eq->retireDriverStats();
+
+        if (after.idleTicks != before.idleTicks + 1) fail("3: idle tick not counted");
+        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns) fail("3: unnecessary reclaim executed");
+        if (after.publishTimerPending != before.publishTimerPending) fail("3: unexpected publish");
+        if (after.currentEpoch != before.currentEpoch) fail("3: epoch changed while idle");
+    }
+
+    // ---- 5) publish 理由 4 区分 ----
+    {
+        {   // prepare 経由
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -3.0f);
+            eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+            const auto after = eq->retireDriverStats();
+            if (after.publishPrepare != before.publishPrepare + 1) fail("5: prepare publish not counted");
+        }
+        {   // release 経由
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -4.0f);
+            eq->releaseResources();
+            const auto after = eq->retireDriverStats();
+            if (after.publishRelease != before.publishRelease + 1) fail("5: release publish not counted");
+        }
+        {   // 明示的な直接 flush = Explicit
+            eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -5.0f);
+            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);
+            const auto after = eq->retireDriverStats();
+            if (after.publishExplicit != before.publishExplicit + 1) fail("5: explicit publish not counted");
+        }
+        {   // タイマー経由
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -6.0f);
+            eq->driveRetireReclaimNonRt();
+            const auto after = eq->retireDriverStats();
+            if (after.publishTimerPending != before.publishTimerPending + 1) fail("5: timer publish not counted");
+        }
+        {   // ★ 段階① v2: TimerPending の二重計数がないこと
+            //   ドライバは flush を呼ばないため、ドライバ 1 回で増えるのは
+            //   publishTimerPending だけである（Explicit は増えない）。
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(0, 4.0f);
+            eq->driveRetireReclaimNonRt();
+            const auto after = eq->retireDriverStats();
+            if (after.publishTimerPending != before.publishTimerPending + 1) fail("5b: timer publish not counted once");
+            if (after.publishExplicit != before.publishExplicit) fail("5b: timer path must not count as explicit");
+            if (after.publishPrepare != before.publishPrepare) fail("5b: timer path must not count as prepare");
+            if (after.publishRelease != before.publishRelease) fail("5b: timer path must not count as release");
+        }
+    }
+
+    // ---- 6) 競合・寿命: driver（Message Thread）と setter/prepare/release（他スレッド）----
+    {
+        std::atomic<bool> stop{false};
+        std::atomic<int> iterations{0};
+        std::thread worker([&] {
+            for (int i = 0; i < 200 && ! stop.load(std::memory_order_acquire); ++i)
+            {
+                eq->setBandGain(0, 3.0f + static_cast<float>(i % 5));
+                if ((i % 20) == 0)  eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+                if ((i % 20) == 10) eq->releaseResources();
+                iterations.fetch_add(1, std::memory_order_relaxed);
+            }
+            stop.store(true, std::memory_order_release);
+        });
+
+        int ticks = 0;
+        while (! stop.load(std::memory_order_acquire) || ticks < 200)
+        {
+            eq->driveRetireReclaimNonRt();
+            ++ticks;
+            if (ticks > 200000) break;                  // 暴走防止
+        }
+        worker.join();
+
+        // 最後の setter が残した entry は、あと 1 回 publish すれば safe-below に入る。
+        // ドライバが pending を消費して epoch を進めれば D は空になる。
+        eq->setBandGain(0, 2.0f);
+        eq->driveRetireReclaimNonRt();
+
+        const auto end = eq->retireDriverStats();
+        if (eq->eqRetireDropCount() != 0) fail("6: retire drop occurred under concurrency");
+        if (end.pendingRetire != 0 || end.resident != 0) fail("6: residue left after concurrency");
+        if (iterations.load() <= 0) fail("6: worker did not run");
+        std::printf("  DRV6: ticks=%d iterations=%d epoch=%llu\n", ticks, iterations.load(),
+                    static_cast<unsigned long long>(end.currentEpoch));
+    }
+
+    // ---- 7) RT 制約: Message Thread 以外からは拒否（fail-safe）----
+    {
+        eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+        const auto before = eq->retireDriverStats();
+        std::thread foreign([&] { eq->driveRetireReclaimNonRt(); });
+        foreign.join();
+        const auto after = eq->retireDriverStats();
+
+        if (after.offThreadRejects != before.offThreadRejects + 1) fail("7: off-thread call was not rejected");
+        if (after.currentEpoch != before.currentEpoch) fail("7: off-thread call advanced the epoch");
+        if (after.publishTimerPending != before.publishTimerPending) fail("7: off-thread call published");
+    }
+
+    // ---- 最終: 音声処理が崩れていないこと ----
+    {
+        eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+        std::vector<double> l, r;
+        if (! gate1Render(*eq, l, r)) fail("final: non-finite output");
+        if (gate1MaxAbs(l) < 1.0e-9) fail("final: silent output");
+        const auto s = eq->retireDriverStats();
+        std::printf("  DRV: timer=%u prepare=%u release=%u explicit=%u reclaimOnly=%u idle=%u offThread=%u\n",
+                    s.publishTimerPending, s.publishPrepare, s.publishRelease, s.publishExplicit,
+                    s.reclaimOnlyRuns, s.idleTicks, s.offThreadRejects);
+    }
+
+    return ok;
+}
+
+// =============================================================================
+// ★ 段階③ (2026-11-11, Owner 承認): 3 分類診断の契約検証
+//   (1) 合成 driver+ebr+exec+unclassified == latency
+//   (2) firstScanTs==0 → unclassified 全額（0 埋めしない）
+//   (3) safeTs==0 → 分類対象外（excluded）(4)(5) 順序不整合 → inconsistent
+//   (6) 実キュー由来の観測で合成と firstScanTs を確認
+// =============================================================================
+static bool checkLatencyClassificationContract()
+{
+    bool ok = true;
+    using Rec = convo::isr::RetireLatencyRecorder;
+
+    auto fail = [&ok](const char* what) {
+        std::fprintf(stderr, "CLS: %s\n", what);
+        ok = false;
+    };
+
+    // (1) 合成: ts=1000, firstScan=5000, safe=8000, now=9000
+    {
+        const auto c = Rec::classifyTimes (1000u, 5000u, 8000u, 9000u);
+
+        if (! c.classified) fail("1: not classified");
+        if (c.driverWaitNs != 4000u) fail("1: driverWait != 4000");
+        if (c.ebrWaitNs != 3000u) fail("1: ebrWait != 3000");
+        if (c.execWaitNs != 1000u) fail("1: execWait != 1000");
+        if (c.unclassifiedNs != 0u) fail("1: unclassified != 0");
+        const std::uint64_t total = 9000u - 1000u;
+        if (c.driverWaitNs + c.ebrWaitNs + c.execWaitNs + c.unclassifiedNs != total)
+            fail("1: composition != latency");
+    }
+
+    // (2) firstScanTs 未設定 → unclassified は latency 全額
+    {
+        const auto c = Rec::classifyTimes (1000u, 0u, 8000u, 9000u);
+
+        if (c.classified) fail("2: must not be classified");
+        if (c.unclassifiedNs != 8000u) fail("2: unclassified must be the full latency");
+    }
+
+    // (3) safeTs 未観測 → 分類対象外
+    {
+        const auto c = Rec::classifyTimes (1000u, 5000u, 0u, 9000u);
+
+        if (! c.excluded) fail("3: must be excluded");
+        if (c.classified) fail("3: excluded must not be classified");
+    }
+
+    // (4) firstScanTs < ts → 不整合
+    {
+        const auto c = Rec::classifyTimes (5000u, 1000u, 8000u, 9000u);
+
+        if (! c.inconsistent) fail("4: must be inconsistent");
+        if (c.unclassifiedNs != 4000u) fail("4: unclassified must be the full latency");
+    }
+
+    // (5) safeTs < firstScanTs → 不整合
+    {
+        const auto c = Rec::classifyTimes (1000u, 6000u, 5000u, 9000u);
+
+        if (! c.inconsistent) fail("5: must be inconsistent");
+        if (c.unclassifiedNs != 8000u) fail("5: unclassified must be the full latency");
+    }
+
+    // (5b) safeTs < ts（安全時刻が要求より前）も不整合として拾う
+    {
+        const auto c = Rec::classifyTimes (5000u, 5000u, 4000u, 9000u);
+
+        if (! c.inconsistent) fail("5b: safeTs < ts must be inconsistent");
+        if (c.excluded) fail("5b: safeTs < ts must not be treated as excluded");
+    }
+
+    // (6) 実観測での合成（実キューの reclaim 経路を通ったもの）
+    {
+        const auto snap = Rec::instance().snapshot();
+        std::uint64_t withFirstScan = 0;
+        std::uint64_t classifiedObs = 0;
+        std::uint64_t compositionErrors = 0;
+
+        for (const auto& o : snap.observations)
+        {
+            if (o.safeTsNs == 0)
+                continue;
+            if (o.firstScanTsNs == 0)
+                continue;                  // 未走査（drainAll）は対象外
+
+            ++withFirstScan;
+
+            if (o.classified == 1u)
+            {
+                ++classifiedObs;
+                const std::uint64_t sum = o.driverWaitNs + o.ebrWaitNs + o.execWaitNs + o.unclassifiedNs;
+
+                if (sum != o.latencyNs)
+                    ++compositionErrors;
+            }
+        }
+
+        std::printf("  CLS6: observations_with_firstScan=%llu classified=%llu compositionErrors=%llu\n",
+                    static_cast<unsigned long long>(withFirstScan),
+                    static_cast<unsigned long long>(classifiedObs),
+                    static_cast<unsigned long long>(compositionErrors));
+
+        if (withFirstScan == 0) fail("6: firstScanTs is never recorded (queue hook missing)");
+        if (classifiedObs == 0) fail("6: no classified observation");
+        if (compositionErrors != 0) fail("6: composition mismatch in real observations");
+
+        // 母数分離: classified + unclassified + excluded == completions
+        const auto& tot = snap.classTotals;
+
+        if (tot.classified + tot.unclassified + tot.excluded != tot.completions)
+        {
+            std::fprintf(stderr, "CLS6: counts classified=%llu unclassified=%llu excluded=%llu completions=%llu\n",
+                         static_cast<unsigned long long>(tot.classified),
+                         static_cast<unsigned long long>(tot.unclassified),
+                         static_cast<unsigned long long>(tot.excluded),
+                         static_cast<unsigned long long>(tot.completions));
+            fail("6: classified + unclassified + excluded != completions");
+        }
+    }
+
+    return ok;
+}
+
 int runSTG11EQRetireTests()
 {
     bool ok = true;
@@ -729,8 +1384,23 @@ int runSTG11EQRetireTests()
         std::fprintf(stderr, "FAIL: D15 phase unwrap contract\n");
         ok = false;
     }
+    if (!checkGate1ProcessIsolation())
+    {
+        std::fprintf(stderr, "FAIL: Gate1 reader-safety process isolation\n");
+        ok = false;
+    }
+    if (!checkRetireDriverContract())
+    {
+        std::fprintf(stderr, "FAIL: stage-1 retire reclaim driver contract\n");
+        ok = false;
+    }
+    if (!checkLatencyClassificationContract())
+    {
+        std::fprintf(stderr, "FAIL: stage-3 latency classification contract\n");
+        ok = false;
+    }
     if (ok)
-        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b)\n");
+        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b/Gate1/Stage1/Stage3)\n");
     return ok ? 0 : 1;
 }
 

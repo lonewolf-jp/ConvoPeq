@@ -3,6 +3,7 @@
 #include <array>
 #include <cassert>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -11,8 +12,21 @@
 
 #include "../DeferredDeletionQueue.h"
 #include "IEpochProvider.h"
+#include "RetireDomain.h"          // ★ domain tag (v2.9): 退役ドメインの刻印元
 #include "audioengine/AtomicAccess.h"
 #include "ThreadHash.h"
+
+#if ! defined (NDEBUG) && defined (_WIN32)
+    #include <intrin.h>   // __debugbreak（MSVC intrinsic・x86/x64/ARM/ARM64）
+
+    // windows.h を持ち込むと max/min マクロが std::numeric_limits<T>::max() を壊すため、
+    // 必要な API だけを宣言する。Windows SDK の宣言は `WINBASEAPI BOOL WINAPI IsDebuggerPresent(VOID)`
+    // であり、BOOL=int・WINAPI=__stdcall なので、型と呼出規約をそれに合わせる
+    // （kernel32 は常にリンクされる）。windows.h が先に取り込まれている場合は宣言済みなので省く。
+    #if ! defined (_WINDOWS_) && ! defined (_INC_WINDOWS)
+        extern "C" __declspec (dllimport) int __stdcall IsDebuggerPresent (void);
+    #endif
+#endif
 
 namespace convo {
 
@@ -23,8 +37,20 @@ public:
     static constexpr uint64_t kInactiveEpoch = std::numeric_limits<uint64_t>::max();
     static constexpr uint64_t kReservedEpoch = std::numeric_limits<uint64_t>::max() - 1;
 
-    EpochDomain() : globalEpoch(1)
+    // ★ domain tag (v2.9 §3.2): 生成側に必ず意図を書かせる（デフォルト引数なし）。
+    //   契約は B-1:
+    //     ・許可値は Unknown / EngineISR / EQ の 3 値のみ
+    //     ・Unstamped / Count / 5 以上は全ビルドで「採用しない」（Unknown に落として計数する）
+    //     ・Debug では加えて assertion（ログ + デバッガ接続時ブレーク）で検出する
+    explicit EpochDomain(RetireDomainId domain) noexcept
+        : domainId_(sanitizeDomain(domain)), globalEpoch(1)
     {
+        if (! isAssignableDomain(domain))
+        {
+            invalidDomainAssignments_.fetch_add (1u, std::memory_order_relaxed);
+            domainAssertionFailure();
+        }
+
         for (auto& slot : readers)
         {
             // release: コンストラクタ内で単一スレッドから初期化するが、
@@ -36,9 +62,66 @@ public:
         }
     }
 
+    // ★ domain tag: 契約の判定子（constexpr・全ビルド共通）
+    static constexpr bool isAssignableDomain(RetireDomainId domain) noexcept
+    {
+        return domain == RetireDomainId::Unknown
+            || domain == RetireDomainId::EngineISR
+            || domain == RetireDomainId::EQ;
+    }
+
+    // ★ domain tag: 不正値は決して採用しない（全ビルド）。採用値は Unknown
+    //   （集計上は providerUnknown に計上される）。
+    static constexpr RetireDomainId sanitizeDomain(RetireDomainId domain) noexcept
+    {
+        return isAssignableDomain(domain) ? domain : RetireDomainId::Unknown;
+    }
+
+    [[nodiscard]] RetireDomainId domainId() const noexcept { return domainId_; }
+
+    // ★ domain tag (v2.9 §3.1): IRetireProvider への公開
+    [[nodiscard]] RetireDomainId retireDomainId() const noexcept override { return domainId_; }
+
+    // ★ domain tag: 不正値の生成回数（診断用。JSON には出さない）
+    static std::uint32_t invalidDomainAssignments() noexcept
+    {
+        return invalidDomainAssignments_.load (std::memory_order_relaxed);
+    }
+
+    // ★ domain tag: 設計の jassertfalse に相当する Debug 検出。
+    //   EpochDomain.h は JUCE 非依存（<cassert> のみ）で、inline ctor の定義は全 TU で
+    //   同一でなければならない。そのため JUCE の jassertfalse 展開
+    //   （JUCE_LOG_CURRENT_ASSERTION → juce_isRunningUnderDebugger() のときだけブレーク）
+    //   と同じ「条件・順序・ブレーク動作」をここで直接実装する。Release では何もしない。
+    //   ただし **ログの配送先は異なる**（JUCE Logger ではなく stderr）。JUCE の実マクロを
+    //   製品 ctor で使っているわけではない。
+    static void domainAssertionFailure() noexcept
+    {
+#if ! defined (NDEBUG)
+        std::fprintf (stderr,
+                      "EpochDomain: invalid RetireDomainId (contract violation; "
+                      "assignable values are Unknown/EngineISR/EQ)\n");
+  #if defined (_WIN32)
+        // デバッガ接続時のみブレーク（JUCE の juce_isRunningUnderDebugger() と同じ条件）。
+        if (::IsDebuggerPresent() != 0)
+            __debugbreak();
+  #else
+        // 非 Windows: デバッガ判定のポータブル手段が無いため、Debug では停止する
+        // （assert と同じ挙動）。Windows API の宣言や未定義シンボルは持ち込まない。
+        assert (false && "EpochDomain: invalid RetireDomainId");
+  #endif
+#endif
+    }
+
     int registerReaderThread() noexcept override
     {
         return registerReaderThread("unnamed");
+    }
+
+    // ★ 計測: 登録元タグ（文字列版へ委譲するだけで挙動は変えない）
+    int registerReaderThreadWithTag(const char* tag) noexcept override
+    {
+        return registerReaderThread(tag);
     }
 
     // ★ C-3: タグ名付き Reader 登録
@@ -205,6 +288,28 @@ public:
         const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth,
                                                               static_cast<uint32_t>(1),
                                                               std::memory_order_acq_rel);
+        // ★ 計測: 区画の保持時間（1ms 以上のときだけ最長値を更新）
+        if (previousDepth == 1 && readerIndex >= 0 && readerIndex < kMaxReaders)
+        {
+            const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
+            const uint64_t nowUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (startUs != 0 && nowUs > startUs && (nowUs - startUs) >= 1000ull)
+            {
+                auto& w = holdWitness_[static_cast<size_t>(readerIndex)];
+                w.count.fetch_add(1u, std::memory_order_relaxed);
+                w.slot.store(static_cast<uint32_t>(readerIndex), std::memory_order_relaxed);
+                w.domainKey.store(reinterpret_cast<uint64_t>(this), std::memory_order_relaxed);
+                std::strncpy(w.tag, slot.ownerTag, sizeof(w.tag) - 1);
+                uint64_t expected = w.maxHoldUs.load(std::memory_order_relaxed);
+                while (nowUs - startUs > expected
+                       && ! w.maxHoldUs.compare_exchange_weak(expected, nowUs - startUs,
+                                                              std::memory_order_relaxed,
+                                                              std::memory_order_relaxed))
+                {
+                }
+            }
+        }
         if (previousDepth == 0)
         {
             convo::publishAtomic(slot.depth, static_cast<uint32_t>(0), std::memory_order_release);
@@ -453,7 +558,7 @@ public:
     // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, domainId_);
     }
 
     // ★ T1 (D86): telemetry type tag 付き enqueue（type を DeferredDeletionQueue に伝搬）。
@@ -461,7 +566,7 @@ public:
     bool enqueueRetireTyped(void* ptr, void (*deleter)(void*), uint64_t epoch,
                             DeletionEntryType type) noexcept override
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type, domainId_);
     }
 
     // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・primary 経路）。
@@ -616,7 +721,7 @@ private:
     [[deprecated("Use coordinator.enqueueRetire() instead.")]]
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type, domainId_);
     }
 
     struct ReaderSlot
@@ -640,6 +745,50 @@ private:
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
     DeferredDeletionQueue deferredDeletionQueue;
+
+    // ★ domain tag (v2.9 §3.2): 自分のドメイン（enqueue 時に entry へ刻印する）。
+    //   宣言順は domainId_ → globalEpoch（初期化子の順序警告を出さない）。
+    RetireDomainId domainId_ { RetireDomainId::Unknown };
+
+    // ★ domain tag: 不正値の生成回数（診断用・全ビルドで観測可能）
+    inline static std::atomic<std::uint32_t> invalidDomainAssignments_ { 0 };
+
+public:
+    // ★ 計測 (2026-11-10): reader 区画の最長保持時間の証跡。
+    //   スロット単位の固定容量で、ポインタを辿らない（破棄後も安全に読める）。
+    struct HoldWitness
+    {
+        std::atomic<uint64_t> maxHoldUs{0};
+        std::atomic<uint32_t> count{0};
+        std::atomic<uint32_t> slot{0xFFFFFFFFu};
+        char tag[32]{};
+        std::atomic<uint64_t> domainKey{0};
+    };
+    static inline HoldWitness holdWitness_[kMaxReaders]{};
+
+    // ★ 計測: 保持時間の証跡を JSON として書き出す（NonRT から呼ぶこと）。
+    static void dumpHoldWitness(std::FILE* f) noexcept
+    {
+        if (f == nullptr)
+            return;
+        std::fprintf(f, "{\n  \"schema\": \"retire_reader_holds_v1\",\n");
+        std::fprintf(f, "  \"note\": \"1ms 以上の reader 区画の最長保持時間（スロット単位・固定容量）\",\n");
+        std::fprintf(f, "  \"slots\": [");
+        bool first = true;
+        for (int i = 0; i < kMaxReaders; ++i)
+        {
+            const auto& w = holdWitness_[static_cast<size_t>(i)];
+            const uint64_t h = w.maxHoldUs.load(std::memory_order_relaxed);
+            if (h == 0)
+                continue;
+            std::fprintf(f, "%s\n    {\"slot\": %d, \"tag\": \"%s\", \"maxHoldUs\": %llu, \"count\": %u}",
+                         first ? "" : ",", i, w.tag,
+                         (unsigned long long) h,
+                         w.count.load(std::memory_order_relaxed));
+            first = false;
+        }
+        std::fprintf(f, "%s]\n}\n", first ? "" : "\n  ");
+    }
 
     // ★ A-2: EBR Queue Visibility 統計カウンタ
     std::atomic<uint64_t> reclaimAttemptCount_{0};

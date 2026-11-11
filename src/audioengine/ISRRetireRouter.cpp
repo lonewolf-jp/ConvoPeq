@@ -7,7 +7,8 @@
 
 #include "ISRRetireRouter.h"
 #include "core/TimeUtils.h"     // ★ Practical-4: getCurrentTimeUs
-#include "../DspNumericPolicy.h" // ★ P-4: isAudioThread() — RT 防御（synchronous destruction 禁止）
+#include "../DspNumericPolicy.h"
+#include "ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定 // ★ P-4: isAudioThread() — RT 防御（synchronous destruction 禁止）
 
 namespace convo {
 namespace isr {
@@ -104,7 +105,8 @@ std::size_t TerminalReclaimAuthority::retryableResidentCount() const noexcept
 }
 
 void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
-                                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
+                                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+                                     RetireDomainId domain) noexcept
 {
     // ★ F1'-b (2026-10-25): 所有権の扱いを「消費」から「結果を見て消費」へ変更。
     //   旧実装は epoch-safe なエントリを pending に移した時点で entries_ から消していたため、
@@ -206,6 +208,9 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
 
     // --- 5) 従来 deleter の実行（ロック外・reentrancy 安全）---
     for (auto& e : legacyPending) {
+        convo::isr::RetireLatencyRecorder::instance().recordSafe (e.ptr);   // ★ A(D1): drain は安全到達後
+        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+            e.ptr, convo::isr::RetireLatencyRecorder::Path::Drain, domain);   // ★ A(D1)
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
         {
@@ -216,7 +221,7 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
     }
 }
 
-void TerminalReclaimAuthority::drainAll() noexcept
+void TerminalReclaimAuthority::drainAll(RetireDomainId domain) noexcept
 {
     // ★ Step 5-I: telemetry — increment drainAll invocation count
     convo::fetchAddAtomic(terminalDrainAllCount_, std::uint64_t{1}, std::memory_order_acq_rel);
@@ -242,6 +247,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
             const DestroyOutcome outcome = e.retryable(e.ptr);
             if (outcome == DestroyOutcome::Destroyed)
             {
+                convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                    e.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll, domain);   // ★ A(D1)
                 convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
                                       std::memory_order_release);
                 if (e.type == DeletionEntryType::World)
@@ -266,6 +273,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
         }
 
         if (e.deleter != nullptr) {
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                e.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll, domain);   // ★ A(D1)
             e.deleter(e.ptr);
             // ★ Step 5-I: telemetry — count actually drained entries
             convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1}, std::memory_order_release);
@@ -292,7 +301,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
 }
 
 bool TerminalReclaimAuthority::tryReclaim(uint64_t minReaderEpoch,
-                                        const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
+                                        const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+                                        RetireDomainId domain) noexcept
 {
     // Drain epoch-safe entries; return true if at least one was reclaimed
     std::size_t beforeCount = 0;
@@ -303,7 +313,7 @@ bool TerminalReclaimAuthority::tryReclaim(uint64_t minReaderEpoch,
     if (beforeCount == 0)
         return false;
 
-    drain(minReaderEpoch, isOlderFn);
+    drain(minReaderEpoch, isOlderFn, domain);
 
     std::size_t afterCount = 0;
     {
@@ -429,6 +439,42 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
 
+    // ★ A(D1): 退役要求の時刻・epoch・最小 reader を記録する（同一ポインタの再試行は同じ要求）
+    {
+        const std::uint64_t minReaderExpr = provider_->getMinReaderEpoch();
+        std::uint32_t minReaderSlot = 0xFFFFFFFFu;
+        std::uint64_t smallestActiveEpoch = 0;
+        std::uint32_t smallestActiveSlot = 0xFFFFFFFFu;
+
+        const int capacity = provider_->readerCapacity();
+
+        for (int r = 0; r < capacity; ++r)
+        {
+            const auto detail = provider_->getReaderSlotDetail (r);
+
+            if (! detail.active || detail.epoch == 0)
+                continue;
+
+            if (smallestActiveSlot == 0xFFFFFFFFu || detail.epoch < smallestActiveEpoch)
+            {
+                smallestActiveEpoch = detail.epoch;
+                smallestActiveSlot = static_cast<std::uint32_t> (r);
+            }
+
+            if (detail.epoch == minReaderExpr)
+            {
+                minReaderSlot = static_cast<std::uint32_t> (r);
+                break;
+            }
+        }
+
+        if (minReaderSlot == 0xFFFFFFFFu)
+            minReaderSlot = smallestActiveSlot;
+
+        convo::isr::RetireLatencyRecorder::instance().recordRequest (
+            ptr, epoch, minReaderExpr, minReaderSlot);
+    }
+
     // Route through IEpochProvider interface（★ T1: telemetry type tag を伝搬・D86）。
     if (provider_->enqueueRetireTyped(ptr, deleter, epoch, type))
     {
@@ -468,7 +514,21 @@ bool ISRRetireRouter::retireRT(void* ptr, void (*deleter)(void*)) noexcept
     assert(provider_ != nullptr);
     if (ptr == nullptr || deleter == nullptr)
         return true;
-    return provider_->enqueueRetire(ptr, deleter, provider_->currentEpoch());
+
+    const std::uint64_t epoch = provider_->currentEpoch();
+
+    // ★ 設計 v2: RT 経路でも要求を記録する（TLS 区画内の走査のみ・確保/ロックなし）。
+    //   完了より先に要求を置き、enqueue 失敗時は **自分が作成した記録だけ** を取り消す。
+    bool requestCreated = false;
+    const auto requestId = convo::isr::RetireLatencyRecorder::instance().recordRequestRT (
+        ptr, epoch, provider_->getMinReaderEpoch(), &requestCreated);
+
+    const bool ok = provider_->enqueueRetire(ptr, deleter, epoch);
+
+    if (! ok && requestCreated && requestId != 0u)
+        convo::isr::RetireLatencyRecorder::instance().cancelRequestRTById (ptr, requestId);
+
+    return ok;
 }
 
 // ★ R-1: IRetireRouter::retire — リトライ込み（NonRT）
@@ -585,7 +645,7 @@ void ISRRetireRouter::drainQuarantineStore() noexcept
     const uint64_t minReader = minReaderEpoch();
     m_retireQuarantine.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
-    });
+    }, retireDomainId());
 }
 
 // ★ BUG-015/027 (work88): Router API — 退避ストアへの移送（directDelete しない）。
@@ -627,11 +687,11 @@ std::uint64_t ISRRetireRouter::quarantineOverflowCount() const noexcept
 // ★ BUG-015/027: shutdown 時 — Audio Thread 停止後のみ全強制解放（drainAllUnsafe と同契約）
 void ISRRetireRouter::drainAllQuarantineStore() noexcept
 {
-    m_retireQuarantine.drainAllUnsafe();
+    m_retireQuarantine.drainAllUnsafe(retireDomainId());
     // ★ P-4: EmergencyQ も全強制解放（Audio Thread 停止後）
-    m_emergencyQuarantine.drainAllUnsafe();
+    m_emergencyQuarantine.drainAllUnsafe(retireDomainId());
     // ★ P-4: TerminalReclaimAuthority も全強制解放（Audio Thread 停止後）
-    m_terminalReclaim.drainAll();
+    m_terminalReclaim.drainAll(retireDomainId());
 }
 
 // ★ E-1.9-B: Signal the CoordinatorLoop that Q/E/T may have new entries.
@@ -705,6 +765,10 @@ bool ISRRetireRouter::terminalReclaim(void* ptr, void (*deleter)(void*), uint64_
     if (epochSafe && !isRt)
     {
         // Synchronous destruction — Non-RT context guaranteed by caller
+        convo::isr::RetireLatencyRecorder::instance().recordSafe (ptr);   // ★ A(D1): 同期経路は要求時点で安全
+        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+            ptr, convo::isr::RetireLatencyRecorder::Path::Sync,
+            retireDomainId());   // ★ A(D1) + domain tag
         deleter(ptr);
         if (type == DeletionEntryType::World)
             m_terminalReclaim.recordWorldReclaim();
@@ -749,6 +813,10 @@ bool ISRRetireRouter::terminalReclaimRetryable(void* ptr, RetryableDeleter retry
     {
         if (retryable(ptr) == DestroyOutcome::Destroyed)
         {
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                ptr, convo::isr::RetireLatencyRecorder::Path::Sync,
+                retireDomainId());   // ★ A(D1) + domain tag
+
             if (type == DeletionEntryType::World)
                 m_terminalReclaim.recordWorldReclaim();
         }
@@ -768,7 +836,7 @@ void ISRRetireRouter::drainTerminalReclaim() noexcept
     const uint64_t minReader = minReaderEpoch();
     m_terminalReclaim.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
-    });
+    }, retireDomainId());
 }
 
 // ★ P-4: EmergencyQ + TerminalReclaimAuthority の epoch-gated drain
@@ -779,7 +847,7 @@ void ISRRetireRouter::drainEmergencyAndTerminal() noexcept
         const uint64_t minReader = minReaderEpoch();
         m_emergencyQuarantine.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
             return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
-        });
+        }, retireDomainId());
     }
     // drain TerminalReclaimAuthority (epoch-gated)
     drainTerminalReclaim();
@@ -816,6 +884,9 @@ uint32_t ISRRetireRouter::pendingRetireCount() const noexcept
 
 void ISRRetireRouter::drainAll() noexcept
 {
+    // ★ A(D1): 終了処理に入ったことを記録する（以後の要求は測定対象外）
+    convo::isr::RetireLatencyRecorder::instance().markShutdownPhase();
+
     // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
     provider_->drainAll();

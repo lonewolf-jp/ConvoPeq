@@ -7,6 +7,8 @@
 #include "NoiseShaperLearner.h"
 #include "ISRRetireRouter.h"
 #include "DSPLifetimeManager.h"
+#include "ISRRetireLatency.h"
+#include "WorldLifetimeRecorder.h"   // ★ A(D1): 退役遅延の測定
 
 namespace {
 void diagLog(const juce::String& message)
@@ -46,6 +48,10 @@ AudioEngine::AudioEngine()
     , worldAuthority_(runtimePublicationBridge_)
     , shutdownRuntime_(runtimePublicationBridge_)  // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): constructor 固定注入（setReclaimAuthority 廃止 — immutable association）
 {
+    // ★ A(D1): 測定器はエンジン 1 個につき 1 回リセットする（前インスタンスの観測を持ち越さない）
+    convo::isr::RetireLatencyRecorder::instance().reset();
+    convo::isr::WorldLifetimeRecorder::instance().reset();   // ★ Item2: World 寿命の記録
+
     // ★ engineInstanceId 初期化 (全局一意)
     engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter
 
@@ -334,6 +340,9 @@ AudioEngine::~AudioEngine()
         m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
         m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
     }
+
+    // ★ A(D1): 最終 drain 後の状態を違反レポートへ反映する（runtime 段階は保持される）
+    debugRuntime_.emitFinalViolationReport();
 
     // ★ F1'-b (2026-10-25) 監査対応（欠陥 C）: 延期リストの最終 drain。
     //   EBR store を全部 drain した後でも、pin 残留で延期された DSPCore は

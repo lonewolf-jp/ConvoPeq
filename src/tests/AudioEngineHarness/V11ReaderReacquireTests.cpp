@@ -59,7 +59,7 @@ int v11FindActiveSlot(convo::EpochDomain& domain) noexcept
 // v11_1: baseline re-entry while registration is open.
 bool checkV11BaselineReentry()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::RCUReader reader(domain);
 
     bool first = false, second = false;
@@ -79,7 +79,7 @@ bool checkV11BaselineReentry()
 bool checkV11ProtectionAfterClose()
 {
     v11ResetCounters();
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     convo::RCUReader reader(domain);
 
@@ -110,7 +110,7 @@ bool checkV11ProtectionAfterClose()
                          DeletionEntryType::Generic, "v11-harness");
         domain.publishEpoch();                       // new publication advances the epoch
 
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         if (g_v11DeleterCalls != 0)
         {
             std::printf("  v11_3: object freed while the guard was held (calls=%d)\n",
@@ -119,7 +119,7 @@ bool checkV11ProtectionAfterClose()
         }
     }
 
-    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
     if (g_v11DeleterCalls != 1 || g_v11LastDeleted != obj)
     {
         std::printf("  v11_4: object not freed after the guard dropped (calls=%d)\n",
@@ -132,7 +132,7 @@ bool checkV11ProtectionAfterClose()
 // v11_5: a thread that never registered must not obtain a slot after close.
 bool checkV11NewThreadStillRefused()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     domain.closeReaderRegistration();
 
     std::atomic<int> outcome{99};
@@ -156,7 +156,7 @@ bool checkV11NewThreadStillRefused()
 // v11_6: ownership — a foreign thread cannot re-acquire the owner's slot.
 bool checkV11ForeignReacquireRefused()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::RCUReader reader(domain);
 
     int slot = -1;
@@ -217,7 +217,7 @@ void v11PayloadDeleter(void* p) noexcept
 // obtain a slot, so nothing pins the epoch); true exercises the re-acquire path.
 V11ConcResult v11RunConcurrency(bool registeredBeforeClose, long long iterations)
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     std::atomic<V11Payload*> world{nullptr};
 
@@ -287,7 +287,7 @@ V11ConcResult v11RunConcurrency(bool registeredBeforeClose, long long iterations
         domain.publishEpoch();
 
         const std::size_t residentBefore = store.residentCount();
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         const std::size_t residentAfter = store.residentCount();
         if (residentAfter < residentBefore)
             reclaims.fetch_add(static_cast<long long>(residentBefore - residentAfter),
@@ -335,7 +335,7 @@ bool checkV11Concurrency()
 bool checkV11QuarantinePreserved()
 {
     v11ResetCounters();
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     convo::RCUReader reader(domain);
 
@@ -372,7 +372,7 @@ bool checkV11QuarantinePreserved()
         store.quarantine(obj, v11TestDeleter, retireEpoch,
                          DeletionEntryType::Generic, "v11-harness-q");
         domain.publishEpoch();
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         protectedWhileActive = (g_v11DeleterCalls == 0);
 
         if (domain.quarantinedReaderCount() != before)
@@ -383,7 +383,7 @@ bool checkV11QuarantinePreserved()
         }
     }
 
-    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
     const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
     const bool flagKept = domain.quarantinedReaderCount() == before;
 
@@ -403,7 +403,7 @@ bool checkV11QuarantinePreserved()
 // enterReader() in the same call (acquireThreadSlot -> enterReader).
 bool checkV11ReacquireIsSingleShot()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::RCUReader reader(domain);
 
     int slot = -1;
@@ -436,7 +436,7 @@ bool checkV11ReacquireIsSingleShot()
 bool checkV11QuarantinePendingTransition()
 {
     v11ResetCounters();
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     convo::RCUReader reader(domain);
 
@@ -472,11 +472,11 @@ bool checkV11QuarantinePendingTransition()
         store.quarantine(obj, v11TestDeleter, domain.currentEpoch(),
                          DeletionEntryType::Generic, "v11-11");
         domain.publishEpoch();
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         protectedWhileActive = (g_v11DeleterCalls == 0);
     }
 
-    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
     const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
 
     std::printf("  v11_11: deferred=%d notCountedWhilePending=%d promoted=%d "
@@ -493,7 +493,7 @@ bool checkV11QuarantinePendingTransition()
 // must let a reader re-enter - the refusal must not poison the slots that are already held.
 bool checkV11CapacityRefusalRecovers()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
 
     std::array<std::unique_ptr<convo::RCUReader>, convo::EpochDomain::kMaxReaders> readers;
     std::array<std::unique_ptr<convo::RCUReaderGuard>, convo::EpochDomain::kMaxReaders> guards;

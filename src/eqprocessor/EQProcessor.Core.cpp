@@ -80,17 +80,101 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
-void EQProcessor::flushPendingEpochAdvance() noexcept
+void EQProcessor::flushPendingEpochAdvance(PublishReason reason) noexcept
 {
+
     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
         m_epochDomain->publishEpoch();
+        // ★ 段階①: publish 理由別カウント（診断のみ。挙動は従来どおり）
+        countPublishReason(reason);
         // ★ STG-11-D1: 定期的 reclaim driver（NonRT 専用）。
-        //   呼び出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
+        //   呼出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
         //   epoch 前進後に member router の D + Q + E + T を epoch-gated drain する。
         //   新規 timer / thread / authority は追加しない。RT からは呼ばない。
         m_ownedRetireRouter.tryReclaim();
     }
+}
+
+// ★ 段階① (2026-11-11, Owner 承認): EQ ドメイン reclaim ドライバ
+//   呼出し元: AudioEngine::timerCallback（100 ms・Message Thread・Non-RT）
+//   不変条件:
+//     1) epoch を前進させるのは m_epochAdvancePending が true のときだけ
+//        （滞留しているという理由だけでは前進させない）
+//     2) pending が false でも滞留があれば reclaim のみ実行する
+//     3) 滞留判定は lock-free API のみ（mutex を取る residentCount 系は使わない）
+//     4) Message Thread 以外から呼ばれたら何もせず拒否する（fail-safe）
+void EQProcessor::driveRetireReclaimNonRt() noexcept
+{
+    auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+    const bool onMessageThread = (messageManager != nullptr)
+                                 && messageManager->isThisTheMessageThread();
+    jassert(onMessageThread);          // Owner 条件: Message Thread 固有の assertion
+    if (! onMessageThread)
+    {
+        convo::fetchAddAtomic(m_driverOffThreadRejects, std::uint32_t{1}, std::memory_order_relaxed);
+        return;
+    }
+
+    // (1) pending あり: epoch 前進 + reclaim（publish 理由 = timerPending）
+    if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
+    {
+        m_epochDomain->publishEpoch();
+        countPublishReason(PublishReason::TimerPending);
+        m_ownedRetireRouter.tryReclaim();
+        return;
+    }
+
+    // (2) pending なし・滞留あり: reclaim のみ（epoch は前進させない）
+    //     判定は D キュー（pendingRetireCount）と Q+E+T（residentCountAtomic）の
+    //     atomic 合算のみで、mutex を取らない。
+    if (m_ownedRetireRouter.pendingRetireCount() > 0
+        || m_ownedRetireRouter.residentCountAtomic() > 0)
+    {
+        convo::fetchAddAtomic(m_reclaimOnlyRuns, std::uint32_t{1}, std::memory_order_relaxed);
+        m_ownedRetireRouter.tryReclaim();
+        return;
+    }
+
+    // (3) pending なし・滞留なし: 何もしない（不要な reclaim を起こさない）
+    convo::fetchAddAtomic(m_driverIdleTicks, std::uint32_t{1}, std::memory_order_relaxed);
+}
+
+void EQProcessor::countPublishReason(PublishReason reason) noexcept
+{
+    switch (reason)
+    {
+        case PublishReason::TimerPending:
+            convo::fetchAddAtomic(m_publishTimerPendingCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+        case PublishReason::Prepare:
+            convo::fetchAddAtomic(m_publishPrepareCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+        case PublishReason::Release:
+            convo::fetchAddAtomic(m_publishReleaseCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+        case PublishReason::Explicit:
+        default:
+            // ★ 明示的な直接呼出し（上記以外）。既存区分へ暗黙に加算しない。
+            convo::fetchAddAtomic(m_publishExplicitCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+    }
+}
+
+EQProcessor::RetireDriverStats EQProcessor::retireDriverStats() const noexcept
+{
+    RetireDriverStats s;
+    s.publishTimerPending = convo::consumeAtomic(m_publishTimerPendingCount, std::memory_order_acquire);
+    s.publishPrepare      = convo::consumeAtomic(m_publishPrepareCount, std::memory_order_acquire);
+    s.publishRelease      = convo::consumeAtomic(m_publishReleaseCount, std::memory_order_acquire);
+    s.publishExplicit     = convo::consumeAtomic(m_publishExplicitCount, std::memory_order_acquire);
+    s.reclaimOnlyRuns     = convo::consumeAtomic(m_reclaimOnlyRuns, std::memory_order_acquire);
+    s.idleTicks           = convo::consumeAtomic(m_driverIdleTicks, std::memory_order_acquire);
+    s.offThreadRejects    = convo::consumeAtomic(m_driverOffThreadRejects, std::memory_order_acquire);
+    s.currentEpoch        = m_epochDomain->currentEpoch();
+    s.pendingRetire       = m_ownedRetireRouter.pendingRetireCount();
+    s.resident            = m_ownedRetireRouter.residentCountAtomic();
+    return s;
 }
 // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放
 //   Runtime 停止シーケンス完了後（Audio Thread 停止 + Coordinator 停止）にのみ使用すること。
@@ -228,7 +312,8 @@ void EQProcessor::releaseResources()
     parallelBufferCapacity = 0;
     structureXfadeBufferCapacity = 0;
     // [P1-14] 保留中の advanceEpoch を一括実行
-    flushPendingEpochAdvance();
+    // ★ 段階① v2: publish 理由を引数で明示（releaseResources 経由）
+    flushPendingEpochAdvance(PublishReason::Release);
     juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: end");
 }
 
@@ -298,7 +383,7 @@ void EQProcessor::reset()
     //   （P-D2-1: 活性 Read 0 件 / DESIGN_R4_D2D3 §1.1・§1.6）。
 
     // A-closure (reader safety): reader slot held across the load + dereference.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:301");
     if (readGuard.active())
     {
         auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -552,7 +637,7 @@ juce::ValueTree EQProcessor::getState() const
 {
     // A-closure (reader safety): hold an EBR reader slot BEFORE loading the published
     // state, so a concurrent unlink+retire+reclaim cannot free it mid-read.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:555");
     if (! readGuard.active())
         return juce::ValueTree ("EQ");   // fail-closed: no protection -> no dereference
 
@@ -704,7 +789,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     // A-closure (reader safety): the reader slot covers every state dereference below
     // (state->totalGainDb and createBandNode(i, *loopState)).
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:707");
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 
@@ -787,7 +872,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     }
 
     // [P1-14] 保留中の advanceEpoch を一括実行
-    flushPendingEpochAdvance();
+    // ★ 段階① v2: publish 理由を引数で明示（prepareToPlay 経由）
+    flushPendingEpochAdvance(PublishReason::Prepare);
 
     sendChangeMessage();
 }
@@ -822,7 +908,7 @@ EQProcessor::EQState* EQProcessor::getEQState() const
 float EQProcessor::getTotalGain() const
 {
     // A-closure (reader safety): reader slot held across load + dereference.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:825");
     if (! readGuard.active()) return 0.0f;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -834,7 +920,7 @@ EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
 
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:837");
     if (! readGuard.active()) return EQBandType::Peaking;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -846,7 +932,7 @@ EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
 
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:849");
     if (! readGuard.active()) return EQChannelMode::Stereo;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -864,7 +950,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
     if (band < 0 || band >= NUM_BANDS) return {};
 
     // A-closure (reader safety): reader slot held across load + dereference.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:867");
     if (! readGuard.active()) return {};
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB

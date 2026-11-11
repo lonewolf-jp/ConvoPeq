@@ -89,8 +89,13 @@ enum class HBReorderScenario : uint8_t
 
 struct HBScenarioResult
 {
-    const char* name;
-    bool passed;
+    const char* name = nullptr;
+    bool passed = false;
+    bool insufficient = false;          // 観測不足（pass に読み替えない）
+    const char* reason = nullptr;       // 不合格・観測不足の理由
+    std::uint64_t observations = 0;     // 有効観測数 N_valid
+    std::uint64_t required = 0;         // 必要観測数 N_req
+    std::uint64_t maxLatencyNs = 0;     // 有効観測の最大遅延
 };
 
 /**
@@ -112,7 +117,7 @@ private:
     bool hasAnyEvent() const noexcept;
     bool checkEpochOrder() const noexcept;
     bool checkBoundedEpochLag(std::uint64_t maxLag) const noexcept;
-    bool checkRetireDelayBound(std::uint64_t maxNs) const noexcept;
+    HBScenarioResult evaluateRetireDelay() const noexcept;
     bool checkObserveRaceFree() const noexcept;
 
     HBTraceRuntime* traceRuntime_ = nullptr;

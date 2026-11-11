@@ -404,7 +404,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
         auto isOlder = [](uint64_t a, uint64_t b) noexcept {
             return static_cast<int64_t>(a - b) < 0;
         };
-        store.drain(minReader, isOlder);
+        store.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
         if (store.residentCountAtomic() != 0) return false;
 
         // drainAllUnsafe resets to 0
@@ -415,7 +415,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
                              "test", 0, 0);
         }
         if (store.residentCountAtomic() != 2) return false;
-        store.drainAllUnsafe();
+        store.drainAllUnsafe(convo::RetireDomainId::Unknown);
         if (store.residentCountAtomic() != 0) return false;
     }
 
@@ -439,7 +439,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
         auto isOlder = [](uint64_t a, uint64_t b) noexcept {
             return static_cast<int64_t>(a - b) < 0;
         };
-        auth.drain(minReader, isOlder);
+        auth.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
         if (auth.residentCountAtomic() != 0) return false;
 
         // drainAll resets to 0
@@ -449,7 +449,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
             auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test");  // NOLINT(atomic-dot-call)
         }
         if (auth.residentCountAtomic() != 2) return false;
-        auth.drainAll();
+        auth.drainAll(convo::RetireDomainId::Unknown);
         if (auth.residentCountAtomic() != 0) return false;
     }
 
@@ -541,7 +541,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
     if (store.residentCountAtomic() != 1) return false;
 
     // Drain all → predicate becomes false
-    store.drainAllUnsafe();
+    store.drainAllUnsafe(convo::RetireDomainId::Unknown);
     if (store.residentCountAtomic() != 0) return false;
 
     // Predicate is false — a spurious wake here would cause wait_for to
@@ -587,7 +587,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
     if (store.residentCountAtomic() != 3) return false;
 
     // Shutdown forced drain
-    store.drainAllUnsafe();
+    store.drainAllUnsafe(convo::RetireDomainId::Unknown);
     if (store.residentCountAtomic() != 0) return false;
 
     // Predicate is now false — no wake signal should fire.
@@ -626,7 +626,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
     if (store.residentCountAtomic() != 2) return false;
 
     // Drain epoch-safe entries: predicate becomes false
-    store.drain(200, isOlder);  // 100 < 200 → safe
+    store.drain(200, isOlder, convo::RetireDomainId::Unknown);  // 100 < 200 → safe
     if (store.residentCountAtomic() != 0) return false;
 
     // Enqueue again: predicate true

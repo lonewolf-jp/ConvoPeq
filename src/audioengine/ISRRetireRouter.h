@@ -91,16 +91,20 @@ public:
 
     // Drain epoch-safe entries. Executes deleter for entries where isOlder(entry.epoch, minReaderEpoch) == true.
     // isOlderFn: EpochDomain::isOlder(a, b) == static_cast<int64_t>(a - b) < 0
+    // ★ domain tag (v2.9 §3.3): Terminal のエントリは DeletionEntry を持たないため、
+    //   Router が自分の retireDomainId() を明示引数で渡す（entry から推測しない）。
     void drain(uint64_t minReaderEpoch,
-               const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
+               const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+               RetireDomainId domain) noexcept;
 
     // Drain ALL entries unconditionally (shutdown only — audio thread must be stopped).
-    void drainAll() noexcept;
+    void drainAll(RetireDomainId domain) noexcept;
 
     // Try to reclaim epoch-safe entries and, if any are safe, destroy immediately.
     // Returns true if at least one entry was reclaimed.
     bool tryReclaim(uint64_t minReaderEpoch,
-                    const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
+                    const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+                    RetireDomainId domain) noexcept;
 
     [[nodiscard]] std::size_t residentCount() const noexcept;
 
@@ -241,6 +245,13 @@ public:
     [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override;
     [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override;
 
+    // ★ domain tag (v2.9 §3.1): provider_ へ委譲する。provider() アクセサは公開しない。
+    //   provider_ == nullptr は現行 API では到達不能（防御的）。その場合だけ Unknown。
+    [[nodiscard]] RetireDomainId retireDomainId() const noexcept override
+    {
+        return provider_ != nullptr ? provider_->retireDomainId() : RetireDomainId::Unknown;
+    }
+
     // ── Retire API (実装は .cpp) ──
 
     RetireEnqueueResult enqueueRetire(void* ptr,
@@ -377,7 +388,7 @@ public:
     //   （本番は shutdown 経路から呼ばれる。テストは同じ契約を単独で確認する）。
     void drainAllTerminalForTest() noexcept
     {
-        m_terminalReclaim.drainAll();
+        m_terminalReclaim.drainAll(retireDomainId());
     }
 
     // ★ F1'-b 監査対応: ルータの API は「epoch unsafe / RT のときだけ Terminal に預ける」。

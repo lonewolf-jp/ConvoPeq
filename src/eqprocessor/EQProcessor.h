@@ -217,6 +217,12 @@ public:
         //----------------------------------------------------------
     void prepareToPlay(double sampleRate, int newMaxInternalBlockSize);
 
+    // ★ Gate 1: RCU 入場に失敗して状態参照をスキップした回数（診断用）
+    [[nodiscard]] std::uint32_t unprotectedReadCount() const noexcept
+    {
+        return unprotectedReadCount_.load(std::memory_order_relaxed);
+    }
+
     //----------------------------------------------------------
     // process: オーディオスレッドから呼ばれる
     // ロック・new・I/O・待機（IR再ロード等）禁止
@@ -226,6 +232,43 @@ public:
                  const convo::EQParameters& eqParams,
                  const EQCoeffCache* coeffCache);
     void releaseResources();
+
+    //----------------------------------------------------------
+    // ★ 段階① (2026-11-11, Owner 承認): EQ ドメイン reclaim ドライバ
+    //   - 呼出し元は AudioEngine::timerCallback（100 ms 周期）のみ。
+    //   - **Message Thread 専用**。Audio Thread から呼ばない（呼ばれたら何もせず拒否する）。
+    //   - `m_epochAdvancePending` が true のときだけ epoch を前進させる。
+    //   - pending が false でも、D/Q/E/T に滞留があれば reclaim のみ実行する。
+    //   - 滞留判定は lock-free API（pendingRetireCount / residentCountAtomic）のみ。
+    //   - 新規 timer / thread / authority は追加しない。既存 flush の挙動は変えない。
+    //----------------------------------------------------------
+    // ★ 段階① v2 (2026-11-11, Owner 承認「案 2」): publish 理由は**引数で明示**する。
+    //   デフォルト引数は設けない（指定漏れをコンパイルで検出する）。タグ共有は廃止。
+    enum class PublishReason : std::uint8_t
+    {
+        Prepare      = 0,   // prepareToPlay による呼出し
+        Release      = 1,   // releaseResources による呼出し（終了処理を意味しない）
+        TimerPending = 2,   // タイマードライバが pending を消費（flush は呼ばない）
+        Explicit     = 3    // 上記以外の明示的な直接呼出し
+    };
+
+    void driveRetireReclaimNonRt() noexcept;
+
+    // ドライバの診断スナップショット（読み取り専用・Message Thread 専用）。
+    struct RetireDriverStats
+    {
+        std::uint32_t publishTimerPending = 0;   // publish 理由: タイマー経由の pending 消費
+        std::uint32_t publishPrepare      = 0;   // publish 理由: prepareToPlay 経由
+        std::uint32_t publishRelease      = 0;   // publish 理由: releaseResources 経由
+        std::uint32_t publishExplicit     = 0;   // publish 理由: 明示的な直接呼出し
+        std::uint32_t reclaimOnlyRuns     = 0;   // pending なし・滞留ありで reclaim のみ実行
+        std::uint32_t idleTicks           = 0;   // pending なし・滞留なし（何もしない）
+        std::uint32_t offThreadRejects    = 0;   // Message Thread 以外から呼ばれて拒否した回数
+        std::uint64_t currentEpoch        = 0;   // 現在の EQ ドメイン epoch
+        std::uint32_t pendingRetire       = 0;   // D キュー滞留（lock-free）
+        std::uint32_t resident            = 0;   // Q+E+T 滞留（lock-free）
+    };
+    [[nodiscard]] RetireDriverStats retireDriverStats() const noexcept;
 
     // [WORK113-17 Phase 2-1] NonRT: World 投影の totalGainDb を既存 publish 機構へ反映する。
     //   （INV-EQ-GAIN-001/002/004/005。dB→linear 変換は本関数内＝NonRT のみ。
@@ -459,12 +502,12 @@ public:
     //   guard が slot を保持している間は retireEpoch < minReaderEpoch が成立
     //   しないため、当該オブジェクトは解放されない。
     //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
-    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
+    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard(const char* tag = nullptr) const noexcept
     {
         // The epoch domain is a synchronization primitive: entering a reader slot does not
         // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
         // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
-        return convo::ScopedEpochReader (*m_epochDomain);
+        return convo::ScopedEpochReader (*m_epochDomain, tag);
     }
     bool getAndClearPendingAGCChange() noexcept
     {
@@ -576,7 +619,8 @@ private:
     //   unique_ptr でも *ptr は非 const 参照を返すため、mutable (LINT-AE-011) も
     //   const_cast (LINT-AE-013) も使わずに済む。router より前に宣言し、
     //   初期化順で *m_epochDomain が router の参照先として有効になるようにする。
-    std::unique_ptr<convo::EpochDomain> m_epochDomain { std::make_unique<convo::EpochDomain>() };
+    // ★ domain tag (v2.9): EQ の epoch ドメイン
+    std::unique_ptr<convo::EpochDomain> m_epochDomain { std::make_unique<convo::EpochDomain>(convo::RetireDomainId::EQ) };
     // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to *m_epochDomain
     //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
     //   member lifetime により drain / destruction まで保持する。
@@ -586,12 +630,29 @@ private:
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
+    // ★ 段階① (2026-11-11, Owner 承認): publish 理由と理由別カウンタ（診断・Message Thread 専用）。
+    //   Audio Thread は触らない。カウンタは uint32 atomic（lock-free は static_assert 済み）。
+    std::atomic<std::uint32_t> m_publishTimerPendingCount { 0 };
+    std::atomic<std::uint32_t> m_publishPrepareCount { 0 };
+    std::atomic<std::uint32_t> m_publishReleaseCount { 0 };
+    std::atomic<std::uint32_t> m_publishExplicitCount { 0 };
+    std::atomic<std::uint32_t> m_reclaimOnlyRuns { 0 };
+    std::atomic<std::uint32_t> m_driverIdleTicks { 0 };
+    std::atomic<std::uint32_t> m_driverOffThreadRejects { 0 };
     convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
     // [work21] ISRRetireRouter: unified retire API (Phase-C)
     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
+    // ★ Gate 1 (2026-11-11, Owner 承認): テスト専用アクセス（製品 API は追加しない）
+    friend struct EQProcessorGate1TestAccess;
+
     convo::RCUReader rcuReader { *m_epochDomain };
+    std::atomic<std::uint32_t> unprotectedReadCount_ { 0 };   // ★ Gate 1 診断
+    // ★ Gate 1: RT（Audio Thread）から fetch_add するため、lock-free であることを
+    //   実行時ではなくコンパイル時に保証する（「atomic だから lock-free」とはみなさない）。
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
+                  "Gate1: unprotectedReadCount_ must be lock-free for RT use");
     // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
     std::atomic<uint64_t> m_retireDropCount{0};
 
@@ -604,8 +665,10 @@ private:
     // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放（Runtime 停止完了後のみ）
     void retireImmediateDuringShutdown(EQState* state) noexcept;
     void retireImmediateDuringShutdown(BandNode* node) noexcept;
-    // [P1-14] 保留中の advanceEpoch を一括実行
-    void flushPendingEpochAdvance() noexcept;
+    // [P1-14] 保留中の advanceEpoch を一括実行（理由必須・デフォルト引数なし）
+    void flushPendingEpochAdvance(PublishReason reason) noexcept;
+
+    void countPublishReason(PublishReason reason) noexcept;
 
     // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
     // high 32-bit: serial, low 32-bit: mask

@@ -15,6 +15,7 @@
 #include "IEpochProvider.h"
 #include "SnapshotFactory.h"
 #include "audioengine/ISRAuthorityClass.h"
+#include "../audioengine/ISRRetireLatency.h"   // ★ C5: retireCurrentAndTarget の要求記録
 
 namespace convo {
 namespace isr {
@@ -131,10 +132,20 @@ public:
         return m_slots.loadCurrent(std::memory_order_acquire);
     }
 
+    // ★ C2: RT 契約違反（RT からの resetFadeStateAndRetireTarget 呼出し）の回数。
+    //   プロセス単位の診断値。エンジン非依存で読めるよう static にしている。
+    static inline std::atomic<std::uint64_t> s_rtViolationCount { 0 };
+    [[nodiscard]] static std::uint64_t rtViolationCount() noexcept
+    {
+        return s_rtViolationCount.load (std::memory_order_acquire);
+    }
+
     // ★ BUG-015/027: 退避ストアへの移送先 Router（AudioEngine.CtorDtor.cpp で setRetireSink 設定）
     void setRetireSink(convo::isr::ISRRetireRouter* sink) noexcept { m_retireSink = sink; }
 
 private:
+    // ★ C2 (2026-11-10, Owner 承認): 本 API は Non-RT 専用。
+    //   RT から呼ばれた場合は状態を一切変更せずに返す（違反は m_rtViolationCount で検出）。
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
@@ -147,7 +158,8 @@ private:
 
     // [work37 Phase 1.2] IEpochProvider::enqueueRetire + tryReclaim 再試行の static ヘルパー。
     //   条件: Non-RT スレッドからのみ呼び出し可能。
-    //   resetFadeStateAndRetireTarget(L67) は RT(updateFade) から呼ばれ得るため除外。
+    //   resetFadeStateAndRetireTarget は Non-RT 専用（RT 呼出しは同関数内で検出して即 return）
+    //   のため、このヘルパーの利用対象に含めてよい。
     static bool enqueueWithRetry(convo::IEpochProvider& provider,
                                   void* ptr, void (*deleter)(void*),
                                   uint64_t epoch) noexcept {
@@ -173,11 +185,18 @@ private:
         const uint64_t retireEpoch = m_epochProvider->publishEpoch();
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
         if (snap) {
+            // ★ C5 (2026-11-10): 退役の直前に要求を記録する（完了フックと同じ object で対応）。
+            //   格納失敗時は quarantineRetireSink が Q→E→T で必ず受領するため取り消さない。
+            convo::isr::RetireLatencyRecorder::instance().recordRequest (
+                snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
             if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
         }
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
         if (snap) {
+            // ★ C5 (2026-11-10): target も同じ規則で記録する。
+            convo::isr::RetireLatencyRecorder::instance().recordRequest (
+                snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
             if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
         }

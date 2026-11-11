@@ -25,6 +25,13 @@ public:
     /** Allocate a new reader slot. Returns slot index or -1 on failure. */
     virtual int registerReaderThread() noexcept = 0;
 
+    // ★ 計測 (2026-11-10 Owner 承認): 登録元を識別するタグ付き登録。
+    //   既定は無タグ版へ委譲する（既存呼出しの挙動は変わらない）。
+    virtual int registerReaderThreadWithTag(const char* /*tag*/) noexcept
+    {
+        return registerReaderThread();
+    }
+
     /** Try to reserve a specific reader slot. Returns true if successful.
      *
      *  V-11: this path refuses once reader registration has been closed, which is

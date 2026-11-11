@@ -129,7 +129,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // ── Test 1: Stuck reader + Q/E/Terminal populated → drainAllQuarantineStore clears all ──
 [[nodiscard]] bool testStuckReaderFallbackDrainsAllStores() {
     TestObject::aliveCount = 0;
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     // Step 1: Register a reader and enter it — this creates a "stuck reader"
@@ -185,7 +185,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // ── Test 2: Double drain is safe (idempotent) ──
 [[nodiscard]] bool testDoubleDrainIsSafe() {
     TestObject::aliveCount = 0;
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     int readerIdx = epochDomain.registerReaderThread("TestReader2");
@@ -224,7 +224,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // ── Test 3: No stuck reader (activeReaderCount == 0) — drainAll + drainAllQuarantineStore both work ──
 [[nodiscard]] bool testNoStuckReaderDrainWorks() {
     TestObject::aliveCount = 0;
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     // No reader registered — activeReaderCount() == 0
@@ -248,7 +248,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 
 // ── Test 4: Shutdown after drain — completion invariant holds ──
 [[nodiscard]] bool testShutdownCompletesAfterDrain() {
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     int readerIdx = epochDomain.registerReaderThread("TestReader4");
@@ -278,7 +278,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // Verifies that when we push to Q then E then Terminal, the Q+E counts
 // match exactly what we pushed (no double-counting / no lost entries).
 [[nodiscard]] bool testOwnershipTransferNoLeaks() {
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     // No stuck reader — activeReaderCount == 0
@@ -323,7 +323,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // drainAll() calls provider_->drainAll() (D) AND drainAllQuarantineStore() (Q+E+Terminal).
 // With a stuck reader, D is epoch-gated but Q+E+Terminal are epoch-agnostic.
 [[nodiscard]] bool testStuckReaderDrainAllPath() {
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     int readerIdx = epochDomain.registerReaderThread("TestReader6");

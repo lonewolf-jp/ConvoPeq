@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "../DeferredDeletionQueue.h"   // ★ T1: DeletionEntryType（telemetry 識別 metadata・D86）
+#include "RetireDomain.h"               // ★ domain tag (v2.9): retireDomainId() の戻り型
 
 //==============================================================================
 // IRetireProvider.h — Retire operations abstract interface.
@@ -40,6 +41,15 @@ public:
 
     /** Try to reclaim retired objects. */
     virtual void tryReclaim() noexcept = 0;
+
+    // ★ domain tag (v2.9 §3.1): 退役ドメインの問い合わせ。
+    //   EpochDomain は自分のドメインを返し、ISRRetireRouter は provider_ へ委譲する。
+    //   既定は Unknown（provider が未対応の場合に「特定できない」と明示する）。
+    //   Unstamped は刻印漏れ専用なので、ここで返してはいけない。
+    [[nodiscard]] virtual RetireDomainId retireDomainId() const noexcept
+    {
+        return RetireDomainId::Unknown;
+    }
 
     // ★ P0-A: EpochDomain 固有メソッドをインターフェースに昇格
     //   ISRRetireRouter が dynamic_cast でアクセスするより Interface で宣言する方が型安全。

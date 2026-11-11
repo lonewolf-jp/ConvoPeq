@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IReaderEpochProvider.h"
+#include "ReaderMeasureRegistry.h"
 #include <atomic>
 #include <functional>
 #include <thread>
@@ -33,53 +34,64 @@ public:
     RCUReader(RCUReader&&) = delete;
     RCUReader& operator=(RCUReader&&) = delete;
 
-    void enter() noexcept
+    // ★ Gate 1 (2026-11-11): 戻り値 = 「この呼出しが保護を確立したか」。
+    //   rootEnterSucceeded_ は所有者スレッドだけが書き、thread-confined を維持する。
+    //   他スレッドの入場は nested と誤認せず、状態を一切変更せずに false を返す。
+    bool enter() noexcept
     {
-        // acq_rel: acquire → 直前の exit() の nestingDepth release を観測してネストを安全化；
-        //          release → depth > 0 を公開し、ネスト中の enter が早期 return できる。
-        const uint32_t previousDepth = convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-        if (previousDepth > 0)
+        const uint64_t my = currentThreadToken();
+
+        // 1) 所有者が既に居る場合: 同一スレッドなら nested、他スレッドなら何も変更せず失敗
+        const uint64_t owner = convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire);
+        if (owner != 0)
         {
-            // ★ ネスト: 最外層の rootEnterSucceeded_ を維持
-            return;
+            if (owner != my)
+                return false;                       // 他スレッド所有（depth も owner も触らない）
+
+            convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+            return rootEnterSucceeded_;             // nested は外側の成否を返す
         }
 
-        const uint64_t threadToken = currentThreadToken();
+        // 2) 所有者が空き: CAS で所有権を先に確保する（ここが線形化点）
         uint64_t expectedOwner = 0;
-        // CAS acq_rel/acquire: 成功時 acq_rel → ownerThreadToken を取得し新オーナーを公開；
-        //                     失敗時 acquire → 競合スレッドの最新 ownerThreadToken を観測。
         if (!convo::compareExchangeAtomic(ownerThreadToken,
                                           expectedOwner,
-                                          threadToken,
+                                          my,
                                           std::memory_order_acq_rel,
-                                          std::memory_order_acquire)
-            && expectedOwner != threadToken)
+                                          std::memory_order_acquire))
         {
-            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-            return;
+            if (expectedOwner != my)
+                return false;                       // 競合に負けた（状態は変更しない）
+
+            convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+            return rootEnterSucceeded_;
         }
+
+        // 3) 所有権を得た: depth 0→1
+        convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
 
         const int tid = acquireThreadSlot();
         if (tid >= 0)
         {
             epochProvider->enterReader(tid);
-            // ★ P1-A: 今回の enter 成功を記録（non-atomic: thread confined）
             rootEnterSucceeded_ = true;
+            measureIdx_ = convo::ReaderMeasureRegistry::claim ("RCUReader",
+                                                               static_cast<std::uint32_t> (tid), 1u,
+                                                               this, epochProvider);
+            return true;
         }
-        else
-        {
-            // ★ P1-A: slot 取得失敗 → 今回の enter 失敗を記録（Fail-Closed）
-            rootEnterSucceeded_ = false;
-            // acq_rel: スロット取得失敗時の nestingDepth 減算 — acq_rel で安全に公開。
-            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-            uint64_t expectedOwnerOnRelease = threadToken;
-            // CAS acq_rel/acquire: ownerThreadToken を 0 に戻す；失敗時 acquire で最新値観測。
-            convo::compareExchangeAtomic(ownerThreadToken,
-                                         expectedOwnerOnRelease,
-                                         static_cast<uint64_t>(0),
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire);
-        }
+
+        // 4) slot 取得失敗: owner と depth をロールバック
+        rootEnterSucceeded_ = false;
+        convo::ReaderMeasureRegistry::enterFailures_.fetch_add (1u, std::memory_order_relaxed);
+        convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+        uint64_t expectedOwnerOnRelease = my;
+        convo::compareExchangeAtomic(ownerThreadToken,
+                                     expectedOwnerOnRelease,
+                                     static_cast<uint64_t>(0),
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire);
+        return false;
     }
 
     // === 限定公開API (P0-14: EpochDomain型を露出しない) ===
@@ -112,6 +124,7 @@ public:
         if (previousDepth == 0)
         {
             rootEnterSucceeded_ = false;
+            convo::ReaderMeasureRegistry::underflows_.fetch_add (1u, std::memory_order_relaxed);   // ★ 計測
             // underflowガード: 0 を release で再公開し、展開 depth を修正。
             convo::publishAtomic(nestingDepth, 0, std::memory_order_release);
             return;
@@ -124,6 +137,12 @@ public:
 
         // ★ previousDepth == 1: 最外層 exit
         // acquire: enter() の ownerThreadToken acq_rel と HB し、所有者を観測。
+        // ★ 計測 (2026-11-11): 最外層の退出で区画を閉じる（ネストでは閉じない）
+        if (measureIdx_ >= 0)
+        {
+            convo::ReaderMeasureRegistry::close (measureIdx_);
+            measureIdx_ = -1;
+        }
         if (convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire) != currentThreadToken())
         {
             rootEnterSucceeded_ = false;  // 所有者不一致でもリセット
@@ -194,6 +213,7 @@ private:
     std::atomic<uint32_t> nestingDepth { 0 };
     std::atomic<uint64_t> ownerThreadToken { 0 };
     IReaderEpochProvider* epochProvider = nullptr;
+    int measureIdx_ = -1;   // ★ 計測: ReaderMeasureRegistry のレコード番号
     // ★ P1-A: per-enter 成否追跡（non-atomic: RAII thread confinement 下で安全）
     bool rootEnterSucceeded_ = false;
 };
@@ -201,32 +221,38 @@ private:
 class RCUReaderGuard
 {
 public:
-    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r) { reader->enter(); }
-    ~RCUReaderGuard() noexcept { if (reader) reader->exit(); }
+    // ★ Gate 1 (2026-11-11): 成否を「この呼出し」で保持する（共有フラグを読まない）。
+    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r), ok_(r.enter()) {}
+    // ★ Gate 1: 入場に失敗した guard は exit を呼ばない（depth を壊さない）
+    ~RCUReaderGuard() noexcept { if (reader && ok_) reader->exit(); }
 
     RCUReaderGuard(const RCUReaderGuard&) = delete;
     RCUReaderGuard& operator=(const RCUReaderGuard&) = delete;
 
-    RCUReaderGuard(RCUReaderGuard&& other) noexcept : reader(other.reader) { other.reader = nullptr; }
+    RCUReaderGuard(RCUReaderGuard&& other) noexcept
+        : reader(other.reader), ok_(other.ok_) { other.reader = nullptr; other.ok_ = false; }
     RCUReaderGuard& operator=(RCUReaderGuard&& other) noexcept
     {
         if (this != &other)
         {
-            if (reader) reader->exit();
+            if (reader && ok_) reader->exit();
             reader = other.reader;
+            ok_ = other.ok_;
             other.reader = nullptr;
+            other.ok_ = false;
         }
         return *this;
     }
 
-    // ★ C-7: RCU enter 成功の確認
+    // ★ C-7 + Gate 1: この guard の入場が保護を確立したか
     [[nodiscard]] bool rootEnterSucceeded() const noexcept
     {
-        return reader != nullptr && reader->rootEnterSucceeded();
+        return reader != nullptr && ok_;
     }
 
 private:
     RCUReader* reader = nullptr;
+    bool ok_ = false;
 };
 
 } // namespace convo

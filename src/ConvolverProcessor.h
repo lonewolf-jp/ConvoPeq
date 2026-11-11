@@ -389,6 +389,8 @@ public:
 
     //----------------------------------------------------------
     // Mixed Phase Parameters (f1/f2)
+    //   契約: 非有限値（NaN/±Inf）は格納せず以前値を維持する（B-03）。
+    //   jlimit は NaN を素通しするため、setter 側で明示的に拒否する。
     //----------------------------------------------------------
     void setMixedTransitionStartHz(float hz);
     [[nodiscard]] float getMixedTransitionStartHz() const;
@@ -466,6 +468,30 @@ public:
     void clearLastError() {
         const std::lock_guard<std::mutex> lock(lastErrorMutex_);
         lastError.clear();
+    }
+
+    // ★ B-10: 直近のロードで実際に適用した位相モード（-1 = 未確定）。
+    //   最小位相変換が FFT 上限でスキップされた場合、要求値ではなく AsIs を返す。
+    [[nodiscard]] int getEffectivePhaseModeForLastLoad() const noexcept
+    {
+        return convo::consumeAtomic(effectivePhaseModeForLastLoad, std::memory_order_acquire);
+    }
+    void setEffectivePhaseModeForLastLoad (PhaseMode mode) noexcept
+    {
+        convo::publishAtomic(effectivePhaseModeForLastLoad, static_cast<int>(mode),
+                             std::memory_order_release);
+    }
+
+    // ★ B-10: 要求した位相モードと実効値が食い違ったときの警告（UI 表示用）。
+    [[nodiscard]] juce::String getLastPhaseWarning() const
+    {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        return lastPhaseWarning;
+    }
+    void setLastPhaseWarning (const juce::String& msg)
+    {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        lastPhaseWarning = msg;
     }
     // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
     [[nodiscard]] float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
@@ -1010,6 +1036,10 @@ private:
     mutable std::mutex lastErrorMutex_;
     juce::String lastError;
 
+    // ★ B-10: 実効位相モードと警告（silent skip の禁止）
+    std::atomic<int> effectivePhaseModeForLastLoad { -1 };
+    juce::String lastPhaseWarning;
+
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };
 
     juce::ListenerList<Listener> listeners;
@@ -1435,7 +1465,8 @@ public: // Added for AudioEngine access
     bool m_lastBypassedState { false };
     bool m_bypassCrossfadeActive { false };
     // [P1-15] 内部 epoch 管理用 (Convolver 独自ドメイン)
-    convo::EpochDomain m_epochDomain;
+    // ★ domain tag (v2.9): reader 専用。退役キューは使わないため「意図的に未特定」。
+    convo::EpochDomain m_epochDomain { convo::RetireDomainId::Unknown };
     // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。
     convo::RCUReader runtimeRcuReader { m_epochDomain };
 

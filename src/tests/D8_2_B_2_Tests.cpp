@@ -15,12 +15,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <thread>
+
+#include "DspNumericPolicy.h"          // ★ T13: ScopedThreadRole（RT 違反ケース）
 
 #include "audioengine/AtomicAccess.h"
 #include "audioengine/ISRAuthorityClass.h"   // RetireEnqueueResult
 #include "audioengine/ISRRetireRouter.h"
 
 #include "core/IEpochProvider.h"
+#include "core/EpochDomain.h"          // ★ T11: 実 provider（実 DeferredDeletionQueue）で C3 を駆動する
 #include "core/SnapshotCoordinator.h"
 #include "core/SnapshotFactory.h"
 #include "core/SnapshotParams.h"
@@ -207,6 +211,12 @@ public:
     static void resetFadeStateAndRetireTarget(SnapshotCoordinator& c) noexcept
     {
         c.resetFadeStateAndRetireTarget();
+    }
+
+    // ★ C2 テスト用: target スロットの現在値（RT 違反時に残っていることの確認に使う）
+    static GlobalSnapshot* targetSlot(SnapshotCoordinator& c) noexcept
+    {
+        return c.m_slots.loadTarget(std::memory_order_acquire);
     }
 };
 } // namespace convo
@@ -948,9 +958,530 @@ static bool test_T10_ResetFadeStateAndRetireTarget()
 }
 
 //============================================================================
-// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
+// T11 — completeFade (C3) の要求・完了 1 対 1（2026-11-10 Owner 承認・テスト限定）
+//
+//   C3 は製品経路で到達しないため、既存テストで回帰を担保する。
+//   実 SnapshotCoordinator・実 EpochDomain（実 DeferredDeletionQueue）・実 recorder を使う。
+//   quarantine 経由でも記録が重複しないことを併せて確認する。
 //============================================================================
 
+namespace {
+
+// enqueueRetire を常に拒否する provider（quarantine 移送の検査用）
+class FullQueueEpochProvider final : public convo::EpochDomain
+{
+public:
+    // ★ domain tag (v2.9): テスト用 provider は本番帰属を持たないため Unknown を明示する。
+    FullQueueEpochProvider() : convo::EpochDomain (convo::RetireDomainId::Unknown) {}
+
+    bool enqueueRetire(void*, void (*)(void*), uint64_t) noexcept override { return false; }
+    bool enqueueRetireTyped(void*, void (*)(void*), uint64_t, DeletionEntryType) noexcept override { return false; }
+};
+
+// D/Q/E/T を epoch-gated に drain する
+void drainRetireQueues(convo::EpochDomain& dom, convo::isr::ISRRetireRouter& router) noexcept
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        dom.publishEpoch();
+        router.tryReclaim();
+    }
+}
+
+} // namespace
+
+static bool test_T11_CompleteFadeRecords()
+{
+    std::printf("[T11] completeFade (C3) request/completion 1:1 (real queue)...\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    bool pass = true;
+
+    // --- (1) 正常系: D キューが受領する ---
+    {
+        rec.reset();
+        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        convo::isr::ISRRetireRouter router(dom);
+        convo::SnapshotCoordinator coord(dom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        if (a == nullptr || b == nullptr)
+        {
+            std::printf("  FAIL: SnapshotFactory::create returned null\n");
+            return false;
+        }
+
+        coord.startFade(a, /*fadeSamples=*/100);   // current = a
+        coord.startFade(b, /*fadeSamples=*/100);   // target  = b
+        const auto before = rec.snapshot();
+
+        coord.advanceFade(1000);
+        const bool completed = coord.tryCompleteFade();   // 旧 current (a) を退役 = C3
+        const auto after = rec.snapshot();
+
+        if (! completed)
+        {
+            std::printf("  FAIL: tryCompleteFade did not complete\n");
+            pass = false;
+        }
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL: requests=%llu, expected %llu\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+
+        drainRetireQueues(dom, router);
+        const auto drained = rec.snapshot();
+        if (drained.completions != drained.requests || drained.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL: req=%llu comp=%llu unmatched=%llu\n",
+                        (unsigned long long) drained.requests,
+                        (unsigned long long) drained.completions,
+                        (unsigned long long) drained.unmatchedCompletions);
+            pass = false;
+        }
+        if (drained.cancelled != 0)
+        {
+            std::printf("  FAIL: cancelled=%llu, expected 0\n",
+                        (unsigned long long) drained.cancelled);
+            pass = false;
+        }
+
+        // 後始末は C5 経路（finalizeShutdown → retireCurrentAndTarget）で行う
+        coord.finalizeShutdown(/*timedOut=*/false);
+        drainRetireQueues(dom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (finalize): req=%llu comp=%llu unmatched=%llu\n",
+                        (unsigned long long) fin.requests,
+                        (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions);
+            pass = false;
+        }
+        if (fin.recordMisses != 0)
+        {
+            std::printf("  FAIL: recordMisses=%llu, expected 0\n",
+                        (unsigned long long) fin.recordMisses);
+            pass = false;
+        }
+    }
+
+    // --- (2) queue 失敗 → quarantine 移送: 記録が重複しない ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter frouter(fdom);
+        convo::SnapshotCoordinator fcoord(fdom);
+        fcoord.setRetireSink(&frouter);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        if (a == nullptr || b == nullptr)
+        {
+            std::printf("  FAIL: SnapshotFactory::create returned null (Q case)\n");
+            return false;
+        }
+
+        fcoord.startFade(a, 100);
+        fcoord.startFade(b, 100);
+        const auto before = rec.snapshot();
+        fcoord.advanceFade(1000);
+        const bool completed = fcoord.tryCompleteFade();   // C3 → enqueue 失敗 → Q 移送
+        const auto after = rec.snapshot();
+
+        if (! completed)
+        {
+            std::printf("  FAIL: tryCompleteFade (Q) did not complete\n");
+            pass = false;
+        }
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL (Q): requests=%llu, expected %llu (duplicate record?)\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+
+        drainRetireQueues(fdom, frouter);
+        const auto drained = rec.snapshot();
+        if (drained.completions != drained.requests || drained.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (Q): req=%llu comp=%llu unmatched=%llu\n",
+                        (unsigned long long) drained.requests,
+                        (unsigned long long) drained.completions,
+                        (unsigned long long) drained.unmatchedCompletions);
+            pass = false;
+        }
+    }
+
+    if (pass)
+        std::printf("  PASS: C3 request/completion 1:1, no duplicate record on quarantine\n");
+    return pass;
+}
+
+//============================================================================
+// T12 — finalizeShutdown が current と target の両方を記録する（C5 の 2 か所）
+//
+//   fade 完了前に finalizeShutdown を呼ぶと、current と target の両方が
+//   retireCurrentAndTarget() で退役する。要求 2 件・完了 2 件を確認する。
+//============================================================================
+static bool test_T12_FinalizeRetiresTargetAndCurrent()
+{
+    std::printf("[T12] finalizeShutdown retires current + target (C5 both sites)...\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    bool pass = true;
+
+    rec.reset();
+    convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+    convo::isr::ISRRetireRouter router(dom);
+    convo::SnapshotCoordinator coord(dom);
+    coord.setRetireSink(&router);
+
+    auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    if (a == nullptr || b == nullptr)
+    {
+        std::printf("  FAIL: SnapshotFactory::create returned null\n");
+        return false;
+    }
+
+    coord.startFade(a, /*fadeSamples=*/100);   // current = a
+    coord.startFade(b, /*fadeSamples=*/100);   // target  = b（fade は完了させない）
+    const auto before = rec.snapshot();
+
+    coord.finalizeShutdown(/*timedOut=*/false);   // current=a と target=b を退役
+    const auto after = rec.snapshot();
+
+    if (after.requests != before.requests + 2)
+    {
+        std::printf("  FAIL: requests=%llu, expected %llu (current+target)\n",
+                    (unsigned long long) after.requests,
+                    (unsigned long long) (before.requests + 2));
+        pass = false;
+    }
+
+    drainRetireQueues(dom, router);
+    const auto fin = rec.snapshot();
+    if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+    {
+        std::printf("  FAIL: req=%llu comp=%llu unmatched=%llu\n",
+                    (unsigned long long) fin.requests,
+                    (unsigned long long) fin.completions,
+                    (unsigned long long) fin.unmatchedCompletions);
+        pass = false;
+    }
+    if (fin.recordMisses != 0)
+    {
+        std::printf("  FAIL: recordMisses=%llu, expected 0\n",
+                    (unsigned long long) fin.recordMisses);
+        pass = false;
+    }
+
+    if (pass)
+        std::printf("  PASS: current + target retired, request/completion 2:2, unmatched 0\n");
+    return pass;
+}
+
+//============================================================================
+// T13 — C2 (resetFadeStateAndRetireTarget) Non-RT 専用化（2026-11-10 Owner 承認）
+//
+//   1. Non-RT 成功: D が受領、要求 1・完了 1
+//   2. Q 移送: enqueue 失敗 → Q が受領、要求 1・完了 1（Q drain 後）
+//   3. Q 満杯 → E が受領（所有権の重複なし）
+//   4. Q/E 満杯 → T が受領（所有権の重複なし）
+//   5. RT 違反: target・fade 状態・所有権・記録を変更しない（target が slot に残る）
+//   6. RT 違反後の Non-RT 再呼出し: 正常退役（要求 1・完了 1）
+//   7. 二重呼出し: 二重移送・二重記録なし
+//============================================================================
+
+namespace {
+
+void fillQuarantine(convo::isr::ISRRetireRouter& router, int n, uint64_t epoch) noexcept
+{
+    static int dummy = 0;
+    for (int i = 0; i < n; ++i)
+        (void) router.quarantineRetire(&dummy, +[](void*) noexcept {}, epoch,
+                                       DeletionEntryType::Generic, "t13-fill");
+}
+
+void fillEmergency(convo::isr::ISRRetireRouter& router, int n, uint64_t epoch) noexcept
+{
+    static int dummy2 = 0;
+    for (int i = 0; i < n; ++i)
+        (void) router.emergencyQuarantine(&dummy2, +[](void*) noexcept {}, epoch,
+                                          DeletionEntryType::Generic, "t13-fill", 0, 0);
+}
+
+} // namespace
+
+static bool test_T13_C2NonRtOnly()
+{
+    std::printf("[T13] C2 Non-RT only: success/Q/E/T/RT-violation/double-call...\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    bool pass = true;
+    const auto rtBefore = convo::SnapshotCoordinator::rtViolationCount();
+
+    // --- (1) Non-RT 成功 ---
+    {
+        rec.reset();
+        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        convo::isr::ISRRetireRouter router(dom);
+        convo::SnapshotCoordinator coord(dom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);            // target = b
+
+        const auto before = rec.snapshot();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto after = rec.snapshot();
+
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL (success): requests=%llu expected %llu\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+        if (convo::SnapshotCoordinatorTestAccess::targetSlot(coord) != nullptr)
+        {
+            std::printf("  FAIL (success): target slot not cleared\n");
+            pass = false;
+        }
+        drainRetireQueues(dom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0 || fin.cancelled != 0)
+        {
+            std::printf("  FAIL (success): req=%llu comp=%llu un=%llu cancelled=%llu\n",
+                        (unsigned long long) fin.requests, (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions, (unsigned long long) fin.cancelled);
+            pass = false;
+        }
+        coord.finalizeShutdown(false);
+        drainRetireQueues(dom, router);
+    }
+
+    // --- (2) Q 移送 ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter router(fdom);
+        convo::SnapshotCoordinator coord(fdom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto before = rec.snapshot();
+        const auto qBefore = router.quarantineResidentCount();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto after = rec.snapshot();
+        const auto qAfter = router.quarantineResidentCount();
+
+        if (qAfter != qBefore + 1)
+        {
+            std::printf("  FAIL (Q): quarantine resident %zu → %zu\n", qBefore, qAfter);
+            pass = false;
+        }
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL (Q): requests=%llu expected %llu\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+        drainRetireQueues(fdom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (Q): req=%llu comp=%llu un=%llu\n",
+                        (unsigned long long) fin.requests, (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions);
+            pass = false;
+        }
+    }
+
+    // --- (3) Q 満杯 → E ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter router(fdom);
+        convo::SnapshotCoordinator coord(fdom);
+        coord.setRetireSink(&router);
+
+        const uint64_t keepEpoch = fdom.currentEpoch();
+        fillQuarantine(router, 512, keepEpoch);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto eBefore = router.emergencyQuarantineResidentCount();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto eAfter = router.emergencyQuarantineResidentCount();
+
+        if (eAfter != eBefore + 1)
+        {
+            std::printf("  FAIL (Q→E): emergency resident %zu → %zu\n", eBefore, eAfter);
+            pass = false;
+        }
+        router.drainAllQuarantineStore();   // 後始末（noop deleter）
+    }
+
+    // --- (4) Q/E 満杯 → T ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter router(fdom);
+        convo::SnapshotCoordinator coord(fdom);
+        coord.setRetireSink(&router);
+
+        const uint64_t keepEpoch = fdom.currentEpoch();
+        fillQuarantine(router, 512, keepEpoch);
+        fillEmergency(router, 512, keepEpoch);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto tBefore = router.terminalReclaimResidentCount();
+        const auto syncBefore = rec.snapshot().paths[
+            static_cast<std::size_t>(convo::isr::RetireLatencyRecorder::Path::Sync)].count;
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto tAfter = router.terminalReclaimResidentCount();
+        const auto syncAfter = rec.snapshot().paths[
+            static_cast<std::size_t>(convo::isr::RetireLatencyRecorder::Path::Sync)].count;
+
+        // T は epoch 安全なら同期破棄する（resident は増えない）。どちらでも所有権は T。
+        if (tAfter != tBefore + 1 && syncAfter != syncBefore + 1)
+        {
+            std::printf("  FAIL (Q/E->T): terminal resident %zu -> %zu, sync %llu -> %llu\n",
+                        tBefore, tAfter, (unsigned long long) syncBefore, (unsigned long long) syncAfter);
+            pass = false;
+        }
+        router.drainAllQuarantineStore();
+    }
+
+    // --- (5) RT 違反: 状態を変更しない ---
+    {
+        rec.reset();
+        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        convo::isr::ISRRetireRouter router(dom);
+        convo::SnapshotCoordinator coord(dom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto before = rec.snapshot();
+        const auto* targetBefore = convo::SnapshotCoordinatorTestAccess::targetSlot(coord);
+        const bool fadingBefore = coord.isFading();
+        const auto qBefore = router.quarantineResidentCount();
+
+        std::thread rt([&coord]
+        {
+            convo::numeric_policy::ScopedThreadRole role(convo::numeric_policy::ThreadRole::AudioRealtime);
+            convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        });
+        rt.join();
+
+        const auto after = rec.snapshot();
+        const auto* targetAfter = convo::SnapshotCoordinatorTestAccess::targetSlot(coord);
+
+        if (convo::SnapshotCoordinator::rtViolationCount() != rtBefore + 1)
+        {
+            std::printf("  FAIL (RT): rtViolationCount=%llu expected %llu\n",
+                        (unsigned long long) convo::SnapshotCoordinator::rtViolationCount(),
+                        (unsigned long long) (rtBefore + 1));
+            pass = false;
+        }
+        if (targetAfter != targetBefore || targetAfter == nullptr)
+        {
+            std::printf("  FAIL (RT): target slot changed (before=%p after=%p)\n",
+                        (const void*) targetBefore, (const void*) targetAfter);
+            pass = false;
+        }
+        if (coord.isFading() != fadingBefore)
+        {
+            std::printf("  FAIL (RT): fade state changed\n");
+            pass = false;
+        }
+        if (after.requests != before.requests || after.completions != before.completions)
+        {
+            std::printf("  FAIL (RT): record changed (req %llu→%llu comp %llu→%llu)\n",
+                        (unsigned long long) before.requests, (unsigned long long) after.requests,
+                        (unsigned long long) before.completions, (unsigned long long) after.completions);
+            pass = false;
+        }
+        if (router.quarantineResidentCount() != qBefore)
+        {
+            std::printf("  FAIL (RT): quarantine resident changed\n");
+            pass = false;
+        }
+
+        // --- (6) RT 違反後の Non-RT 再呼出し ---
+        const auto before2 = rec.snapshot();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto after2 = rec.snapshot();
+        if (after2.requests != before2.requests + 1)
+        {
+            std::printf("  FAIL (RT→NonRT): requests=%llu expected %llu\n",
+                        (unsigned long long) after2.requests,
+                        (unsigned long long) (before2.requests + 1));
+            pass = false;
+        }
+        if (convo::SnapshotCoordinatorTestAccess::targetSlot(coord) != nullptr)
+        {
+            std::printf("  FAIL (RT→NonRT): target not retired\n");
+            pass = false;
+        }
+        drainRetireQueues(dom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (RT→NonRT): req=%llu comp=%llu un=%llu\n",
+                        (unsigned long long) fin.requests, (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions);
+            pass = false;
+        }
+
+        // --- (7) 二重呼出し ---
+        const auto before3 = rec.snapshot();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);   // 2 回目
+        const auto after3 = rec.snapshot();
+        if (after3.requests != before3.requests)
+        {
+            std::printf("  FAIL (double): requests incremented on empty target (%llu → %llu)\n",
+                        (unsigned long long) before3.requests, (unsigned long long) after3.requests);
+            pass = false;
+        }
+        coord.finalizeShutdown(false);
+        drainRetireQueues(dom, router);
+    }
+
+    if (pass)
+        std::printf("  PASS: Non-RT only contract, Q/E/T chain, RT violation keeps state\n");
+    return pass;
+}
+
+//============================================================================
+// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
+//============================================================================
 int main()
 {
     bool ok = true;
@@ -962,6 +1493,9 @@ int main()
     ok &= test_T7_SnapshotOwnershipConservation();
     ok &= test_T8_RouterOwnershipConservation();
     ok &= test_T10_ResetFadeStateAndRetireTarget();
+    ok &= test_T11_CompleteFadeRecords();
+    ok &= test_T12_FinalizeRetiresTargetAndCurrent();
+    ok &= test_T13_C2NonRtOnly();
 
     if (ok)
     {
@@ -977,6 +1511,9 @@ int main()
         std::printf("  T6  DEFERRED (no production Shutdown path)\n");
         std::printf("  T9  DEFERRED (source audit only)\n");
         std::printf("  T10 resetFadeStateAndRetireTarget  PASS (direct call, T10-c unobservable)\n");
+        std::printf("  T11 completeFade (C3) record 1:1  PASS (real queue + quarantine)\n");
+        std::printf("  T12 finalizeShutdown current+target  PASS (C5 both sites)\n");
+        std::printf("  T13 C2 Non-RT only (Q/E/T + RT)      PASS\n");
         std::printf("========================================\n");
         return 0;
     }

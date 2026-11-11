@@ -84,7 +84,7 @@
     auto isOlder = [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;
     };
-    auth.drain(minReader, isOlder);
+    auth.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
 
     if (auth.residentCountAtomic() != 0)
         return false;
@@ -131,7 +131,7 @@
     auto isOlder = [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;
     };
-    auth.drain(minReader, isOlder);
+    auth.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
 
     if (auth.residentCountAtomic() != 0)
         return false;
@@ -162,7 +162,7 @@
     if (auth.terminalDrainEntryCount() != 0)
         return false;
 
-    auth.drainAll();
+    auth.drainAll(convo::RetireDomainId::Unknown);
 
     if (auth.terminalDrainAllCount() != 1)
         return false;
@@ -175,7 +175,7 @@
     if (auth.terminalPeakResident() != 4)
         return false;
 
-    auth.drainAll();
+    auth.drainAll(convo::RetireDomainId::Unknown);
     if (auth.terminalDrainAllCount() != 2)
         return false;
     if (auth.terminalDrainEntryCount() != 4)
@@ -217,7 +217,7 @@
 
     convo::publishAtomic(s_deleteCount, 0);  // NOLINT(atomic-dot-call)
 
-    auth.drainAll();
+    auth.drainAll(convo::RetireDomainId::Unknown);
 
     if (auth.terminalDrainAllCount() != 1)
         return false;

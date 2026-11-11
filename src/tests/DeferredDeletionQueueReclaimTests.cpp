@@ -152,9 +152,9 @@ bool testBasicEnqueueReclaim()
     TrackedObject obj1(1), obj2(2), obj3(3);
 
     // 同一 epoch (1) で 3 エントリ enqueue
-    checkTrue("basic: enqueue 1", queue.enqueue(&obj1, dummyDeleter, 1));
-    checkTrue("basic: enqueue 2", queue.enqueue(&obj2, dummyDeleter, 1));
-    checkTrue("basic: enqueue 3", queue.enqueue(&obj3, dummyDeleter, 1));
+    checkTrue("basic: enqueue 1", queue.enqueue(&obj1, dummyDeleter, 1, convo::RetireDomainId::Unknown));
+    checkTrue("basic: enqueue 2", queue.enqueue(&obj2, dummyDeleter, 1, convo::RetireDomainId::Unknown));
+    checkTrue("basic: enqueue 3", queue.enqueue(&obj3, dummyDeleter, 1, convo::RetireDomainId::Unknown));
 
     // epoch=1 より古い minReaderEpoch=2 で reclaim → 全件回収されるはず
     uint32_t reclaimed = queue.reclaim(2);
@@ -180,9 +180,9 @@ bool testFifoOrder()
 
     TrackedObject obj1(1), obj2(2), obj3(3);
 
-    queue.enqueue(&obj1, dummyDeleter, 1);
-    queue.enqueue(&obj2, dummyDeleter, 1);
-    queue.enqueue(&obj3, dummyDeleter, 1);
+    queue.enqueue(&obj1, dummyDeleter, 1, convo::RetireDomainId::Unknown);
+    queue.enqueue(&obj2, dummyDeleter, 1, convo::RetireDomainId::Unknown);
+    queue.enqueue(&obj3, dummyDeleter, 1, convo::RetireDomainId::Unknown);
 
     // epoch=1 より古い minReaderEpoch=2 で reclaim
     uint32_t reclaimed = queue.reclaim(2);
@@ -206,8 +206,8 @@ bool testMixedEpochReclaim()
 
     TrackedObject oldObj(1), newObj(2);
 
-    queue.enqueue(&oldObj, dummyDeleter, 1);  // epoch=1
-    queue.enqueue(&newObj, dummyDeleter, 5);  // epoch=5
+    queue.enqueue(&oldObj, dummyDeleter, 1, convo::RetireDomainId::Unknown);  // epoch=1
+    queue.enqueue(&newObj, dummyDeleter, 5, convo::RetireDomainId::Unknown);  // epoch=5
 
     // minReaderEpoch=3 → epoch=1 は回収可能、epoch=5 は回収不可（先頭ブロッキング）
     uint32_t reclaimed = queue.reclaim(3);
@@ -242,8 +242,8 @@ bool testHeadBlocking()
 
     TrackedObject blocker(1), blocked(2);
 
-    queue.enqueue(&blocker, dummyDeleter, 10); // epoch=10（新しい）
-    queue.enqueue(&blocked, dummyDeleter, 1);  // epoch=1（古いが後ろ） ← 逆転！
+    queue.enqueue(&blocker, dummyDeleter, 10, convo::RetireDomainId::Unknown); // epoch=10（新しい）
+    queue.enqueue(&blocked, dummyDeleter, 1, convo::RetireDomainId::Unknown);  // epoch=1（古いが後ろ） ← 逆転！
 
     // minReaderEpoch=5 → blocker(epoch=10) が先頭で回収不可
     // ★ 現状の実装: else 節 → !canDelete → break。blocked は後続にいるが回収されない
@@ -274,7 +274,7 @@ bool testReclaimCountAccuracy()
     objs.reserve(100);
     for (int i = 0; i < 100; ++i) {
         auto obj = std::make_unique<TrackedObject>(i);
-        queue.enqueue(obj.get(), dummyDeleter, 1);
+        queue.enqueue(obj.get(), dummyDeleter, 1, convo::RetireDomainId::Unknown);
         objs.push_back(std::move(obj));
     }
 
@@ -299,8 +299,8 @@ bool testReclaimCountAccuracy()
 
     // さらに追加して部分回収（スタック変数、get() 不使用）
     TrackedObject partial1(200), partial2(201);
-    queue.enqueue(&partial1, dummyDeleter, 1);
-    queue.enqueue(&partial2, dummyDeleter, 10); // 新しい
+    queue.enqueue(&partial1, dummyDeleter, 1, convo::RetireDomainId::Unknown);
+    queue.enqueue(&partial2, dummyDeleter, 10, convo::RetireDomainId::Unknown); // 新しい
 
     reclaimed = queue.reclaim(5);
     checkEq("count: partial reclaim (only old)", 1, reclaimed);
@@ -327,7 +327,7 @@ bool testEmptyQueueReclaim()
 
     // 空キューに enqueue して即 reclaim
     TrackedObject obj(1);
-    queue.enqueue(&obj, dummyDeleter, 1);
+    queue.enqueue(&obj, dummyDeleter, 1, convo::RetireDomainId::Unknown);
     reclaimed = queue.reclaim(2);
     checkEq("empty: single then reclaim", 1, reclaimed);
 
@@ -398,7 +398,7 @@ MpmcEpochInversionResult testMpmcEpochInversion(int numProducers,
                 uint64_t epoch = static_cast<uint64_t>(p * epochSpread + i);
                 queue.enqueue(obj, [](void* ptr) {
                     delete static_cast<TrackedObject*>(ptr);
-                }, epoch);
+                }, epoch, convo::RetireDomainId::Unknown);
             }
         });
     }
@@ -548,7 +548,7 @@ void runStressTest(int durationMs)
                 uint64_t epoch = baseEpoch + counter;
                 if (queue.enqueue(obj, [](void* ptr) {
                         delete static_cast<TrackedObject*>(ptr);
-                    }, epoch)) {
+                    }, epoch, convo::RetireDomainId::Unknown)) {
                     convo::fetchAddAtomic(result.totalEnqueued, uint64_t{1}, std::memory_order_release);
                 } else {
                     delete obj;
@@ -651,7 +651,7 @@ bool testMaxScanBudget()
     objs.reserve(kNumEntries);
     for (int i = 0; i < kNumEntries; ++i) {
         auto obj = std::make_unique<TrackedObject>(i);
-        queue.enqueue(obj.get(), dummyDeleter, 1);
+        queue.enqueue(obj.get(), dummyDeleter, 1, convo::RetireDomainId::Unknown);
         objs.push_back(std::move(obj));
     }
 
@@ -677,7 +677,7 @@ void testReclaimPerformance()
     objs.reserve(kNumEntries);
     for (int i = 0; i < kNumEntries; ++i) {
         auto obj = std::make_unique<TrackedObject>(i);
-        queue.enqueue(obj.get(), dummyDeleter, 1);
+        queue.enqueue(obj.get(), dummyDeleter, 1, convo::RetireDomainId::Unknown);
         objs.push_back(std::move(obj));
     }
 

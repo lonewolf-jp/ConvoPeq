@@ -10,8 +10,12 @@
 
 #pragma once
 
+#include "audioengine/ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定
+#include "core/RetireDomain.h"              // ★ domain tag (v2.9): entry への刻印
+
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <type_traits>
 
@@ -41,8 +45,15 @@ struct DeletionEntry {
     void (*deleter)(void*) = nullptr;
     uint64_t epoch = 0;
     DeletionEntryType type = DeletionEntryType::Generic;
+    // ★ domain tag (v2.9 §2.1): enqueue 時に provider が刻印し、以降は変更しない。
+    //   既定値 Unstamped は「刻印漏れ」を意味する（生成側は絶対に付けない）。
+    convo::RetireDomainId domainId { convo::RetireDomainId::Unstamped };
     uint64_t publicationSequenceId{0};  // ★ P2-2: 出版-退役の因果追跡用
     uint64_t generation{0};             // ★ P2-2: generation 追跡
+    // ★ 段階③ (2026-11-11, Owner 承認): 最初にreclaim走査で評価された時刻（ns・0 = 未走査）
+    //   producer（enqueue）が 0 で初期化し、consumer（reclaim）が最初に 1 回だけ書く。
+    //   seq の publish 後にのみ書かれるため、データ競合は無い。
+    uint64_t firstScanTsNs{0};
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     size_t objectBytes{0};  // ★ work70: Retire 対象のオブジェクトバイト数（sizeof、診断のみ）
 #endif
@@ -53,6 +64,16 @@ static_assert(std::is_trivially_copyable_v<DeletionEntry>,
     "DeletionEntry must be trivially copyable for lock-free queue operations");
 static_assert(std::is_trivially_destructible_v<DeletionEntry>,
     "DeletionEntry must be trivially destructible");
+// ★ domain tag (v2.9 §2.1): 刻印の型と、サイズ・アラインメントを構成別に固定する。
+//   変更前の実測（2026-11-11）: 診断 OFF = 56 / 8、診断 ON = 64 / 8。
+//   domainId（1 バイト）は type の後ろのパディングに吸収され、サイズは変わらない。
+static_assert(sizeof(convo::RetireDomainId) == 1, "convo::RetireDomainId must be 1 byte");
+static_assert(alignof(DeletionEntry) == 8, "DeletionEntry alignment changed");
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+static_assert(sizeof(DeletionEntry) == 64, "DeletionEntry size changed (diagnostics ON)");
+#else
+static_assert(sizeof(DeletionEntry) == 56, "DeletionEntry size changed (diagnostics OFF)");
+#endif
 static_assert(std::atomic<size_t>::is_always_lock_free,
     "std::atomic<size_t> must be lock-free for real-time safety");
 static_assert(std::atomic<uint64_t>::is_always_lock_free,
@@ -74,18 +95,22 @@ public:
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
-    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept {
-        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic, 0, 0);
+    // ★ domain tag (v2.9 §3.2): domain は必須引数（既定引数を設けない）。
+    //   呼び出し側が必ず意図を書くため、刻印漏れはコンパイルで検出される。
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, convo::RetireDomainId domain) noexcept {
+        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic, 0, 0, domain);
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
-    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept {
-        return enqueue(ptr, deleter, epoch, type, 0, 0);
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
+                 convo::RetireDomainId domain) noexcept {
+        return enqueue(ptr, deleter, epoch, type, 0, 0, domain);
     }
 
     // ★ P2-2: publicationSequenceId + generation 付き enqueue
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
-                 uint64_t publicationSequenceId, uint64_t generation) noexcept {
+                 uint64_t publicationSequenceId, uint64_t generation,
+                 convo::RetireDomainId domain) noexcept {
         uint32_t pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire); // acquire: 前回 enqueue の CAS acq_rel と HB し最新の enqueuePos を観測
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
@@ -104,8 +129,10 @@ public:
                     entry.deleter = deleter;
                     entry.epoch = epoch;
                     entry.type = type;
+                    entry.domainId = domain;   // ★ domain tag: enqueue 時に刻印（以降不変）
                     entry.publicationSequenceId = publicationSequenceId;
                     entry.generation = generation;
+                    entry.firstScanTsNs = 0;   // ★ 段階③: スロット再利用時の残留を防ぐ
                     convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release); // release: dequeue の seq acquire と HB しエントリ書き込み完了を公知
                     return true;
                 }
@@ -138,6 +165,10 @@ public:
             }
 
             auto& entry = ringBuffer[scanPos & kMask];
+            // ★ 段階③: この entry が最初にreclaim走査で評価された時刻を一度だけ記録する。
+            //   consumer（この関数）だけが書くため CAS は不要（seq の acquire 後）。
+            if (entry.firstScanTsNs == 0)
+                entry.firstScanTsNs = steadyNowNs();
             bool canDelete = false;
 
             if (isOlder(entry.epoch, minReaderEpoch)) {
@@ -153,6 +184,11 @@ public:
                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して再試行
                     if (entry.deleter && entry.ptr) {
                         const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
+                        convo::isr::RetireLatencyRecorder::instance().recordSafe (entry.ptr);   // ★ A(D1): epoch 安全到達
+                        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                            entry.ptr, convo::isr::RetireLatencyRecorder::Path::Queue,
+                            entry.domainId,   // ★ domain tag: entry の刻印をそのまま記録
+                            entry.firstScanTsNs);   // ★ A(D1) + 段階③: 初回走査時刻
                         entry.deleter(entry.ptr);
                         // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（release observation・案 B）。
                         //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
@@ -205,6 +241,10 @@ public:
                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して retry
                     if (entry.deleter && entry.ptr) {
                         const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
+                        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                            entry.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll,
+                            entry.domainId,   // ★ domain tag: entry の刻印をそのまま記録
+                            entry.firstScanTsNs);   // ★ A(D1)
                         entry.deleter(entry.ptr);
                         // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（shutdown drain 含む）。
                         if (entryType == DeletionEntryType::World)
@@ -268,6 +308,14 @@ private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
         return static_cast<int64_t>(a - b) < 0;
+    }
+
+    // ★ 段階③: RetireLatencyRecorder::nowNs() と同じ時計（steady_clock）。
+    //   firstScanTs と enqueueTs / safeTs を同一基準で比較するため必須。
+    static inline uint64_t steadyNowNs() noexcept
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
     static constexpr uint32_t kQueueSize = 4096;

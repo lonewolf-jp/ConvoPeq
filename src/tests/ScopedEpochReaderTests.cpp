@@ -70,7 +70,7 @@ void* allocate()
 // ── T1: reader slot blocks reclamation across the read window ───────────────
 bool testT1_readerSlotBlocksReclaim()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     Counter counter;
     g_counter = &counter;
 
@@ -105,7 +105,7 @@ bool testT1_readerSlotBlocksReclaim()
 // ── T2: nested readers keep the barrier until the outermost exit ────────────
 bool testT2_nestedReadersKeepBarrier()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     Counter counter;
     g_counter = &counter;
 
@@ -152,7 +152,7 @@ bool testT2_nestedReadersKeepBarrier()
 // ── T3: no reader -> reclaimed on the first reclaim after publish (control) ─
 bool testT3_noReaderReclaimsImmediately()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     Counter counter;
     g_counter = &counter;
 
@@ -172,7 +172,7 @@ bool testT3_noReaderReclaimsImmediately()
 // ── T4: fail-closed after reader registration is closed ─────────────────────
 bool testT4_failClosedAfterRegistrationClosed()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     domain.closeReaderRegistration();
 
     ScopedEpochReader reader (domain);

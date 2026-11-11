@@ -1,4 +1,5 @@
 #include "ISRRuntimePublicationCoordinator.h"
+#include "ISRRetireLatency.h"   // ★ 設計 v2: 要求記録
 #include "AtomicAccess.h"
 #include "SequenceArithmetic.h"  // ★ dash2 §1.6.1 (Phase H): modular sequence arithmetic（commit monotonicity）
 #include "ISRRetireOverflowRing.h"
@@ -158,8 +159,17 @@ RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
 
+    // ★ 設計 v2: 要求を記録する（B 経路の時刻。A の記録は冪等に再利用される）。
+    bool requestCreated = false;
+    const auto requestId = convo::isr::RetireLatencyRecorder::instance().recordRequest (
+        ptr, epoch, 0u, 0xFFFFFFFFu, &requestCreated);
+
     // ★ Bug#2-d: enqueueWithRetry に委譲（リトライロジックは Router に集約）
     const auto result = router.enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
+
+    if (result != RetireEnqueueResult::Success && requestCreated && requestId != 0u)
+        convo::isr::RetireLatencyRecorder::instance().cancelRequestById (ptr, requestId);
+
     if (result != RetireEnqueueResult::Success)
         return result;
 

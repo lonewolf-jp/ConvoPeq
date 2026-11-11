@@ -36,7 +36,7 @@ public:
             snap,
             [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },
             epoch,
-            DeletionEntryType::Generic);
+            DeletionEntryType::Generic, convo::RetireDomainId::Unknown);
     }
 
     /// [P1-21] epoch-free API: minReaderEpoch を直接受け取る

@@ -19,6 +19,8 @@
 //==============================================================================
 #pragma once
 
+#include "ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定
+
 #include <array>
 #include <cstdint>
 #include <cstddef>
@@ -97,8 +99,11 @@ public:
     // 定期 drain（Timer/CoordinatorLoop の tryReclaim 直後）: epoch < minReaderEpoch に
     // 達したエントリのみ deleter 実行。それ以外は保持継続（RT 離脱待ち — EBR 原則）。
     // isOlderFn: EpochDomain::isOlder(a, b)（static_cast<int64_t>(a-b)<0、wraparound 対応）を委譲。
+    // ★ domain tag (v2.9 §3.3): Quarantine のエントリは DeletionEntry を持たないため、
+    //   Router が自分の retireDomainId() を明示引数で渡す。
     void drain(uint64_t minReaderEpoch,
-               const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
+               const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+               RetireDomainId domain) noexcept
     {
         // ★ work88 監査指摘: deleter を mutex 保持中に呼ばない（三次レビュー契約）。
         //   lock 内で safe エントリを抽出 → unlock 後に deleter 実行。
@@ -134,6 +139,9 @@ public:
         // unlock 後に deleter 実行（reentrancy / deadlock 回避）
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];   // deleter 実行後に判定（D86.1 の順序維持）
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                pendingPtrs[i], convo::isr::RetireLatencyRecorder::Path::Quarantine,
+                domain);   // ★ A(D1) + domain tag
             pendingDeleters[i](pendingPtrs[i]);
             // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（quarantine drain）。
             //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
@@ -148,7 +156,7 @@ public:
     }
 
     // Shutdown 専用: 全強制解放（Audio Thread 停止後 — destroyForShutdown と同契約）
-    void drainAllUnsafe() noexcept
+    void drainAllUnsafe(RetireDomainId domain) noexcept
     {
         void* pendingPtrs[kMaxQuarantinedEntries]{};
         void (*pendingDeleters[kMaxQuarantinedEntries])(void*) = {};
@@ -172,6 +180,9 @@ public:
         }
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                pendingPtrs[i], convo::isr::RetireLatencyRecorder::Path::DrainAll,
+                domain);   // ★ A(D1) + domain tag
             pendingDeleters[i](pendingPtrs[i]);
             // ★ T1 (D86): shutdown drainAll でも type==World の terminal deleter 実行後 → world 破棄観測。
             if (entryType == DeletionEntryType::World)

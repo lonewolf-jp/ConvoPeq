@@ -587,6 +587,19 @@ void AudioEngine::timerCallback()
     const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
 
+    // ★ 段階① (2026-11-11, Owner 承認): EQ ドメインの reclaim ドライバ（100 ms・Message Thread）
+    //   - publish（epoch 前進）は m_epochAdvancePending が true のときだけ。滞留だけでは前進させない。
+    //   - pending なしでも滞留があれば reclaim のみ実行する（判定は lock-free のみ）。
+    //   - Shutdown 中は呼ばない（teardown 中の drain 契約に触れない）。
+    //   - 対象は published RuntimeWorld の current DSP が持つ EQProcessor。
+    //     legacy activeRuntimeDSPSlot は placeholder 専用の非所有 mirror のため使わない。
+    //   - 周期は既存の startTimer(100) をそのまま使う（新規 timer / thread は追加しない）。
+    if (! isShutdownInProgress())
+    {
+        if (auto* eqDriverDsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle))
+            eqDriverDsp->eqRt().driveRetireReclaimNonRt();
+    }
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ Timer exec開始時刻（timerCallback全体の実行時間計測用）
     //    関数スコープのstatic変数。末尾のexecブロックと共有。

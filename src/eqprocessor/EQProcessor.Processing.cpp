@@ -486,7 +486,17 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
     convo::RCUReaderGuard guard(rcuReader);
-    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
+    // ★ Gate 1 (2026-11-11, Owner 承認): RCU 入場に失敗した場合は epoch 保護が無いため、
+    //   退役対象（currentStateBits の指す EQState）を一切参照しない。
+    //   既存コードは stateSnapshot == nullptr を「状態未公開」として扱えるため、
+    //   ニュートラル設定のフォールバックを新設せず、同じ nullptr 経路に倒す。
+    const bool protectedRead = guard.rootEnterSucceeded();
+    if (! protectedRead)
+        unprotectedReadCount_.fetch_add (1u, std::memory_order_relaxed);
+
+    const auto* stateSnapshot = protectedRead
+        ? loadCurrentState(std::memory_order_acquire)
+        : nullptr;
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
@@ -655,13 +665,19 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // Note: bandNodeBits[] stores non-owning handles. We assume resolved nodes are valid during this block.
     // because deletion is deferred by EBR (reader epoch mechanism).
-    for (int i = 0; i < NUM_BANDS; ++i)
+    // ★ Gate 1 (2026-11-11): 入場に失敗した場合は EBR 保護が無い。BandNode も退役対象
+    //   （setter 毎に retireBandNodeDeferred で遅延解放される）なので、ポインタを取得しない。
+    //   取得しなければ deref（node->active / node->coeffs / node->mode）も起こらない。
+    if (protectedRead)
     {
-        auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode の release/acq_rel と HB
-        if (node && node->active)
+        for (int i = 0; i < NUM_BANDS; ++i)
         {
-            activeBands[numActiveBands] = { node, i };
-            numActiveBands++;
+            auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode の release/acq_rel と HB
+            if (node && node->active)
+            {
+                activeBands[numActiveBands] = { node, i };
+                numActiveBands++;
+            }
         }
     }
 

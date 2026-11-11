@@ -703,7 +703,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                     const double processingRate = sampleRate * static_cast<double>(osResult.resolvedOsFactor);
                     // A-closure (reader safety): hold the EBR reader slot across the
                     // getEQState() dereference below (fail-closed when unavailable).
-                    auto eqReadGuard = getEQProcessor().acquireReadGuard();
+                    auto eqReadGuard = getEQProcessor().acquireReadGuard("RebuildDispatch");   // ★ 計測タグ
                     auto* eqState = eqReadGuard.active() ? getEQProcessor().getEQState() : nullptr;
                     if (eqState)
                     {

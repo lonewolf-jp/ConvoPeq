@@ -270,10 +270,61 @@ std::string escapeJson(std::string_view s)
     return out;
 }
 
+const char* artifactSource(const char* name) noexcept
+{
+    // ★ B-11: 実測生成元がある artifact は "runtime"、CI シナリオ側で測るものは "ci"。
+    struct Entry { const char* name; const char* source; };
+    static constexpr Entry table[] = {
+        {"closure_graph.json", "runtime"},
+        {"mutation_fault_trace.json", "runtime"},
+        {"hb_graph_trace.json", "runtime"},
+        {"hb_violation_report.json", "runtime"},
+        {"retire_timeline.json", "runtime"},
+        {"shutdown_trace.json", "runtime"},
+        {"publication_failure_log.json", "runtime"},
+        {"publication_progress_log.json", "runtime"},
+        {"deferred_health.json", "runtime"},
+        {"payload_tier_report.json", "ci"},
+        {"retire_latency_report.json", "ci"},
+    };
+
+    for (const auto& e : table)
+        if (std::string_view(e.name) == std::string_view(name))
+            return e.source;
+
+    return "unknown";
+}
+
+
+// ★ B-11: 生成済み JSON から 1 フィールドの生トークンを取り出す。
+//   値が文字列なら引用符を外し、真偽値・数値はそのまま返す。
+std::string jsonFieldToken(std::string_view json, std::string_view key)
+{
+    const std::string quotedKey = "\"" + std::string(key) + "\"";
+    auto pos = json.find(quotedKey);
+    if (pos == std::string_view::npos) return {};
+    pos = json.find(':', pos + quotedKey.size());
+    if (pos == std::string_view::npos) return {};
+    ++pos;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'
+                                 || json[pos] == '\n' || json[pos] == '\r'))
+        ++pos;
+    if (pos >= json.size()) return {};
+    if (json[pos] == '"') {
+        const auto endQuote = json.find('"', pos + 1);
+        if (endQuote == std::string_view::npos) return {};
+        return std::string(json.substr(pos + 1, endQuote - pos - 1));
+    }
+    const auto endToken = json.find_first_of(",}\n\r", pos);
+    return std::string(json.substr(pos, (endToken == std::string_view::npos ? json.size() : endToken) - pos));
+}
+
+
 } // namespace
 
 void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot,
-                                      uint64_t monotonicViolationCount)
+                                      uint64_t monotonicViolationCount,
+                                      bool forceFullEvidence)
 {
     const auto root = artifactRoot();
     const auto buildMode = buildModeName();
@@ -281,7 +332,7 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     const auto runId = runtimeRunId();
     const auto generatedAtNs = nowNs();
 
-    const bool isRelease = (buildMode == "Release");
+    const bool isRelease = (buildMode == "Release") && ! forceFullEvidence;
     const bool isDebug = (buildMode == "Debug");
 
     // ★ P1-9: monotonic violation count を Evidence に含める
@@ -296,17 +347,17 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     const auto deferredHealthJson = snapshot ? buildDeferredHealthJson(*snapshot) : std::string{};
 
     const std::array<std::pair<const char*, const char*>, 11> artifacts{{
-        {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"generated\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":true,\"externalMutableDependencies\":0}"},
+        {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"not_measured\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":false,\"externalMutableDependencies\":0,\"reason\":\"closure walker produced no report in this run\"}"},
         {"mutation_fault_trace.json", mutationFaultTrace.c_str()},
-        {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
-        {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"ok\",\"violations\":[]}"},
+        {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"not_measured\",\"eventCount\":0,\"events\":[],\"reason\":\"no HB events were recorded in this run\"}"},
+        {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"not_measured\",\"violations\":[],\"scenarioResults\":[],\"reason\":\"HB verifier produced no report in this run\"}"},
         // ★ work88（CI runtime evidence 整合）: retire_timeline schema を v1 → v2 に更新
         //   （isr-seed-evidence.ps1 / isr-verify-evidence-provenance.ps1 の期待 v2 に追従）。
         //   v2 追加フィールド（laneCounters / lifecycleCounters / lifecycleSample）は runtime 初期値 0。
-        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v2\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0,\"laneCounters\":{\"rtIntent\":0,\"coordination\":0,\"epoch\":0,\"reclaim\":0,\"quarantine\":0},\"lifecycleCounters\":{\"visible\":0,\"compareEligible\":0,\"telemetryRetained\":0,\"replayRetainedOptional\":0,\"reclaimEligible\":0,\"reclaimed\":0},\"lifecycleSample\":[]}"},
-        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"template\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
-        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"template\",\"withinThreshold\":false}"},
-        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
+        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v2\",\"status\":\"not_measured\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":false,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0,\"laneCounters\":{\"rtIntent\":0,\"coordination\":0,\"epoch\":0,\"reclaim\":0,\"quarantine\":0},\"lifecycleCounters\":{\"visible\":0,\"compareEligible\":0,\"telemetryRetained\":0,\"replayRetainedOptional\":0,\"reclaimEligible\":0,\"reclaimed\":0},\"lifecycleSample\":[],\"reason\":\"retire timeline was not emitted in this run\"}"},
+        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"not_measured\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0,\"reason\":\"shutdown FSM produced no trace in this run\"}"},
+        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"not_measured\",\"withinThreshold\":false,\"reason\":\"retire latency is measured by the CI scenario runner, not by the app\"}"},
+        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"not_measured\",\"violations\":0,\"reason\":\"payload-tier violations are measured by the CI scenario runner, not by the app\",\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
         {"publication_failure_log.json", failureLogJson.c_str()},
         {"publication_progress_log.json", progressLogJson.c_str()},
         {"deferred_health.json", deferredHealthJson.c_str()}
@@ -352,6 +403,8 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     };
 
     bool first = true;
+    std::string detail;
+    bool firstDetail = true;
 
     for (std::size_t i = 0; i < artifacts.size(); ++i) {
         const auto& [name, content] = artifacts[i];
@@ -377,8 +430,20 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
         manifest += name;
         manifest += "\"";
         first = false;
+
+        // ★ B-11: 各 artifact が実測か placeholder かを明示する
+        //   （生成が成功したことは ISR 安全性の一般保証ではない）。
+        if (!firstDetail) {
+            detail += ",\n";
+        }
+        detail += std::string("    {\"name\":\"") + name + "\",\"source\":\""
+                + artifactSource(name) + "\",\"measured\":" + (exists ? "true" : "false") + "}";
+        firstDetail = false;
     }
 
+    manifest += "\n  ],\n";
+    manifest += "  \"artifactDetail\": [\n";
+    manifest += detail;
     manifest += "\n  ]\n";
     manifest += "}\n";
 
@@ -430,8 +495,32 @@ void BudgetManager::budgetCheck()
 void FailureHandler::handleFailure()
 {
     const auto root = artifactRoot();
-    const bool hbViolation = fileExistsAndNonEmpty(root / "hb_violation_report.json");
-    const bool shutdownViolation = fileExistsAndNonEmpty(root / "shutdown_violation_report.json");
+    // ★ B-11: 存在ではなく内容（status / verified）で判断する。従来はファイルの
+    //   存在だけで Quarantine を選ぶため、同じ run で "status":"ok" と Quarantine が
+    //   併存していた。不明な内容は安全側（violation 扱い）に倒す。
+    bool hbViolation = false;
+    {
+        const auto text = readTextFile(root / "hb_violation_report.json");
+
+        if (! text.empty())
+        {
+            const auto status = jsonFieldToken(text, "status");
+            hbViolation = (status != "ok");
+        }
+    }
+
+    bool shutdownViolation = fileExistsAndNonEmpty(root / "shutdown_violation_report.json");
+    {
+        const auto text = readTextFile(root / "shutdown_trace.json");
+
+        if (! text.empty())
+        {
+            const auto verified = jsonFieldToken(text, "verified");
+
+            if (verified == "false")
+                shutdownViolation = true;
+        }
+    }
 
     std::ostringstream oss;
     oss << "{\n"
@@ -468,6 +557,15 @@ void IntrospectionConsole::introspect()
         << "}\n";
 
     writeTextFile(root / "runtime_snapshot.json", oss.str());
+}
+
+
+// ★ A(D1): 既存 artifact の runtime metadata を再付与する公開ラッパー
+void reapplyRuntimeMetadata(const std::filesystem::path& path,
+                            std::string_view runId,
+                            std::uint64_t generatedAtNs)
+{
+    ensureArtifactRuntimeMetadata(path, runId, generatedAtNs);
 }
 
 } // namespace convo::isr

@@ -1,8 +1,11 @@
 #include "ISRDebugRuntime.h"
+#include "ISREvidenceExporter.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 namespace {
 constexpr const char* currentBuildMode() noexcept
@@ -38,6 +41,21 @@ bool semanticHashEquals(const convo::isr::RuntimeSemanticHash& lhs,
 }
 
 namespace convo::isr {
+namespace
+{
+std::atomic<bool> g_forceEvidenceEmission { false };
+}
+
+void setForceEvidenceEmission(bool enabled) noexcept
+{
+    g_forceEvidenceEmission.store(enabled, std::memory_order_release);
+}
+
+bool isForceEvidenceEmission() noexcept
+{
+    return g_forceEvidenceEmission.load(std::memory_order_acquire);
+}
+
 
 void DebugRuntime::runAtomicDotCallScan() {
     const auto path = std::filesystem::current_path() / "evidence" / "atomic_dotcall_scan.json";
@@ -59,19 +77,87 @@ void DebugRuntime::validateOwnershipClosure() {
     }
 }
 
+void DebugRuntime::emitFinalViolationReport()
+{
+    // ★ A(D1): 最終 drain 後に違反レポートを書き直し、final 段階（drainAll 後）を残す。
+    //   runtime 段階（最終 drain 直前）はレコーダが保持しており、レポート内に併記される。
+    const auto path = std::filesystem::current_path() / "evidence" / "hb_violation_report.json";
+
+    std::error_code ec;
+    if (! std::filesystem::exists (path, ec))
+        return;
+
+    // 既存の metadata を退避して、書き直し後も同じ値を使う。
+    // まだ metadata が無い場合は、この書き込み時刻と実行 ID を使う。
+    std::string runId = "runtime-local";
+
+    if (const char* envRunId = std::getenv ("CONVO_ISR_RUNTIME_RUN_ID");
+        envRunId != nullptr && *envRunId != '\0')
+    {
+        runId = envRunId;
+    }
+
+    std::uint64_t generatedAtNs = 0;
+    {
+        std::ifstream in (path, std::ios::binary);
+        const std::string text ((std::istreambuf_iterator<char> (in)),
+                                std::istreambuf_iterator<char>());
+
+        const std::string runKey = "\"runId\":\"";
+        const auto runPos = text.find (runKey);
+
+        if (runPos != std::string::npos)
+        {
+            const auto begin = runPos + runKey.size();
+            const auto end = text.find ('"', begin);
+
+            if (end != std::string::npos)
+                runId = text.substr (begin, end - begin);
+        }
+
+        const std::string genKey = "\"generatedAtNs\":";
+        const auto genPos = text.find (genKey);
+
+        if (genPos != std::string::npos)
+        {
+            const auto begin = genPos + genKey.size();
+            const auto end = text.find_first_not_of ("0123456789", begin);
+
+            if (end != std::string::npos)
+                generatedAtNs = static_cast<std::uint64_t> (std::stoull (text.substr (begin, end - begin)));
+        }
+    }
+
+    if (generatedAtNs == 0)
+        generatedAtNs = static_cast<std::uint64_t> (
+            std::chrono::duration_cast<std::chrono::nanoseconds> (
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    hbVerifier_.setTraceRuntime (&hbTraceRuntime_);
+    hbVerifier_.emitViolationReport (path);
+    convo::isr::reapplyRuntimeMetadata (path, runId, generatedAtNs);
+}
+
 void DebugRuntime::emitCIArtifacts() {
     const std::string mode = currentBuildMode();
 
     runAtomicDotCallScan();
 
-    if (mode == "Release") {
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
         return;
     }
 
     validateOwnershipClosure();
 
-    if (mode == "CI") {
-        emitHBTrace();
+    // ★ B-11: HB 証跡と違反レポートは、記録済みの実イベントから生成する。
+    //   従来は CI モードで trace だけを出し、違反レポートはエクスポータの定数だった。
+    //   Release 以外（CI / Debug）では常に実測を出す。
+    emitHBTrace();
+
+    {
+        const auto root = std::filesystem::current_path() / "evidence";
+        hbVerifier_.setTraceRuntime(&hbTraceRuntime_);
+        hbVerifier_.emitViolationReport(root / "hb_violation_report.json");
     }
 
     emitShadowCompareCadenceReport();
@@ -79,7 +165,7 @@ void DebugRuntime::emitCIArtifacts() {
 
 void DebugRuntime::emitHBTrace() {
     const std::string mode = currentBuildMode();
-    if (mode == "Release") {
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
         return;
     }
 

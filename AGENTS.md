@@ -64,14 +64,14 @@ commandcode環境、ZCode環境、および **Xiaomi MIMO Desktop 環境**では
 - `wsl bash -lc "..."` の内側コマンドは rtk-wsl プラグインが自動rewrite
 - bashエイリアス: ls/grep/cat/find/diff → rtk版、fd→fdfind(10.3)
 
-### ctx_batch_execute / ctx_execute は **PowerShell**（MSYS2 ではない）— 2026-09-26 实測訂正
+### ctx_batch_execute / ctx_execute は **PowerShell**（MSYS2 ではない）— 2026-09-26 実測訂正
 
 旧記録「サンドボックスは MSYS2（Git Bash 系）」は**この環境では誤り**。実測でサンドボックスが
 `C:\Users\user\AppData\Local\Temp\.ctx-mode-XXXX\script.ps1` を生成し、**PowerShell で実行**していた。
 
 - **`/c/...` の MSYS パスは失敗する**（`用語 '/c/Program\' は ... として認識されません`）。
 - Windows exe は **call 演算子 `&` + シングルクォート**で書く。
-- パイプ / リダイレクト / `Select-Object` は PowerShell 記法 그대로使える。
+- パイプ / リダイレクト / `Select-Object` は PowerShell 記法をそのまま使える。
 - `wsl.exe bash -lc '...'` は**単一引用符ごと**渡す（PowerShell がクォートを消費する）。
 - 複数行テキストは PowerShell のバッククォート改行 `` `n `` で渡す。
 - PowerShell のパス区切りは `\` なので、bash 向けのリダイレクトを直接書くと壊れる。
@@ -270,7 +270,7 @@ and an effect or setup function. (cause: SchemaError(Missing key at ["default"])
   （`logs\main.log` に `Created config backup: ...opencode.jsonc.openchamber.backup` /
   `Successfully wrote config file: ...opencode.jsonc` のみが残り、プロジェクト設定には触れない）。
   したがってパネルにはグローバル側の 3 個（github / semble / mcp-windbg）しか出ない。これはオンデマンド起動ではない（実測で 15 台が起動時に一斉に接続）。
-  一方、项目別 `ConvoPeq\opencode.json` の 12 個は **OpenCode サーバー側が global + project を
+  一方、プロジェクト別 `ConvoPeq\opencode.json` の 12 個は **OpenCode サーバー側が global + project を
   マージして実際にロードする**ので正常に動作する（サーバーログの `mcp connected` 全 15 件で実証）。
   > 「パネルに 12 個出ない = 動いていない」ではない。判定は
   > `Select-String -Path ~\.local\share\opencode\log\opencode.log -Pattern "mcp connected"` で行う。
@@ -280,8 +280,8 @@ and an effect or setup function. (cause: SchemaError(Missing key at ["default"])
 `~/.local/share/rtk/history.db` が `database disk image is malformed: Error code 11` で壊れて `rtk gain` が不能だった → 削除（rtk が再作成）。圧縮機能自体は無影響。
 - **ネイティブ `rtk.exe` 0.49.0 が `C:\WINDOWS\system32\rtk.exe` にもある**（WSL 版と同一バージョン）。`rtk rewrite` の実測: `ls -la`→`rtk ls -la` / `cat X`→`rtk read X` / `ast-grep ...`→空（素通し）/ **`wsl bash -lc '...'`→空（ラッパーを解釈しない）**。
 
-### コード検索インデックス（2026-09-26 時点、全て更新済み）
-`.cocoindex_code/`（1.87 GB・97,676 chunks・**daemon 生存中で自己更新**）、`graphify-out/graph.json`（87.6 MB・55,419 nodes・**`graphify update .` で LLM 不要の code-only 更新**）、`.tgtep/`（59.8 MB・2,010 files・227,259 trigrams）、`.aidex/`（36.1 MB・484 files・20,787 items）。**4 つとも古い索引を無警告で返す**ので使う前に mtime を確認すること。
+### コード検索インデックス（2026-09-26 時点＋2026-11-11 に graphify を再生成）
+`.cocoindex_code/`（1.87 GB・97,676 chunks・**daemon 生存中で自己更新**）、`graphify-out/graph.json`（**66.8 MB・67,560 nodes・85,861 edges・3,464 communities・build commit = HEAD `c94d3767`**、2026-11-11 にツール更新（0.9.106）後に `graphify update .` で再生成。LLM 不要の code-only 更新**）、`.tgtep/`（59.8 MB・2,010 files・227,259 trigrams）、`.aidex/`（36.1 MB・484 files・20,787 items）。**4 つとも古い索引を無警告で返す**ので使う前に mtime を確認すること。
 
 ### 既存記録の訂正（実測で判明した相違点）
 - **tgrep の既定 index path は `.tgrep/`**（`.tgtep/` ではない。リポジトリ固有の慣習）。`status`/`index`/`serve`/検索のたびに `--index-path .tgtep` を付けないと黙って見つからない。
@@ -291,11 +291,23 @@ and an effect or setup function. (cause: SchemaError(Missing key at ["default"])
 - **cppcheck 2.22 に `--output-format=json` は無い**（`text`/`sarif`/`xml`/`xmlv2`/`xmlv3` のみ）。また `unknownMacro` ID も無い — JUCE の `#error` ノイズの正しい抑制は `preprocessorErrorDirective`。
 - **cppcheck は JUCE ヘッダを compile database 無しで解析できない**（MSVC マクロを `-D` で上書きできないため）。`--project=` 必須。
 - **Maxima に `--eval` は無い**（SBCL 層が消費して `Warning: argument eval not recognized`）。使えるのは `--quiet -batch "C:/forward/slash/path.mac"`（**バックスラッシュは消える**）または stdin パイプ（`;` 終端必須）。
-- **headroom CLI に `compress`/`retrieve` サブコマンドは無い**（31 サブコマンド確認済み）。これらは MCP ツール限定。CLI は `savings` / `inspect` / `memory` を使う。
+- **headroom CLI に `compress`/`retrieve` サブコマンドは無い**（v0.44.0 で 30 サブコマンドを実測。2026-11-11）。これらは MCP ツール限定。CLI は `savings` / `inspect` / `memory` を使う。
 - **pwsh → WSL のクォートが最大の実害**。`wsl bash -lc "... 2>&1 ..."` は pwsh が `2>&1` を `C:\dev\null` というファイル名に書き換える。`<<'EOS'` へリドクも pwsh のパーサが拒否。**スクリプトをファイルに書いて `wsl bash /mnt/c/.../s.sh` で実行する**。WSL 内では POSIX パス（`/mnt/c/...`）を使い `C:\...` は使わない。
 - **Get-ChildItem -Recurse を `.opencode/plugins/` にかけてはいけない**（node_modules が数万ファイル吐く）。`-Directory` か非 recursive の `-File` を使う。
 - **`bufsize=0` の Popen は FileIO を返す**ので `read1()` は無い。`os.read(fd, n)` を使う。
 - **OpenChamber を再起動すると `opencode` サーバープロセスが増殖する**（2026-09-26 時点で 2 個生存、各々 15 サーバー全部を起動するため MCP 起動が二重になる）。完全終了してから開き直すこと。
+
+### サブエージェント定義の探索元 — ルート直下の md は定義ではない（2026-11-11 実測）
+
+- エージェント／サブエージェントの定義として読まれるのは次の 2 系統だけである。
+  - ユーザー: `~/.config/opencode/{agents,agent,modes,mode}/<name>.md`（現状は `agents/` に build・explore・general・plan の 4 件）
+  - プロジェクト: `<project>/.opencode/{agents,agent,modes,mode}/<name>.md`（ConvoPeq には存在しない）
+- **プロジェクトルートの `*.md`（README・ARCHITECTURE・SOUND_PROCESSING・BUILD_GUIDE_WINDOWS・HOW_TO_USE・RELEASE_NOTES・ConvoPeq.md・CLAUDE.md・AGENTS.md）はドキュメントであり、サブエージェント定義ではない。** フロントマターを付けても定義にはならない。
+  - 実測: ルートに `zzprobe-agent.md`（`description` と `mode: subagent` 付き）を置いても `opencode debug agents` は 7 件のままだった。`.opencode/agent/zzprobe-singular.md` に置いたときだけ 8 件目として現れた（検証後に両方削除）。
+  - OpenChamber 側の探索も同じで、`app.asar` の `node_modules/@openchamber/web/server/lib/opencode/agents.js` が `USER_AGENT_DIRS`（`~/.config/opencode/{agents,agent,modes,mode}`）と `<workdir>/.opencode/{agents,agent,modes,mode}` しか見ない。`GET /api/agent` が返すのは 7 件（build・general・explore・compaction・title・summary・plan）で、md 名のエージェントは含まれない。
+- **GUI 左ペインの「サブセッション」に出るのは定義ではなく子セッション**である。`chat.workStatus.section.subagents` は「現在のセッションの子セッション（未アーカイブ、ワークフロー由来を除く、ツール呼び出しに紐づかないもの）」を並べる。2026-11-08 にルート文書を 1 文書 1 サブエージェントで監査した 7 件（`Audit README against code` ほか）が残っていたのが実体で、定義ファイルの誤読ではない。
+- **対処**: 当該 7 件をアーカイブした（`POST http://127.0.0.1:<desktopLocalPort>/api/openchamber/sessions/archive` に `{"ids": [...]}`。戻すときは `/api/openchamber/sessions/unarchive`）。アーカイブ後、左ペインのサブセッション欄は空になった。
+- **今後**: ルート文書の監査をサブエージェントへ分割しない（メインセッションで読むか、1 件にまとめる）。子セッションを使った場合は、完了後にアーカイブして左ペインへ残さない。
 
 ### agent-browser（2026-09-26 導入→同日削除）
 
@@ -469,11 +481,16 @@ MCP server process exited with code 1: 'C:\Python314\pythonw.exe' は内部ま�
    Python314 参照を **`C:\Python315\pythonw.exe`** へ書き換え。
 2. **uv 0.13.3 を 3.15 ネイティブで導入**（`C:\Users\user\AppData\Roaming\Python\Python315\Scripts`）。
 3. `graphify` の uv tool は **`[mcp]` エクストラ無しでは起動しない**:
-   `uv tool install "graphifyy[mcp]==0.9.69" --force`（無いと `ImportError: mcp not installed`）。
+   `uv tool install "graphifyy[mcp]==0.9.106" --force`（無いと `ImportError: mcp not installed`）。
+  **アップデート後は必ずスキルを同期する**。古いままだと `graphify --version` が
+  `warning: skill at <path> is from graphify <old>, package is <new>. Run 'graphify install --platform <p>'`を出す。
+  実測では opencode / claude / codex / copilot の 4 が一度に古くなった（各々 `graphify install --platform <p>` で解消）。
 4. `headroom` は **uv tool 自身の console script** を指す
    （`C:\Users\user\AppData\Roaming\uv\tools\headroom-ai\Scripts\headroom.exe`）。
-   `C:\Users\user\.local\bin\headroom.exe`（108,318 B）は**破損した古いランチャー**で
-   exit 1・出力ゼロ。壊れた project `.venv`（3.14.6）内の `headroom.exe` も置き換える。
+   **v0.43.0 以降は `mcp` extra が必須**（`uv tool install "headroom-ai[mcp]==<ver>" --force`。
+   無ければ `headroom mcp serve` が `ImportError: MCP SDK not installed` で落ちる）。
+   `C:\Users\user\.local\bin\headroom.exe` は **uv tool の exe とバイト同一**（SHA-256 一致・47,104 B・`--version` = 0.44.0、2026-11-11 実測）。
+   以前の「破損したランチャー」記録は現在は誤り。ただし `C:\Python314` を参照する古い project `.venv` 内の exe は別物なので使わない。
 5. `box-mcp` の venv は **3.15 で作り直す**。cp315 ホイール保有版への更新が必要:
    `pywin32` 311→312 / `rpds-py` 0.28.0→2026.9.1 /
    `pydantic` 2.12.4→2.14.1 + `pydantic-core` 2.41.5→2.50.1。
@@ -559,3 +576,203 @@ Console で「トークンを生成」→ ダイアログの readonly input に 
   `box_publish_now.py`（Box 21 レポート）、`box_upload_bundle.py`（Box 証拠バンドル）。
   **`finalize_dropbox.py` は `HERE` を未定義のまま参照していた**（`NameError`）—
   `HERE = os.path.dirname(os.path.abspath(__file__))` を足すこと。
+
+## 既知の性能問題 — 学習ノイズシェイパー状態ファイル（2026-11-10 実測）
+
+- `%APPDATA%\ConvoPeq\noise_shaper_learn.xml`（278 KB / 180 要素 = 10 サンプルレート × 3 ビット深度 × 6 モード）の読み込み・再構築に **起動 +10.7 秒、終了時の `DeviceSettings::saveSettings` +10.2 秒**を要する。
+- 同ファイルを 38 バイトにすると `saveSettings` は 66 ms、プロセス寿命は 5.9 秒（起動 1.8 秒）。ファイル書込み自体は 2 ms、`saveSettings` 窓の CPU 時間は +10.4 秒。原因の関数は未特定（`saveNoiseShaperState` の既存 XML パース／`loadNoiseShaperState` が候補）。
+- このため `HeadlessAudioPathVerification`（タイムアウト 30 秒）はプロセス寿命 25.9〜28.7 秒で余裕がない。**タイムアウト延長で隠さない。**
+- 根拠: `doc/work113/20261110-1313_終了遅延調査/report.md`。
+
+## Gate 1: EQ の RCU 入場失敗時は退役対象に触れない（2026-11-11）
+
+- `EQProcessor::process()` は先頭で `convo::RCUReaderGuard` の `rootEnterSucceeded()` を確認し、
+  **失敗時は `loadCurrentState()` も `loadBandNode()` も呼ばない**。`EQState` も `BandNode` も
+  setter 毎に遅延退役されるため、入場できていない Reader が触ると UAF になる。
+- 入場失敗時は `stateSnapshot == nullptr` かつ `numActiveBands == 0` になり、出力は素通し。
+  失敗回数は `EQProcessor::unprotectedReadCount()`（`std::atomic<uint32_t>`・
+  `is_always_lock_free` を static_assert）で数える。
+- `RCUReader::enter()` は **所有権 CAS を depth 更新より先**に行い、`bool` を返す。
+  他スレッド所有なら状態を一切変更せず `false`。slot 取得失敗時は owner と depth を両方戻す。
+  `RCUReaderGuard` は呼出し単位の成否を持ち、失敗時は `exit()` を呼ばない。
+- 検証は `src/tests/AudioEngineHarness/STG11EQRetireTests.cpp` の `checkGate1ProcessIsolation()`
+  （正常入場／reclaim 済みでの入場失敗＝素通し一致／反復 reclaim／非 RT 交換との競合）。
+  **ミューテーション試験**: `process()` のガードを外すと `dRef` が 0 から 2.1 に跳ねて FAIL する。
+  これを回帰の検出力の根拠にしている。
+- 入場失敗を注入するには `m_epochDomain->closeReaderRegistration()`（テスト専用 friend
+  `EQProcessorGate1TestAccess` 経由）を使う。登録は恒久なので、その EQProcessor は以後
+  音声を通さない（テストの最後に使う）。
+- スタンドアロンのガード意味論ハーネスは `IReaderEpochProvider` を偽装して slot 枯渇・
+  ロールバック・同時入場を決定的に検査する。`EpochDomain` を 1 フレームに複数置くと
+  1 MB スタックを超えるので `/F 33554432` を付ける。
+
+## 段階①: EQ ドメイン reclaim ドライバ（2026-11-11 実装・承認済み）
+
+- `EQProcessor::driveRetireReclaimNonRt()` を `AudioEngine::timerCallback()`（既存 `startTimer(100)`）から
+  `! isShutdownInProgress()` のときだけ呼ぶ。**新しい timer / thread は追加していない。**
+- 対象は `resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle)` が返す current DSP の
+  `eqRt()`。legacy `activeRuntimeDSPSlot` は dereference しない（placeholder 専用 mirror）。
+- **epoch を前進させるのは `m_epochAdvancePending` が true のときだけ**。滞留だけでは前進させない。
+  pending なしで滞留があれば `tryReclaim()` のみ。判定は `pendingRetireCount()` と
+  `residentCountAtomic()`（どちらも atomic）で、mutex を取る `residentCount()` は使わない。
+- Message Thread 専用。`jassert(isThisTheMessageThread())` ＋ それ以外から呼ばれたら**何もせず拒否**
+  （`offThreadRejects`）。RT 経路は未変更。
+- publish 理由は **案 2（引数化・デフォルト引数なし）**。`flushPendingEpochAdvance(PublishReason)` に
+  `Prepare` / `Release` / `TimerPending` / `Explicit` の 4 値を明示して渡す（タグ共有は廃止済み）。
+  ドライバは `TimerPending` を直接計数し、flush を呼ばない（二重計数なし）。
+  `Release` は「releaseResources 経由」の意味で、終了処理（shutdown）を意味しない。
+  `retireDriverStats()` で全カウンタ（`publishExplicit` 含む）を読める。
+- 実測（12 秒 3 シナリオ）: p90/p99 が 1〜2 桁改善（burst40 p99 4,421→136 ms、
+  burstfast p99 11,655→62 ms、eq p90 13,989→913 ms）、200 ms 超は 120→1 / 42→2。
+  **最大値は残る**: 「最新 epoch で retire され、次に pending が立つまで epoch が進まない」末尾 entry。
+  これは「滞留だけでは epoch を前進させない」という承認条件の帰結であり、不具合ではない。
+- `retire_delay` の閾値 50 ms は性能目標（保証ではない）。EQ 以外（エンジン側 ISR ドメイン）の
+  entry は本ドライバの対象外で、`observations` に domain ID が無いため帰属は未判定。
+
+## 段階③: `firstScanTs` と 3 分類診断（2026-11-11 実装・承認済み）
+
+- `DeferredDeletionQueue` の entry に `firstScanTsNs` を持たせ、**`reclaim()` が先頭 entry を評価した
+  最初の 1 回だけ** `steadyNowNs()` を書く（writer は consumer だけ・`seq` acquire 後なので競合しない）。
+  enqueue 時に 0 へ戻す（スロット再利用の残留防止）。
+- 分類は `ISRRetireLatencyRecorder::classifyTimes(ts, firstScanTs, safeTs, now)` の純関数。
+  `driverWait = firstScanTs - ts` / `ebrWait = safeTs - firstScanTs` / `execWait = now - safeTs` /
+  `unclassified = latency - 合計`。**未分類は 0 埋めしない**（残差が実在するときだけ計数）。
+  `safeTs == 0` は分類対象外（`excluded`、既存 `unobservedSafe`）、順序不整合は
+  `consistencyErrors++` して `unclassified` に全額。
+- 出力は `retireLatencyD1` の**隣**に `retireLatencyClassified`（診断専用）。判定
+  （`evaluateRetireDelay`・50 ms・`N_req=59`）は不変。`countsConsistent` は
+  `classified + unclassified + excluded == completions` を表す。
+- 実測の読み方（12 秒 3 シナリオ）: `execWait` はマイクロ秒、`queue` の主成分は `driverWait` と
+  `ebrWait`。burst 系の最大 2.16 s は **ebrWait**（走査済みだが epoch 安全条件待ち）、
+  eq の最大 11.9 s は **driverWait**（一度も走査されない）。**後者は EQ ドメインではなく
+  エンジン側 ISR ドメインのキューと推定**される（EQ は段階①ドライバが 100 ms で走査するため
+  `driverWait` が 100 ms を大きく超えない）。帰属確定には domain tag が必要（未承認）。
+- `sync` / `drain` の 1〜2 件は `reclaim()` の走査を通らないため `firstScanTs = 0` となり
+  `unclassified` に全額計上される（設計どおり。ここを 0 にしてはいけない）。
+
+## domain tag: 実装済み（未コミット）・設計 v2.9 受理済み（2026-11-12）
+
+- 設計差分: `doc/work113/20261111-1512_domain設計/design_diff.md`（**v2.9 で受理済み・不改変**。53,979 B /
+  SHA-256 `C3AE50991D9AB0A50BF09C9D8BDBD0B8919AC4F04732F567D93AE76656848427`）。受理記録と着手前チェックは
+  `doc/work113/20261111-2400_着手前確認/`、**実装と §7.2 の検証は
+  `doc/work113/20261112-0030_domain実装/`**（ctest 61/61・15 項目 PASS）。
+- **実装済み・未コミット**（2026-11-12）。commit／merge／release は未実施。
+  - 新設 `src/core/RetireDomain.h`、`EpochDomain` の明示 ctor、`DeletionEntry.domainId`、
+    `IRetireProvider::retireDomainId()`、Router の委譲、Terminal／Quarantine への明示引数、
+    `retireLatencyClassified.domains[]`、生成箇所 38（本番 3 + テスト 35）。
+  - 新規テスト `src/tests/DomainTagTests.cpp`（`DomainTagTests` ターゲット）が 15-a/b/c・#6/#8/#13・#9/#10 を固定。
+- 退役ドメインは**退役キューを所有する epoch ドメイン**で定義する。棚卸しの結果は **EngineISR** と
+  **EQ** の 2 つだけ。`ConvolverProcessor` は独自 `EpochDomain` を持つが**退役キューは未使用**で、
+  退役は `AudioEngine` 経由＝EngineISR に帰属する。`EpochControl`（slot retire）はレコーダを使わない。
+- 帰属は **enqueue 時に provider（`EpochDomain`）が刻印**する（`DeletionEntry.domainId`）。reclaim 時に
+  スレッドや `DeletionEntryType` から推測しない。`RetireDomainId` は v2.3 で 4 値:
+  `Unstamped`（=0・刻印漏れのみ、生成側は付けない）/ `Unknown`（刻印済みだが未特定）/
+  `EngineISR` / `EQ`。`DeletionEntryType`（Generic/World）と統合しない。
+- `RetireDomainId` は **`src/core/RetireDomain.h`**（`<cstdint>` のみ）に置く。`IRetireProvider.h` は
+  `DeferredDeletionQueue.h` を include しているので、ここに enum を書くと循環する。
+- `EpochDomain` の ctor は**引数必須**（デフォルト引数なし）。**契約は B-1**: 全ビルドで
+  `isAssignableDomain()` が false の値（`Unstamped` / `Count` / 5 以上）を採用せず `sanitizeDomain()` で
+  `Unknown` に落とし、`invalidDomainAssignments()`（atomic）で計数する。Debug では加えて停止する
+  （`jassert` は Release で無効なので契約の本体ではない）。
+  **注意**: 実装は `jassertfalse` ではなく同等処理の直接実装（stderr へ 1 行 →`IsDebuggerPresent()` が
+  真のときだけ `__debugbreak()`）。`EpochDomain.h` は JUCE 非依存で、inline ctor の定義を全 TU で
+  同一にする必要があるため。`windows.h` を持ち込むと `max` マクロが `std::numeric_limits::max()` を壊す。
+  **Owner 承認済み（2026-11-12）**: 同等なのは「条件・順序・ブレーク動作」だけ。ログ配送先は JUCE Logger では
+  なく stderr、製品 ctor で JUCE 実マクロは使っていない。宣言は `int __stdcall`（SDK の `BOOL WINAPI` と同型）で、
+  `EpochDomain.h`→`windows.h` の順で両宣言が共存することを確認。`windows.h`→`EpochDomain.h` の順は
+  本変更前から `max` マクロでコンパイル不可（既存問題）。非 Windows は `assert(false)` のみ（ビルド未実測）。
+- `stampMissing == 0` は設計上の期待値（本番・テストとも）。provider 不在は `providerAbsent`、
+  provider が `Unknown` を返す場合は `providerUnknown` に分ける（ドメイン ID は増やさない）。
+- 集計は `retireLatencyClassified.domains[]` を追加し、`retireLatencyD1` と `paths` / `totals` は不変。
+  `Σ domains == totals`・`Σ paths == paths`・`domainSumsConsistent` を実装とテストで固定する。
+- publish 理由タグは**案2（引数化・デフォルト引数なし）**で置き換える設計。`Reconfigure` は現行ツリーでは
+  識別不能（`releaseResources` が単一経路・呼出し元から種別が来ない）ため enum に含めない。
+  `Shutdown` も不要（`~EQProcessor` は `drainAll` で flush を呼ばない）。
+- **検証 #15 の条件**: 15-c-1 はデバッガ非接続（ログのみ・ブレークしない）、15-c-2 は
+  デバッガ接続（初回 `EXCEPTION_BREAKPOINT` をデバッガがアプリへ渡す設定で `__except` が捕捉し、捕捉後の
+  カウンタが +1）。デバッガは `DBG_CONTINUE`（処理済み扱い）ではアプリの `__except` に回らず、
+  `DBG_EXCEPTION_NOT_HANDLED`（未処理として返す）が必要。実測は最小デバッガ
+  （`DEBUG_ONLY_THIS_PROCESS`・ローダ初期ブレークのみ `DBG_CONTINUE`）で行った。WinDbg は `sxd 80000003`
+  （文献確認済み・WinDbg／VS の実設定は未実測）。
+- **実装上の落とし穴（実測）**:
+  - `EpochDomain` は 1 個で約 230 KB（4096 エントリのキューを内包）。複数をスタックに置くと
+    1 MB を超えて **stack overflow（0xC00000FD）**。テストでは `std::make_unique` を使う。
+  - `__try` 内に `EpochDomain` の自動変数を置くと **C2712**（仮想デストラクタ）。静的ストレージ＋
+    placement new にする。
+  - `RetireDomainId` は `convo` 名前空間。`DeletionEntry` はグローバルなので `convo::` 修飾が要る。
+  - 生の `DeferredDeletionQueue::enqueue` と `RetireQuarantineStore::drain` を直接叩くテストが
+    設計の棚卸しに無く、ドメイン引数が必要になった（テストは `Unknown` を明示）。
+- **アプリ実測（12 秒 × 3）の結論**: `stampMissing=0`・`providerUnknown=0`・`providerAbsent=0`、
+  `domainSumsConsistent=true`。**eq の最大 11.8 s は EQ ドメインの `driverWait`** で、EngineISR ではない
+  （設計時の「エンジン側キュー」推定は外れ）。CLI は
+  `--cli-run --cli-exit-ms 12000 --verify-runtime-evidence-live` に
+  `--cli-bypass-burst-count/interval` または `--cli-eq-*` を足す。
+- **ビルド環境の前提**: MSVC が 14.51→14.52 に更新され、既存 `build/` のキャッシュが旧 `link.exe` を
+  指して全リンクが失敗する。`build/CMakeCache.txt` と `build/JUCE/tools/CMakeCache.txt` のパスを
+  新ツールセットへ書き換え、oneAPI `setvars.bat`（`MKLROOT`/`IPPROOT`）を設定して再構成する。
+
+## B-11 v5 の `retire_delay` は retire 遅延を測っていない（2026-11-10 実測）
+
+- `checkRetireDelayBound(50'000'000)` は HB トレースの**隣接イベント間隔**だけを見る。イベントが 2 件未満なら無条件合格。
+- 実測は 1 実行 4 イベント。10 秒超の間隔は retire エッジ（epoch 1）と次の publish（epoch 3）の間であり、retire 遅延ではない。同一 epoch の publish→retire は 150.08 ms。
+- 根拠: `doc/work113/20261110-1313_retire実測調査/report.md`。
+
+## ビルドの mtime 罠 — `Copy-Item` は更新時刻を保持する（2026-11-10 実測）
+
+- 検証用の一時プローブを入れてビルドし、その後にソースをバックアップから `Copy-Item` で戻すと、
+  **`Copy-Item` はコピー元の `LastWriteTime` を保持する**ため、ソースの mtime がプローブ版より古くなる。
+  Ninja は「オブジェクトのほうが新しい」と判断して再ビルドを省略し、**プローブ入りの古い実行ファイルで
+  ctest を回してしまう**（対象 253 のうち 19 しか再ビルドされず、`AudioEngineHarness` が古いまま残った）。
+- 対策: ソースを戻したら **必ず mtime を更新する**（`(Get-Item $f).LastWriteTime = Get-Date` または
+  `python -c "import os;os.utime(p,None)"`）。内容の SHA-256 一致だけでは不十分である。
+- `v11_7`（`V11ReaderReacquireTests` の `checkV11Concurrency`）は競合待ちの確率依存テストで、
+  負荷が高いと検出 0 件で落ちる。ctest は無負荷で実行すること。
+
+## ツール更新 2026-11-11（headroom 0.44.0 / graphify 0.9.106）
+
+OpenCode V2 + OpenChamber 環境での実測。バックエンドは `opencode.exe serve --stdio`、MCP は `nowin.py` ラッパ経由で起動する。
+
+### バージョンと更新方法（実測コマンド）
+
+| ツール | 更新前 | 更新後 | コマンド |
+|---|---|---|---|
+| headroom-ai | 0.43.1 | **0.44.0** | `uv tool install "headroom-ai[mcp]==0.44.0" --force` |
+| graphifyy | 0.9.104 | **0.9.106** | `uv tool install "graphifyy[mcp]==0.9.106" --force` |
+
+- **`uv tool upgrade headroom-ai` では上がらない**（`pinned to 0.43.1 … reinstall with uv tool install headroom-ai@latest` と出る）。
+  明示的に `[mcp]` 付きで再インストールする。
+- **headroom は v0.43.0 で MCP サーバが SDK 2.x に移行した**（upstream #4603）ため、`mcp` extra なしだと
+  `headroom mcp serve` が `ImportError: MCP SDK not installed` で即死する。`[mcp]` では tool venv 内に **mcp 2.3.0** が入る（隔離 venv なので共有 site の `mcp<2` 制約とは矛盾しない）。
+- **proxy は使用しない**（Owner 指示 2026-11-11）。`[proxy]` extra は未インストールで、`headroom proxy` は
+  `Error: Proxy dependencies not installed … No module named 'fastapi'` で落ちることを実測した（仕様どおりで問題なし）。
+- graphify はアップデート後に **スキルを同期**する（上記の 4 プラットフォーム）。同期しないと `graphify --version` が毎回 warning を出す。
+
+### 動作確認（実測）
+
+1. バイナリ: `headroom --version` = 0.44.0（サブコマンド 30）、`graphify --version` = 0.9.106（warning なし）。
+2. **MCP ハンドシェイク**: `C:\Users\user\.local\bin\mcp\mcp-probe.py <spec.json>` で
+   headroom = 3 tools（`headroom_compress` / `headroom_retrieve` / `headroom_stats`）、graphify = 10 tools。
+3. **実セッション接続**: `opencode.exe` を再起動（OpenChamber 本体は触らない）し、
+   `~/.local/share/opencode/log/opencode.log` の `message="mcp connected" server=headroom tools=3` /
+   `server=graphify tools=10` を確認。MCP 子プロセス（8 個）も復帰する。
+4. 更新前に **MCP 子プロセスを停止する必要がある**（Windows の exe ロック）。
+   パターン: `CommandLine` が `headroom-ai` / `graphifyy` を含むプロセス（nowin ラッパーと uv python 子を含む）。
+   停止後は opencode 再起動で自動復帰するが、**その際にセッションが切断される**ことに注意。
+
+### 主な変更点（学習結果）
+
+**headroom 0.43.1 → 0.44.0**（Features 13 / Bug Fixes 45 / Dependencies 6）
+- 破壊的変更は **packaging のみ**：`all` extra から PyTorch 系 extras を外した（#4067）。本環境には該当せず。
+- 当環境に関係するもの: `learn` が **OpenCode V2 のセッションスキーマ**を読むようになった（#4199）、
+  `wrap` で **Serena code-memory MCP が opt-in**になった（#4509）、`doctor` が IPv6 loopback と大文字小文字の proxy URL を認識するようになった。
+- その他は proxy / model-router / dashboard 中心（`HEADROOM_MODEL_ROUTER_LOG_ONLY` の shadow mode、`/v1/compress` の lossless モード、
+  per-request `cost_usd`、Redis ストア可否の `/health` 暴露、Hermes / Factory Droid の wrap 対応など）で、本環境（proxy 不使用）には影響しない。
+- セキュリティ: `asgi` のクライアント断でのバッファリング停止（GHSA-mc2f-vg4v-2fh4）。proxy 不使用でも更新する価値あり。
+
+**graphify 0.9.104 → 0.9.106**（ConvoPeq は C++ なので C++ の解析改善が主目的）
+- 0.9.106: `install` の `requires-python` を `>=3.10,<3.15` にキャップ（Python 3.15 では tree-sitter の wheel が無くソースビルド失敗するため）。
+  C++: **前方宣言が唯一の定義に折りたたまれる**、`using Alias = ns::Type;` 経由のメンバ呼び出し・継承フィールド・前方宣言ポインテの完成、
+  out-of-line テンプレートメンバの所有者保持、`#if` 後の初期化子内の呼び出し復元。
+  query は BFS の順序が hash 依存でなくなった（`PYTHONHASHSEED` で結果が変わらない）。`--no-doc-demotion` で docs-first コーパスの重みを切れる。
+- 0.9.105: **class フィールドを通じたメンバ呼び出しの解析**（`client.actions->Execute()`）、watch の除外ディレクトリ pruning（Linux）。
+- ノード/エッジ構造が変わるため、アップデート後は `graphify update .`（LLM 不要）で既存グラフを再生成するのが望ましい。

@@ -749,6 +749,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME DeferredDeletionQueueReclaimTests
         COMMAND DeferredDeletionQueueReclaimTests)
 
+    # ★ domain tag (v2.9): §7.2 のレコーダ／型の契約を固定する単体テスト（JUCE 非依存）。
+    #   #15-a/b/c、#6/#8/#13、#9/#10 を実行する。15-c-2 は --assert-probe を
+    #   デバッガ接続で起動して確認する（通常の ctest では 15-c-1 相当＝ブレークしない）。
+    add_executable(DomainTagTests
+        src/tests/DomainTagTests.cpp
+    )
+    target_compile_features(DomainTagTests PRIVATE cxx_std_20)
+    target_include_directories(DomainTagTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    add_test(NAME DomainTagTests
+        COMMAND DomainTagTests)
+
     # ★ work88 (FUTURE-10 前提 0): MpscBoundedRing 単体テスト（Vyukov bounded MPSC）
     #   1/N producers・queue full・FIFO・producer hole・cross-type FIFO を検証
     add_executable(MpscBoundedRingTests

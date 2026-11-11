@@ -110,7 +110,7 @@ bool retireOne(EpochDomain& dom, DeleterTracker& tracker, int id, std::uint64_t 
 // =============================================================================
 static bool testT10_1_quarantinedLiveReaderIsNotExcluded()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);                                    // currentEpoch == 5
@@ -189,7 +189,7 @@ static bool testT10_1_quarantinedLiveReaderIsNotExcluded()
 // =============================================================================
 static bool testT10_2_quarantinedSlotIsReusableButLiveReaderProtected()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);
@@ -263,7 +263,7 @@ static bool testT10_2_quarantinedSlotIsReusableButLiveReaderProtected()
 // =============================================================================
 static bool testT10_3_deferredQuarantinePathStillUnblocksReclaim()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);
@@ -336,7 +336,7 @@ static bool testT10_3_deferredQuarantinePathStillUnblocksReclaim()
 // =============================================================================
 static bool testT10_4_shutdownUnquarantineAndDrain()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);

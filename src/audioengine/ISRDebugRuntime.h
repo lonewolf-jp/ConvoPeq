@@ -7,11 +7,17 @@
 
 namespace convo::isr {
 
+// ★ B-11: 実測証跡モード。Release ビルドでも HB 証跡と違反レポートを発行させる。
+//   既定は false（本番の Release では従来どおり発行しない）。
+void setForceEvidenceEmission(bool enabled) noexcept;
+bool isForceEvidenceEmission() noexcept;
+
 class DebugRuntime {
 public:
     void runAtomicDotCallScan();
     void validateOwnershipClosure();
     void emitCIArtifacts();
+    void emitFinalViolationReport();   // ★ A(D1): 最終 drain 後の状態で違反レポートを更新
     void emitHBTrace();
     void recordHBEdge(std::uint32_t from,
                       std::uint32_t to,
@@ -26,6 +32,9 @@ public:
 
 private:
     HBTraceRuntime hbTraceRuntime_;
+    // ★ B-11: HB 違反レポート（status/violations/scenarioResults）の実測生成器。
+    //   従来は未接続で、エクスポータが status:"ok" の定数を書いていた。
+    mutable HBVerifierRuntime hbVerifier_;
     bool hasPreviousShadowCompare_{false};
     std::uint64_t lastSequenceId_{0};
     RuntimeSemanticHash lastSemanticHash_{};

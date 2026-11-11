@@ -38,6 +38,7 @@ struct CoeffSet {
 };
 
 #include "RetrySchedulerTypes.h"
+#include "WorldLifetimeRecorder.h"   // ★ Item2: RuntimeWorld 寿命の記録
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstdint>
@@ -120,7 +121,8 @@ class RetryScheduler; // ★ D101-24 Step 1: forward-declared (unique_ptr owners
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISREvidenceExporter.h"
 #include "ISRWorldRetirementTelemetry.h"   // ★ T1: World retirement observation telemetry（観測値のみ・D86）
-#include "ISRWorldRetirementReference.h"   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
+#include "ISRWorldRetirementReference.h"
+#include "RetireLatencyTeardownReporter.h"   // ★ W-2: postTeardown 段の捕捉   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
 #include "WorldLifecycleAudit.h"
@@ -604,6 +606,13 @@ class AudioEngine : public juce::AudioSource,
                                      private juce::AsyncUpdater
 {
 public:
+    // ★ W-2 (2026-11-10, Owner 限定承認): このクラスの**最初の非 static データメンバ**。
+    //   C++ のメンバ破棄は宣言の逆順であるため、このデストラクタが最後に走る
+    //   （= 他のメンバがすべて破棄された後の postTeardown 段を記録できる）。
+    //   基底クラス 6 つは退役を発生させないことを監査済み
+    //   （doc/work113/20261110-2330_C2実装と計測/w2_post_teardown_design_v2.md §2）。
+    convo::isr::RetireLatencyTeardownReporter m_teardownReporter;
+
     friend class convo::RuntimeBuilder;
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
@@ -3970,6 +3979,7 @@ public:
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                convo::isr::WorldLifetimeRecorder::instance().recordDestroy(ptr);   // ★ Item2: 物理破棄
                 ptr->unseal();
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
@@ -3983,9 +3993,16 @@ public:
             if (world == nullptr)
                 return;
 
+            // ★ Item2: 拒否された world は commit に到達しないため、拒否時点を起点として記録する。
+            convo::isr::WorldLifetimeRecorder::instance().recordCommit(
+                world,
+                static_cast<std::uint64_t>(world->worldId),
+                convo::isr::WorldLifetimeRecorder::Path::Rejected);
+
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                convo::isr::WorldLifetimeRecorder::instance().recordDestroy(ptr);   // ★ Item2: 物理破棄
                 ptr->unseal();
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
@@ -4674,7 +4691,21 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
         //   shutdown 中は Audio Thread 停止済みのため epoch は安全 → 即時破棄される。
         //   invariant: 「caller → authority への ownership transfer が成立してから return」
         const uint64_t epoch = markRetireEpoch();
+
+        // ★ D1-shutdown (2026-11-10): この分岐は enqueueRetire を通らないため、要求記録が
+        //   欠落していた（完了だけが terminalReclaim の完了フックで記録され unmatched になる）。
+        //   移送の直前に要求を記録し、完了フックと同じ recorder・同じ object で対応させる。
+        //   移送が失敗した場合に限り、この分岐が作成した記録だけを取り消す（既存記録は触らない）。
+        bool requestCreated = false;
+        const std::uint64_t requestId =
+            convo::isr::RetireLatencyRecorder::instance().recordRequest (
+                ptr, epoch, 0u, 0xFFFFFFFFu, &requestCreated);
+
         const bool transferred = m_retireRouter->shutdownReclaim(ptr, deleter, epoch, type);
+
+        if (! transferred && requestCreated && requestId != 0u)
+            convo::isr::RetireLatencyRecorder::instance().cancelRequestById (ptr, requestId);
+
         return transferred ? convo::isr::RetireEnqueueResult::Success
                            : convo::isr::RetireEnqueueResult::Shutdown;
     }
@@ -5172,6 +5203,14 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
             worldAuthority_.registry().unregister(seqId);
             return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
         }
+
+        // ★ Item2: commit（所有者移譲の完了）を記録する。D1 とは別系統。
+        convo::isr::WorldLifetimeRecorder::instance().recordCommit(
+            newWorld,
+            static_cast<std::uint64_t>(newWorld->worldId),
+            shutdownRuntime_.isShutdownInProgress()
+                ? convo::isr::WorldLifetimeRecorder::Path::Shutdown
+                : convo::isr::WorldLifetimeRecorder::Path::Publish);
     }
 
     // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
@@ -5413,7 +5452,8 @@ public:
 
     // スナップショット基盤（Phase 2）
     // ==================================================================
-    convo::EpochDomain m_epochDomain;
+    // ★ domain tag (v2.9): Engine の epoch ドメイン（退役は EngineISR に帰属する）
+    convo::EpochDomain m_epochDomain { convo::RetireDomainId::EngineISR };
     // ★ T1 (D98): reference observer — m_retireRouter より前に宣言（初期化順: observer → m_retireRouter・
     //   破棄順: m_retireRouter → observer・D97 invariant を満たす）。measurement only・retirement authority でない。
     convo::isr::WorldRetirementReferenceObserver worldRetirementReference_;

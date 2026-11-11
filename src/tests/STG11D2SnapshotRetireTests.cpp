@@ -178,7 +178,7 @@ bool checkAllDrained(convo::EpochDomain& dom, convo::isr::ISRRetireRouter& route
 // =============================================================================
 static bool checkTD21QFullEscalatesToEmergency()
 {
-    auto dom = std::make_unique<convo::EpochDomain>();
+    auto dom = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
     auto router = std::make_unique<convo::isr::ISRRetireRouter>(*dom);
     auto coord = std::make_unique<convo::SnapshotCoordinator>(*dom);
     coord->setRetireSink(router.get());
@@ -251,7 +251,7 @@ static bool checkTD21QFullEscalatesToEmergency()
 // =============================================================================
 static bool checkTD22EFullEscalatesToTerminal()
 {
-    auto dom = std::make_unique<convo::EpochDomain>();
+    auto dom = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
     auto router = std::make_unique<convo::isr::ISRRetireRouter>(*dom);
     auto coord = std::make_unique<convo::SnapshotCoordinator>(*dom);
     coord->setRetireSink(router.get());
@@ -310,7 +310,7 @@ static bool checkTD22EFullEscalatesToTerminal()
 // =============================================================================
 static bool checkTD23ShutdownDrainCompletes()
 {
-    auto dom = std::make_unique<convo::EpochDomain>();
+    auto dom = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
     auto router = std::make_unique<convo::isr::ISRRetireRouter>(*dom);
     auto coord = std::make_unique<convo::SnapshotCoordinator>(*dom);
     coord->setRetireSink(router.get());

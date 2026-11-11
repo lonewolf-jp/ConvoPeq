@@ -3,6 +3,8 @@
 //==============================================================================
 
 #include "SnapshotCoordinator.h"
+#include "../audioengine/ISRRetireLatency.h"   // ★ C2: 要求記録（RT 安全版は使わない）
+#include "../DspNumericPolicy.h"              // ★ C2: isAudioThread() による Non-RT 契約の検査
 
 #include <cassert>  // ★ BUG-015/027 (work88): store full 検出用
 
@@ -27,6 +29,9 @@ namespace convo {
 void SnapshotCoordinator::quarantineRetireSink(void* ptr, void (*deleter)(void*),
                                                uint64_t epoch, const char* reason) noexcept
 {
+    // ★ 設計 v2: この関数は startFade / completeFade の失敗時からのみ呼ばれる。
+    //   両経路は呼出し前に recordRequest 済みのため、ここでは記録を追加しない。
+    //   将来この関数を直接呼ぶ経路を追加する場合は、呼出元で先に記録すること。
     if (m_retireSink == nullptr || ptr == nullptr || deleter == nullptr)
         return;
     // Stage 1: Q（RetireQuarantineStore）。格納成功で ownership 移転成立。
@@ -72,6 +77,11 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 	if (oldTarget) {
 		const uint64_t retireEpoch = m_epochProvider->currentEpoch();
 		// [work37 Phase 1.2] enqueueWithRetry を使用（startFade は NonRT Timer からのみ）
+bool snapshotRequestCreated = false;
+			const auto snapshotRequestId = convo::isr::RetireLatencyRecorder::instance().recordRequest (
+				oldTarget, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu, &snapshotRequestCreated);
+			(void) snapshotRequestId;
+			(void) snapshotRequestCreated;
 		const auto result = enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
 		if (!result) {
 			// ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）
@@ -98,6 +108,18 @@ bool SnapshotCoordinator::tryCompleteFade() noexcept
 
 void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 {
+	// ★ C2 (2026-11-10, Owner 承認): 本 API は Non-RT 専用。
+	//   RT から呼ばれた場合は契約違反として検出し、状態を一切変更せずに返す。
+	//   target / fade 状態 / 所有権 / 要求記録のいずれも触らない（後続の Non-RT 呼出しが
+	//   同じ前提で通常どおり退役させる）。
+	if (convo::numeric_policy::isAudioThread())
+	{
+		// ★ C2: 違反は全構成で記録する（assertion より前に加算する）。
+		convo::fetchAddAtomic (SnapshotCoordinator::s_rtViolationCount, std::uint64_t{1}, std::memory_order_release);
+		jassert (false && "SnapshotCoordinator::resetFadeStateAndRetireTarget is Non-RT only");
+		return;
+	}
+
 	constexpr auto snapshotDeleter = [](void* ptr) noexcept
 	{
 		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
@@ -107,7 +129,17 @@ void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 	if (target)
 	{
 		const uint64_t retireEpoch = m_epochProvider->publishEpoch();
-		m_epochProvider->enqueueRetire(target, snapshotDeleter, retireEpoch);
+
+		// ★ C2: 移送 1 回につき要求を 1 回だけ記録する。失敗しても取り消さない。
+		//   格納できなかった場合は quarantineRetireSink が Q→E→T で必ず受領し、
+		//   完了フックが同じ object で対応する。
+		(void) convo::isr::RetireLatencyRecorder::instance().recordRequest (
+			target, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
+
+		const bool resetStored = m_epochProvider->enqueueRetire(target, snapshotDeleter, retireEpoch);
+
+		if (! resetStored)
+			quarantineRetireSink(target, snapshotDeleter, retireEpoch, "resetFadeStateAndRetireTarget:queueFull");
 	}
 
 	m_fade.resetToIdle();
@@ -129,6 +161,11 @@ void SnapshotCoordinator::completeFade() noexcept
 	if (old)
 	{
 		// [work37 Phase 1.2] enqueueWithRetry を使用（completeFade は NonRT）
+bool snapshotRequestCreated = false;
+		const auto snapshotRequestId = convo::isr::RetireLatencyRecorder::instance().recordRequest (
+			old, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu, &snapshotRequestCreated);
+		(void) snapshotRequestId;
+		(void) snapshotRequestCreated;
 		const auto result = enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
 		if (!result) {
 			// ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）
