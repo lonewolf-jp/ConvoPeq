@@ -16,6 +16,7 @@
 #include "SnapshotFactory.h"
 #include "audioengine/ISRAuthorityClass.h"
 #include "../audioengine/ISRRetireLatency.h"   // ★ C5: retireCurrentAndTarget の要求記録
+#include "audioengine/AtomicAccess.h"    // ★ atomic 直接 dot-call を廃止
 
 namespace convo {
 namespace isr {
@@ -137,7 +138,7 @@ public:
     static inline std::atomic<std::uint64_t> s_rtViolationCount { 0 };
     [[nodiscard]] static std::uint64_t rtViolationCount() noexcept
     {
-        return s_rtViolationCount.load (std::memory_order_acquire);
+        return convo::consumeAtomic (s_rtViolationCount, std::memory_order_acquire);
     }
 
     // ★ BUG-015/027: 退避ストアへの移送先 Router（AudioEngine.CtorDtor.cpp で setRetireSink 設定）

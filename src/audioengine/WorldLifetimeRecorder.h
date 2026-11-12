@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止（convo::*Atomic 経由）
+
 namespace convo {
 namespace isr {
 
@@ -79,14 +81,14 @@ public:
 
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateFree)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateFree)
                 continue;
 
             std::uint8_t expected = kStateFree;
 
-            if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed))
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed))
             {
                 continue;
             }
@@ -95,13 +97,13 @@ public:
             slots_[i].worldId.store (worldId, std::memory_order_relaxed);
             slots_[i].commitTs.store (nowNs(), std::memory_order_relaxed);
             slots_[i].path.store (static_cast<std::uint8_t> (path), std::memory_order_relaxed);
-            slots_[i].state.store (kStateReady, std::memory_order_release);
+            convo::publishAtomic (slots_[i].state, kStateReady, std::memory_order_release);
 
-            pathCommits_[static_cast<std::size_t> (path)].fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (pathCommits_[static_cast<std::size_t> (path)], 1u, std::memory_order_acq_rel);
             return;
         }
 
-        overflow_.fetch_add (1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (overflow_, 1u, std::memory_order_acq_rel);
     }
 
     // 物理破棄を記録する
@@ -112,17 +114,17 @@ public:
 
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
                 continue;
 
-            if (slots_[i].world.load (std::memory_order_acquire) != world)
+            if (convo::consumeAtomic (slots_[i].world, std::memory_order_acquire) != world)
                 continue;
 
             std::uint8_t expected = kStateReady;
 
-            if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_acquire))
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
             {
                 continue;
             }
@@ -130,7 +132,7 @@ public:
             const std::uint64_t commitTs = slots_[i].commitTs.load (std::memory_order_relaxed);
             const std::uint64_t worldId = slots_[i].worldId.load (std::memory_order_relaxed);
             const auto path = static_cast<Path> (slots_[i].path.load (std::memory_order_relaxed));
-            slots_[i].state.store (kStateFree, std::memory_order_release);
+            convo::publishAtomic (slots_[i].state, kStateFree, std::memory_order_release);
 
             const std::uint64_t now = nowNs();
             const std::uint64_t lifetime = (now >= commitTs) ? (now - commitTs) : 0u;
@@ -138,18 +140,18 @@ public:
 
             if (p < kPathCount)
             {
-                pathDestroys_[p].fetch_add (1u, std::memory_order_acq_rel);
-                pathSumNs_[p].fetch_add (lifetime, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (pathDestroys_[p], 1u, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (pathSumNs_[p], lifetime, std::memory_order_acq_rel);
                 updateMax (pathMaxNs_[p], lifetime);
             }
 
-            const std::uint64_t index = observationCount_.fetch_add (1u, std::memory_order_acq_rel);
+            const std::uint64_t index = convo::fetchAddAtomic (observationCount_, 1u, std::memory_order_acq_rel);
             observations_[index % kObservationCapacity] = Observation{worldId, lifetime,
                                                                       static_cast<std::uint8_t> (path)};
             return;
         }
 
-        unmatched_.fetch_add (1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (unmatched_, 1u, std::memory_order_acq_rel);
     }
 
     struct Snapshot
@@ -168,18 +170,18 @@ public:
 
         for (std::size_t p = 0; p < kPathCount; ++p)
         {
-            s.paths[p].commits = pathCommits_[p].load (std::memory_order_acquire);
-            s.paths[p].destroys = pathDestroys_[p].load (std::memory_order_acquire);
-            s.paths[p].maxNs = pathMaxNs_[p].load (std::memory_order_acquire);
-            s.paths[p].sumNs = pathSumNs_[p].load (std::memory_order_acquire);
+            s.paths[p].commits = convo::consumeAtomic (pathCommits_[p], std::memory_order_acquire);
+            s.paths[p].destroys = convo::consumeAtomic (pathDestroys_[p], std::memory_order_acquire);
+            s.paths[p].maxNs = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
+            s.paths[p].sumNs = convo::consumeAtomic (pathSumNs_[p], std::memory_order_acquire);
             s.commits += s.paths[p].commits;
             s.destroys += s.paths[p].destroys;
         }
 
-        s.unmatched = unmatched_.load (std::memory_order_acquire);
-        s.overflow = overflow_.load (std::memory_order_acquire);
+        s.unmatched = convo::consumeAtomic (unmatched_, std::memory_order_acquire);
+        s.overflow = convo::consumeAtomic (overflow_, std::memory_order_acquire);
 
-        const std::uint64_t written = observationCount_.load (std::memory_order_acquire);
+        const std::uint64_t written = convo::consumeAtomic (observationCount_, std::memory_order_acquire);
         const std::uint64_t limit = written < kObservationCapacity ? written : kObservationCapacity;
 
         for (std::uint64_t i = 0; i < limit; ++i)
@@ -199,7 +201,7 @@ public:
     {
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            slots_[i].state.store (kStateFree, std::memory_order_release);
+            convo::publishAtomic (slots_[i].state, kStateFree, std::memory_order_release);
             slots_[i].world.store (nullptr, std::memory_order_relaxed);
             slots_[i].worldId.store (0, std::memory_order_relaxed);
             slots_[i].commitTs.store (0, std::memory_order_relaxed);
@@ -211,15 +213,15 @@ public:
 
         for (std::size_t p = 0; p < kPathCount; ++p)
         {
-            pathCommits_[p].store (0, std::memory_order_release);
-            pathDestroys_[p].store (0, std::memory_order_release);
-            pathMaxNs_[p].store (0, std::memory_order_release);
-            pathSumNs_[p].store (0, std::memory_order_release);
+            convo::publishAtomic (pathCommits_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathDestroys_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathMaxNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathSumNs_[p], 0, std::memory_order_release);
         }
 
-        observationCount_.store (0, std::memory_order_release);
-        unmatched_.store (0, std::memory_order_release);
-        overflow_.store (0, std::memory_order_release);
+        convo::publishAtomic (observationCount_, 0, std::memory_order_release);
+        convo::publishAtomic (unmatched_, 0, std::memory_order_release);
+        convo::publishAtomic (overflow_, 0, std::memory_order_release);
     }
 
 private:
@@ -247,12 +249,12 @@ private:
 
     static void updateMax (std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
     {
-        std::uint64_t current = target.load (std::memory_order_acquire);
+        std::uint64_t current = convo::consumeAtomic (target, std::memory_order_acquire);
 
         while (value > current
-               && ! target.compare_exchange_weak (current, value,
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_acquire))
+               && ! convo::compareExchangeWeakAtomic (target, current, value,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
         {
         }
     }

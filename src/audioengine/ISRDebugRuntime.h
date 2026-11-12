@@ -34,7 +34,9 @@ private:
     HBTraceRuntime hbTraceRuntime_;
     // ★ B-11: HB 違反レポート（status/violations/scenarioResults）の実測生成器。
     //   従来は未接続で、エクスポータが status:"ok" の定数を書いていた。
-    mutable HBVerifierRuntime hbVerifier_;
+    //   参照元は emitFinalViolationReport() と emitCIArtifacts() の 2 つだけで、いずれも
+    //   非 const メンバ。const メンバから触る経路が無いため mutable は不要（LINT-AE-011）。
+    HBVerifierRuntime hbVerifier_;
     bool hasPreviousShadowCompare_{false};
     std::uint64_t lastSequenceId_{0};
     RuntimeSemanticHash lastSemanticHash_{};

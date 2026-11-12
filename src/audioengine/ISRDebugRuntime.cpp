@@ -1,5 +1,6 @@
 #include "ISRDebugRuntime.h"
 #include "ISREvidenceExporter.h"
+#include "AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
 
 #include <chrono>
 #include <cstdlib>
@@ -48,12 +49,12 @@ std::atomic<bool> g_forceEvidenceEmission { false };
 
 void setForceEvidenceEmission(bool enabled) noexcept
 {
-    g_forceEvidenceEmission.store(enabled, std::memory_order_release);
+    convo::publishAtomic (g_forceEvidenceEmission, enabled, std::memory_order_release);
 }
 
 bool isForceEvidenceEmission() noexcept
 {
-    return g_forceEvidenceEmission.load(std::memory_order_acquire);
+    return convo::consumeAtomic (g_forceEvidenceEmission, std::memory_order_acquire);
 }
 
 
