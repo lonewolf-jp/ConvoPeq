@@ -57,10 +57,18 @@ function Get-LexicalRanges {
         $c = $Text[$i]
         $n1 = if ($i + 1 -lt $n) { $Text[$i + 1] } else { [char]0 }
 
-        # --- line comment
+        # --- line comment（行末のバックスラッシュは次の行へ継続する: C++ の行連結）
         if ($c -eq '/' -and $n1 -eq '/') {
             $start = $i
-            while ($i -lt $n -and $Text[$i] -ne "`n") { $i++ }
+            while ($i -lt $n) {
+                if ($Text[$i] -eq "`n") {
+                    $j = $i - 1
+                    if ($j -ge $start -and $Text[$j] -eq "`r") { $j-- }
+                    if ($j -ge $start -and $Text[$j] -eq $backslash) { $i++; continue }
+                    break
+                }
+                $i++
+            }
             $comments.Add([PSCustomObject]@{ Start = $start; End = $i })
             continue
         }
@@ -193,10 +201,18 @@ function Get-FunctionSpan {
         [string]$Signature
     )
 
-    $m = [System.Text.RegularExpressions.Regex]::Match(
-        $CodeText,
-        $Signature + '\s*(?:noexcept\s*)?\{')
-    if (-not $m.Success) {
+    # 署名は文字列リテラルの中に現れることもあるため、文字列範囲の外の最初の一致を使う。
+    $signatureRanges = (Get-LexicalRanges -Text $CodeText).Strings
+    $m = $null
+    foreach ($candidate in [System.Text.RegularExpressions.Regex]::Matches(
+                 $CodeText, $Signature + '\s*(?:noexcept\s*)?\{')) {
+        $insideString = $false
+        foreach ($r in $signatureRanges) {
+            if ($candidate.Index -ge $r.Start -and $candidate.Index -lt $r.End) { $insideString = $true; break }
+        }
+        if (-not $insideString) { $m = $candidate; break }
+    }
+    if ($null -eq $m) {
         return $null
     }
 
@@ -254,18 +270,78 @@ function Get-FunctionBodyMasked {
 # 条件付き早期 return を列挙する
 #-----------------------------------------------------------------------------
 function Get-ConditionalReturns {
-    param([string]$Body)
+    param(
+        [string]$CodeBody,
+        [string]$MaskedBody
+    )
 
+    if ([string]::IsNullOrEmpty($MaskedBody)) { $MaskedBody = $CodeBody }
+
+    # 構造（if (...) { return; }）は文字列を伏せた本文で探し、条件式の文字列だけを
+    # 元の本文から取り出す。文字列に書かれた偽のガードを拾わないため。
     $results = @()
     $pattern = 'if\s*\((?<cond>[^{};]*?)\)\s*\{\s*return\s*;\s*\}'
-    foreach ($m in [System.Text.RegularExpressions.Regex]::Matches($Body, $pattern)) {
+    foreach ($m in [System.Text.RegularExpressions.Regex]::Matches($MaskedBody, $pattern)) {
+        $condGroup = $m.Groups['cond']
+        $condText = $CodeBody.Substring($condGroup.Index, $condGroup.Length)
         $results += [PSCustomObject]@{
-            Condition = $m.Groups['cond'].Value
+            Condition = $condText
             Index     = $m.Index
             Text      = $m.Value
         }
     }
     return $results
+}
+
+function Remove-OuterParens {
+    param([string]$Text)
+
+    $t = $Text.Trim()
+    while ($t.Length -ge 2 -and $t.StartsWith('(') -and $t.EndsWith(')')) {
+        $depth = 0
+        $enclosesWhole = $true
+        for ($k = 0; $k -lt $t.Length; $k++) {
+            if ($t[$k] -eq '(') { $depth++ }
+            elseif ($t[$k] -eq ')') {
+                $depth--
+                if ($depth -eq 0 -and $k -lt ($t.Length - 1)) { $enclosesWhole = $false; break }
+            }
+        }
+        if (-not $enclosesWhole) { break }
+        $t = $t.Substring(1, $t.Length - 2).Trim()
+    }
+    return $t
+}
+
+# Release ガードの条件式が意図した形かを判定する。
+#   force 実装:   mode == "Release" && ! isForceEvidenceEmission()   （項の順序は不問）
+#   旧実装:       mode == "Release"
+# 次の形は受け付けない:
+#   - "||" で結ばれた条件（強制時にも抑制してしまう）
+#   - "!" で全体を反転した条件（!(mode == "Release") など）
+#   - 項が 3 つ以上ある条件
+function Test-ReleaseGuardCondition {
+    param(
+        [string]$Condition,
+        [bool]$ForceSwitchExists
+    )
+
+    $releaseTerm = 'mode == "Release"'
+    $forceTerm = '! isForceEvidenceEmission()'
+
+    $c = ($Condition -replace '\s+', ' ')
+    $c = $c -replace '!\s*', '! '
+    $c = $c.Trim()
+
+    if ($c -match '\|\|') { return $false }
+
+    if (-not $ForceSwitchExists) {
+        return ((Remove-OuterParens -Text $c) -eq $releaseTerm)
+    }
+
+    $terms = @($c -split '&&' | ForEach-Object { Remove-OuterParens -Text $_.Trim() })
+    if ($terms.Count -ne 2) { return $false }
+    return (($terms -contains $releaseTerm) -and ($terms -contains $forceTerm))
 }
 
 #-----------------------------------------------------------------------------
@@ -318,25 +394,21 @@ function Test-ProofScopeContract {
     $hasForceEvidenceSwitch = $runtimeMasked -match 'isForceEvidenceEmission\s*\(\s*\)'
 
     $emitCIArtifacts = Get-FunctionBody -CodeText $runtimeCode -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
+    $emitCIArtifactsMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
+        -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
     if ($null -eq $emitCIArtifacts) {
         $errors.Add("DebugRuntime contract violation: emitCIArtifacts() body not found")
     }
     else {
-        $returns = @(Get-ConditionalReturns -Body $emitCIArtifacts)
-        $releaseReturns = @($returns | Where-Object { $_.Condition -match 'mode\s*==\s*"Release"' })
+        $returns = @(Get-ConditionalReturns -CodeBody $emitCIArtifacts -MaskedBody $emitCIArtifactsMasked)
+        $releaseReturns = @($returns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
 
         if ($releaseReturns.Count -eq 0) {
-            $errors.Add("DebugRuntime contract violation: Release early-return not found in emitCIArtifacts()")
-        }
-        else {
-            foreach ($r in $releaseReturns) {
-                if ($hasForceEvidenceSwitch -and ($r.Condition -notmatch '!\s*isForceEvidenceEmission\s*\(\s*\)')) {
-                    $errors.Add("DebugRuntime contract violation: Release early-return ignores isForceEvidenceEmission()")
-                }
-            }
+            $errors.Add("DebugRuntime contract violation: Release early-return not found or its condition is wrong in emitCIArtifacts()")
         }
 
-        $traceMatch = [System.Text.RegularExpressions.Regex]::Match($emitCIArtifacts, 'emitHBTrace\s*\(\s*\)\s*;')
+        # 呼び出しの有無は文字列を伏せた本文で見る（文字列内の "emitHBTrace();" を拾わない）。
+        $traceMatch = [System.Text.RegularExpressions.Regex]::Match($emitCIArtifactsMasked, 'emitHBTrace\s*\(\s*\)\s*;')
         if (-not $traceMatch.Success) {
             $errors.Add("DebugRuntime contract violation: emitCIArtifacts() does not emit the HB trace")
         }
@@ -348,22 +420,24 @@ function Test-ProofScopeContract {
         }
     }
 
-    #--- R25-4: emitHBTrace() 自身の Release 抑制
+    #--- R25-4: emitHBTrace() 自身の Release 抑制（トレース発行より前にあること）
     $emitHBTrace = Get-FunctionBody -CodeText $runtimeCode -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
+    $emitHBTraceMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
+        -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
     if ($null -eq $emitHBTrace) {
         $errors.Add("DebugRuntime contract violation: emitHBTrace() body not found")
     }
     else {
-        $traceReturns = @(Get-ConditionalReturns -Body $emitHBTrace)
-        $traceReleaseReturns = @($traceReturns | Where-Object { $_.Condition -match 'mode\s*==\s*"Release"' })
+        $traceReturns = @(Get-ConditionalReturns -CodeBody $emitHBTrace -MaskedBody $emitHBTraceMasked)
+        $traceReleaseReturns = @($traceReturns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
         if ($traceReleaseReturns.Count -eq 0) {
-            $errors.Add("DebugRuntime contract violation: emitHBTrace() lost its Release suppression")
+            $errors.Add("DebugRuntime contract violation: emitHBTrace() lost its Release suppression or its condition is wrong")
         }
         else {
-            foreach ($r in $traceReleaseReturns) {
-                if ($hasForceEvidenceSwitch -and ($r.Condition -notmatch '!\s*isForceEvidenceEmission\s*\(\s*\)')) {
-                    $errors.Add("DebugRuntime contract violation: emitHBTrace() Release suppression ignores isForceEvidenceEmission()")
-                }
+            $emitMatch = [System.Text.RegularExpressions.Regex]::Match($emitHBTraceMasked, 'emitTrace\s*\(')
+            $firstTraceReturn = ($traceReleaseReturns | Sort-Object Index | Select-Object -First 1).Index
+            if ($emitMatch.Success -and $emitMatch.Index -lt $firstTraceReturn) {
+                $errors.Add("DebugRuntime contract violation: emitHBTrace() emits the trace before the Release suppression")
             }
         }
     }

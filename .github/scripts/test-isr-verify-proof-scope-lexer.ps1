@@ -174,8 +174,13 @@ if ($brokenCrlf -eq $fnText) {
     Check "mutation-crlf-continuation-observable" $false "could not mutate the CRLF skip"
 }
 else {
+    # 変異の前に、正しい走査器がこの入力を受け入れること（基準線）を確認する。
+    $codeN = 'const char* s = "abc\' + "`r`ndef" + '";' + "`r`nemitHBTrace();`r`n"
+    $rBase = @((Get-LexicalRanges -Text $codeN).Strings.ToArray())
+    $sliceBase = if ($rBase.Count -eq 1) { $codeN.Substring($rBase[0].Start, $rBase[0].End - $rBase[0].Start) } else { '' }
+    Check "crlf-mutation-baseline" ($rBase.Count -eq 1 -and $sliceBase.Contains("`r`n")) "baseline scanner does not accept the mutated input (test would be vacuous)"
+
     Invoke-Expression $brokenCrlf
-    $codeN = 'const char* s = "abc' + "`r`ndef" + '";' + "`r`nemitHBTrace();`r`n"
     $rN = @((Get-LexicalRanges -Text $codeN).Strings.ToArray())
     $sliceN = if ($rN.Count -eq 1) { $codeN.Substring($rN[0].Start, $rN[0].End - $rN[0].Start) } else { '' }
     $detectedN = -not ($rN.Count -eq 1 -and $sliceN.Contains("`r`n"))
@@ -196,6 +201,23 @@ else {
     Check "mutation-char-escape-detection-observable" $detectedC "breaking the character-literal escape check did not change the result (case is not discriminating)"
     Invoke-Expression $fnText
 }
+
+# --- 13. a line comment continued with a backslash keeps the next line commented
+$code13 = "// disabled \" + "`n" + "if (mode == `"Release`") { return; }" + "`nemitHBTrace();`n"
+$out13 = Get-CodeText $code13
+Check "comment-continuation-hides-guard" ($out13 -notmatch 'mode ==') "the continued comment line was treated as code"
+Check "comment-continuation-code-kept" ($out13 -match 'emitHBTrace\(\);') "code after the comment was blanked"
+
+# --- 13b. same with CRLF splicing
+$code13b = "// disabled \" + "`r`n" + "if (mode == `"Release`") { return; }" + "`r`nemitHBTrace();`r`n"
+$out13b = Get-CodeText $code13b
+Check "comment-continuation-crlf-hides-guard" ($out13b -notmatch 'mode ==') "the continued CRLF comment line was treated as code"
+Check "comment-continuation-crlf-code-kept" ($out13b -match 'emitHBTrace\(\);') "code after the CRLF comment was blanked"
+
+# --- 13c. a comment that ends without a backslash must not swallow the next line
+$code13c = "// note`nif (mode == `"Release`") { return; }`nemitHBTrace();`n"
+$out13c = Get-CodeText $code13c
+Check "comment-without-continuation-keeps-code" ($out13c -match 'mode ==') "a non-continued comment swallowed the next line"
 
 if ($fail -gt 0) {
     Write-Host ""

@@ -748,6 +748,234 @@ void DebugRuntime::emitHBTrace()
 '@ + $commonTail
 }
 
+# 21) Release guard joined with || (suppresses forced evidence as well).
+$cases += [PSCustomObject]@{
+    Name     = 'release-guard-with-or'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" || ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 22) The HB trace call exists only inside a string literal.
+$cases += [PSCustomObject]@{
+    Name     = 'hbtrace-call-only-inside-string'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    const char* note = "emitHBTrace();";
+    (void) note;
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 23) emitHBTrace() emits before its Release suppression.
+$cases += [PSCustomObject]@{
+    Name     = 'hbtrace-emit-before-guard'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    hbTraceRuntime_.emitTrace(path);
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+}
+'@ + $commonTail
+}
+
+# 24) The Release guard is commented out with a line-continuation backslash.
+$cases += [PSCustomObject]@{
+    Name     = 'release-guard-commented-out-with-continuation'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    // temporarily disabled \
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 25) A continued comment that does not hide the guard must still pass.
+$cases += [PSCustomObject]@{
+    Name     = 'comment-continuation-without-hiding-guard'
+    Expected = 0
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    // note: the guard below is real, not commented \
+    // (this line continues the comment)
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 26) The Release test itself is negated: !(mode == "Release") && ! force.
+$cases += [PSCustomObject]@{
+    Name     = 'release-guard-negated-mode'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (!(mode == "Release") && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 27) The same contract written with parentheses around each term.
+$cases += [PSCustomObject]@{
+    Name     = 'release-guard-parenthesized'
+    Expected = 0
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if ((mode == "Release") && (! isForceEvidenceEmission())) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if ((mode == "Release") && (! isForceEvidenceEmission())) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
 $failures = 0
 foreach ($case in $cases) {
     if (-not ($case.PSObject.Properties.Name -contains 'MutateExporter')) {
