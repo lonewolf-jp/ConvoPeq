@@ -581,6 +581,26 @@ void AudioEngine::releaseResources()
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
 
+    // ★ DRAIN_DIAG (2026-11-13): clear→retire 経路の診断（読み取りのみ・処理は変更しない）。
+    //   各値が示すもの（混同禁止）:
+    //     cleared        = clearPublishedRuntimeSnapshotsNonRt が引き渡し対象 World を返したか（1/0）。
+    //                      retire の成否ではない。
+    //     retireResult   = 定数 "void"。retirePublishedRuntimeWorldNonRt は void を返すため、
+    //                      retire 成功/失敗は本経路では判定できない（未確認として扱う）。
+    //     publishedAudit = WorldLifecycleAudit の累計 publish 件数（起動からの累積）。
+    //     retiredAudit   = WorldLifecycleAudit の累計 retire 件数（起動からの累積）。
+    //     activeAudit    = WorldLifecycleAudit の現在 active World 件数。
+    //     terminalAfterRetire = clear→retire 直後に TerminalReclaimAuthority が保持している件数。
+    //                      直後の drainAllQuarantineStore() より前の値である。
+    //   1 shutdown あたり 1 行。
+    diagLog("[DRAIN_DIAG] worldClear cleared=" + juce::String(clearedWorld != nullptr ? 1 : 0)
+            + " retireResult=void"
+            + " publishedAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.publishedCount()))
+            + " retiredAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.retiredCount()))
+            + " activeAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.activeWorldCount()))
+            + " terminalAfterRetire=" + juce::String(m_retireRouter != nullptr
+                ? static_cast<juce::int64>(m_retireRouter->terminalReclaimResidentCount()) : juce::int64{0}));
+
     // ★ 15-P-5: clear 後の最終強制 drain（quiescence 確立時のみ）。
     //   clearPublishedRuntimeSnapshotsNonRt が返した oldWorld は enqueueDeferredDeleteNonRt →
     //   shutdownReclaim → terminalReclaim 経由で、epoch safe なら即時破棄、epoch unsafe
@@ -666,6 +686,98 @@ void AudioEngine::releaseResources()
         else if (convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire))
             reason = convo::isr::ShutdownBlockingReason::ActiveBuilder;   // ★ SHUTDOWN-7: Builder が Build Session 進行中
         shutdownRuntime_.markTimedOut(reason);
+
+        // ★ DRAIN_DIAG (2026-11-13): タイムアウト時点の isFullyDrained() 9 条件を 1 回だけ記録する。
+        //   - 値は isFullyDrained()（AudioEngine.Threading.cpp:243-303）が評価する式と同一にする。
+        //     audit.routerPendingRetire は fallbackQueueDepth_ を含む合算のため c3 には使わない（近似禁止）。
+        //   - c1/c4/c5/c6 は collectDrainAudit() の既存結果を再利用（式が同一）。
+        //     c1=deferredPublish / c4=pendingRetire / c5=overflowRingResident / c6=quarantineResident。
+        //   - c2/c3/c7/c8/c9 は同じアクセサを直接読む（読み取りのみ）。
+        //   - drain / reclaim / epoch 前進 / retire は追加しない。処理順序・同期・ロック範囲も変更しない。
+        //   - ポーリングごとではなく、タイムアウトした shutdown 1 回につき 1 行。
+        //   - domain=EngineISR はコード上の前提（AudioEngine.h:5456 / AudioEngine.CtorDtor.cpp:62）。
+        //     実行時にドメインを推定する処理は行わない。
+        const std::uint64_t c3RetireDepth = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()) : 0u;
+        const std::uint64_t c7RetireQuarantine = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
+        const std::uint64_t c8TerminalReclaim = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->terminalReclaimResidentCount()) : 0u;
+        const std::size_t c2PendingReclaim = pendingReclaimHandleCount();
+        const bool c9BridgeDrained = runtimePublicationBridge_.isFullyDrained();
+
+        // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): c9 の 14 条件と、退役キュー先頭の epoch 安全条件。
+        //   A2: isFullyDrained() は変更せず、同じ式を診断側（collectDrainBreakdown）に複写している。
+        //   head は peekHead が sequence を前後で確認できたときだけ present になる。
+        const auto c9 = runtimePublicationBridge_.collectDrainBreakdown();
+        const auto head = m_epochDomain.inspectRetireHead();
+        auto u64OrNa = [](bool ok, juce::uint64 v)
+        {
+            return ok ? juce::String(static_cast<juce::int64>(v)) : juce::String("na");
+        };
+
+        juce::String failed;
+        auto addFailed = [&failed](const char* name)
+        {
+            if (failed.isNotEmpty()) failed += ",";
+            failed += name;
+        };
+        if (audit.deferredPublish != 0) addFailed("c1");
+        if (c2PendingReclaim != 0) addFailed("c2");
+        if (c3RetireDepth != 0) addFailed("c3");
+        if (audit.pendingRetire != 0) addFailed("c4");
+        if (audit.overflowRingResident != 0) addFailed("c5");
+        if (audit.quarantineResident != 0) addFailed("c6");
+        if (c7RetireQuarantine != 0) addFailed("c7");
+        if (c8TerminalReclaim != 0) addFailed("c8");
+        if (!c9BridgeDrained) addFailed("c9");
+        if (failed.isEmpty()) failed = "none";
+
+        diagLog("[DRAIN_DIAG] timedOut=1 domain=EngineISR failed=" + failed
+                + " c1_deferredPublish=" + juce::String(static_cast<juce::int64>(audit.deferredPublish))
+                + " c2_pendingReclaim=" + juce::String(static_cast<juce::int64>(c2PendingReclaim))
+                + " c3_retireDepth=" + juce::String(static_cast<juce::int64>(c3RetireDepth))
+                + " c4_lifetimeIntent=" + juce::String(static_cast<juce::int64>(audit.pendingRetire))
+                + " c5_overflowRing=" + juce::String(static_cast<juce::int64>(audit.overflowRingResident))
+                + " c6_dspQuarantine=" + juce::String(static_cast<juce::int64>(audit.quarantineResident))
+                + " c7_retireQuarantine=" + juce::String(static_cast<juce::int64>(c7RetireQuarantine))
+                + " c8_terminalReclaim=" + juce::String(static_cast<juce::int64>(c8TerminalReclaim))
+                + " c9_bridgeDrained=" + juce::String(c9BridgeDrained ? 1 : 0)
+                + " readers=" + juce::String(static_cast<juce::int64>(audit.activeReaderCount))
+                + " reclaimAttempts=" + juce::String(static_cast<juce::int64>(audit.reclaimAttemptCount))
+                + " reclaimSuccess=" + juce::String(static_cast<juce::int64>(audit.reclaimSuccessCount))
+                + " fallbackDepth=" + juce::String(static_cast<juce::int64>(
+                      convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire)))
+                + " published=" + juce::String(static_cast<juce::int64>(audit.publishedCount))
+                + " retired=" + juce::String(static_cast<juce::int64>(audit.retiredCount))
+                + " activeWorld=" + juce::String(static_cast<juce::int64>(audit.activeWorldCount))
+                + " c9_swap=" + juce::String(c9.swapPending ? 1 : 0)
+                + " c9_iq=" + juce::String(static_cast<juce::int64>(c9.intentQueue))
+                + " c9_oring=" + juce::String(static_cast<juce::int64>(c9.observeDeferredRing))
+                + " c9_qfb=" + juce::String(static_cast<juce::int64>(c9.quarantineFallback))
+                + " c9_rq=" + juce::String(static_cast<juce::int64>(c9.recoveryIntentQueue))
+                + " c9_rbl=" + juce::String(static_cast<juce::int64>(c9.retireBacklog))
+                + " c9_pbl=" + juce::String(static_cast<juce::int64>(c9.publicationBacklog))
+                + " c9_pir=" + juce::String(static_cast<juce::int64>(c9.publicationIntentResidency))
+                + " c9_pi=" + juce::String(static_cast<juce::int64>(c9.pendingIntent))
+                + " c9_rif=" + juce::String(static_cast<juce::int64>(c9.reclaimInFlight))
+                + " c9_qir=" + juce::String(static_cast<juce::int64>(c9.quarantineIntentResidency))
+                + " c9_qrr=" + juce::String(static_cast<juce::int64>(c9.quarantineRingResidency))
+                + " c9_rap=" + juce::String(c9.recoveryAdmissionPending ? 1 : 0)
+                + " c9_lo=" + juce::String(static_cast<juce::int64>(c9.liveRecoveryObligation))
+                + " head=" + juce::String(head.valid ? "present" : "unavailable")
+                + " headSlot=" + (head.valid ? juce::String(static_cast<juce::int64>(head.headSlotIndex)) : juce::String("na"))
+                + " headSeq=" + (head.valid ? juce::String(static_cast<juce::int64>(head.headSequence)) : juce::String("na"))
+                + " headRetireEpoch=" + u64OrNa(head.valid, head.headEpoch)
+                + " headType=" + (head.valid ? juce::String(static_cast<int>(head.type)) : juce::String("na"))
+                + " headDomain=" + (head.valid ? juce::String(static_cast<int>(head.domainId)) : juce::String("na"))
+                + " headScanned=" + (head.valid ? juce::String(head.scanned ? 1 : 0) : juce::String("na"))
+                + " headScanAgeMs=" + ((head.valid && head.scanned)
+                      ? juce::String(static_cast<juce::int64>(head.firstScanAgeMs)) : juce::String("na"))
+                + " minReaderEpoch=" + juce::String(static_cast<juce::int64>(head.minReaderEpoch))
+                + " currentEpoch=" + juce::String(static_cast<juce::int64>(head.currentEpoch))
+                + " retireEpochLtMinReader=" + (head.valid
+                      ? juce::String(head.epochOlderThanMinReader ? 1 : 0) : juce::String("na")));
     }
 
     // ★ 改善③: World Consistency 診断は VerifyDrained では常に実行（タイムアウト有無に依存しない）

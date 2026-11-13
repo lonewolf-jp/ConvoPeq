@@ -555,6 +555,57 @@ public:
         reclaimSuccessCount_.fetch_add(n, std::memory_order_relaxed);
     }
 
+    // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): 診断専用 — 退役キュー先頭 entry と epoch 安全条件。
+    //   reclaim() が削除可否に使う述語（isOlder(entry.epoch, minReaderEpoch)）と同じ式で判定する。
+    //   キューは変更しない（peekHead は POD コピーのみ）。値が取れない場合は valid=false とし、
+    //   推定値は入れない（呼出し側は unavailable と表示する）。
+    struct RetireHeadSnapshot {
+        bool     valid{false};                    // false = 先頭なし / sequence 確認失敗
+        std::uint32_t headSlotIndex{0};           // ★ C3-D: head identity の 1 要素目
+        std::uint32_t headSequence{0};            // ★ C3-D: head identity の 2 要素目
+        uint64_t headEpoch{0};                    // ★ C3-D: head identity の 3 要素目
+        uint64_t minReaderEpoch{0};               // reclaim() に渡すのと同じ値
+        uint64_t currentEpoch{0};
+        DeletionEntryType type{DeletionEntryType::Generic};
+        convo::RetireDomainId domainId{convo::RetireDomainId::Unknown};
+        uint64_t firstScanAgeMs{0};               // 0 = 未走査（firstScanTsNs==0）
+        bool     scanned{false};                  // reclaim 走査で一度でも評価されたか
+        bool     epochOlderThanMinReader{false};  // isOlder(headEpoch, minReaderEpoch)
+    };
+
+    [[nodiscard]] RetireHeadSnapshot inspectRetireHead() const noexcept
+    {
+        RetireHeadSnapshot s;
+        s.minReaderEpoch = getMinReaderEpoch();
+        s.currentEpoch = currentEpoch();
+
+        DeletionEntry e;
+        std::uint32_t slot = 0;
+        std::uint32_t seq = 0;
+        if (!deferredDeletionQueue.peekHead(e, slot, seq))
+            return s;                             // valid=false のまま（推定しない）
+
+        s.valid = true;
+        s.headSlotIndex = slot;                   // identity は 3 要素で保持する
+        s.headSequence = seq;
+        s.headEpoch = e.epoch;
+        s.type = e.type;
+        s.domainId = e.domainId;
+        s.epochOlderThanMinReader = isOlder(e.epoch, s.minReaderEpoch);
+
+        if (e.firstScanTsNs != 0)
+        {
+            s.scanned = true;
+            // DeferredDeletionQueue::steadyNowNs() と同じ steady_clock 基準。
+            const uint64_t nowNs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (nowNs > e.firstScanTsNs)
+                s.firstScanAgeMs = (nowNs - e.firstScanTsNs) / 1'000'000ull;
+        }
+        return s;
+    }
+
     // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
     {

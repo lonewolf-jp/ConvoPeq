@@ -150,7 +150,7 @@ public:
     //   は production caller ゼロのため削除。published-world read は RuntimeStore::current が単一 source。
 
     // ── dash2 §1.4 (REPAIR_PLAN2-dash2): semantic event accounting ──
-    //   外部 setter（setRetireBacklogCount 等）の廃止に伴い、Coordinator は自身のカウンタを
+    //   外部 setter（setRetireAcceptedCount 等）の廃止に伴い、Coordinator は自身のカウンタを
     //   semantic event API で原子的に維持する（fetch_add/fetch_sub・underflow ガード付き）。
     //   呼び出し元（AudioEngine）は setter で絶対値を上書きせず、本イベントで増減のみを通知する。
     //   ⚠️ isFullyDrained の retire/fallback/deferred 判定は AudioEngine 側（Layer 1）が
@@ -169,9 +169,9 @@ public:
     //   production からの絶対値上書きは禁止（コンパイル時参照 = 0 を維持すること）。
     //   ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
     //     setDeferredRetireResidencyCount / setQuarantineResidentCount は削除済み
-    //     （D101-32-C §7 削除境界）。setRetireBacklogCount は Pressure FSM / drain violation
+    //     （D101-32-C §7 削除境界）。setRetireAcceptedCount は Pressure FSM / drain violation
     //     の決定論的テスト駆動のため KEEP（絶対値注入がテストの意味本体）。
-    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY（KEEP — Pressure FSM 駆動）
+    void setRetireAcceptedCount(std::uint64_t count) noexcept;        // TEST-ONLY（KEEP — Pressure FSM 駆動）
     void setPublicationBacklogCount(std::uint64_t count) noexcept;   // TEST-ONLY（dead counter）
     void setPendingIntentCount(std::uint64_t count) noexcept;        // TEST-ONLY
     void escalateAllRetires(RetirePriority minPriority) noexcept;    // ★ Phase5: 全RetireIntent の優先度を底上げ
@@ -188,7 +188,7 @@ public:
     //   process lifetime 累積・reset なし。差分運用。
     [[nodiscard]] std::uint64_t getCoordinatorTakeCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
-    [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getRetireAcceptedCount() const noexcept;
     // ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
     //   getQuarantineResidentCount（Coordinator側）は削除済み（D101-32-C §7 — vestigial counter
     //   の getter も domain 一括で除去）。実在 quarantine DSP は DSPQuarantineManager::residentCount()、
@@ -218,6 +218,30 @@ public:
     }
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
+
+    // ★ AC_DIAG (2026-11-13, Owner 承認 A2): 診断専用 — c9（ShutdownScheduler::isFullyDrained）の
+    //   14 条件の生値。判定式は isFullyDrained() と同一だが、短絡評価をせず全条件を読む。
+    //   isFullyDrained() 自体は変更しない（A2: 複写方式）。将来 isFullyDrained() を変えた場合は
+    //   本構造体と collectDrainBreakdown() も同じ式へ追随させること
+    //   （対応は ISRSemanticValidationTests の AC1 が検出する）。
+    struct DrainBreakdown {
+        bool          swapPending{false};
+        std::uint32_t intentQueue{0};                // intentQueue_.sizeApprox()
+        std::uint32_t observeDeferredRing{0};        // observeDeferredRing_.size()
+        std::uint32_t quarantineFallback{0};         // quarantineFallbackQueue_.sizeApprox()
+        std::uint32_t recoveryIntentQueue{0};        // recoveryIntentQueue_.size()
+        std::uint64_t retireBacklog{0};
+        std::uint64_t publicationBacklog{0};
+        std::uint64_t publicationIntentResidency{0};
+        std::uint64_t pendingIntent{0};
+        std::uint64_t reclaimInFlight{0};
+        std::uint64_t quarantineIntentResidency{0};
+        std::uint64_t quarantineRingResidency{0};
+        bool          recoveryAdmissionPending{false};
+        std::uint64_t liveRecoveryObligation{0};
+    };
+    [[nodiscard]] DrainBreakdown collectDrainBreakdown() const noexcept;
+
     [[nodiscard]] bool isFullyDrained() const noexcept;
     [[nodiscard]] CoordinatorState getState() const noexcept;
     void markTransitionStart() noexcept;
@@ -593,7 +617,7 @@ public:
        void postRecoveryFailureSignal(std::uint64_t obligationId) noexcept;
        void adjudicateRecoveryFailureSignals() noexcept;
 
-       // ★ TEST-ONLY (D152 §7; h:147 setRetireBacklogCount precedent): synchronous compatibility
+       // ★ TEST-ONLY (D152 §7; h:147 setRetireAcceptedCount precedent): synchronous compatibility
        //   wrapper = postRecoveryFailureSignal + immediate adjudicate on the CALLING thread.
        //   Preserves the old "1 observation = 1 adjudicated increment" semantics for the R18/R20/
        //   R21/P2/P3 suites. Production call count of this method MUST remain 0 (D153 V1, grep-enforced).
@@ -932,7 +956,7 @@ private:
     void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr, PublicationEpoch currentEpoch) noexcept;
 
     // ── dash2 §1.4: retire backlog 変更時の pressure slope 検出 + 状態遷移 ──
-    //   setRetireBacklogCount（TEST-ONLY）と onRetireAccepted（production semantic event）が
+    //   setRetireAcceptedCount（TEST-ONLY）と onRetireAccepted（production semantic event）が
     //   共通で使用する。count は更新後の絶対値。slope = count - previous で Pressure 遷移を判定。
     void noteRetireBacklogChanged(std::uint64_t count) noexcept;
 
@@ -980,7 +1004,12 @@ private:
     //   published-world metadata は RuntimeStore::current（RuntimeWorldAuthority）が単一 source。
 
     std::atomic<RejectCode> lastRejectCode_;
-    std::atomic<std::uint64_t> retireBacklogCount_;
+    // ★ 改名 (2026-11-13, Owner 承認): retireBacklogCount_ → retireAcceptedCount_。
+    //   実体は「累積 accepted 数」で残存件数ではない（onRetireAccepted で +1、production の
+    //   減算経路は無い）。drain 判定からは C9-A で除外済みで、pressure の slope 検出にのみ使う。
+    //   注: 更新通知の private ヘルパ noteRetireBacklogChanged と previousRetireBacklogCount_ は
+    //   課題票の変更対象外のため旧名のまま（別途判断）。
+    std::atomic<std::uint64_t> retireAcceptedCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
     // ★ work88 (X5 §6.5): Publish Intent residency 専用 counter（INV-X5-1）。
     //   publicationIntentResidencyCount_ = intentQueue_ 内の Publish Intent 数 + producer
@@ -1001,7 +1030,7 @@ private:
     //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）
     //   - 非対象: Publish と RetireIntent（混入禁止 — P2-1 §1.1.5）。Publish は
     //     enqueuePublicationIntent が reservation を取らない。RetireIntent は
-    //     retireBacklogCount_（setRetireBacklogCount）が担当する。
+    //     retireAcceptedCount_（setRetireAcceptedCount）が担当する。
     //   ★ INV-ISR-02 / Phase 0 #1: This counter excludes Publish and RetireIntent.
     //   - 増分: producer 側 enqueue 成功時（reservation-before-push で push 前に fetchAdd）
     //   - 減分: consumer 側 pop 成功時（processIntent / drainObserveDeferred /
