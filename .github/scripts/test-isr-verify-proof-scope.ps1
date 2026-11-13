@@ -976,6 +976,540 @@ void DebugRuntime::emitHBTrace()
 '@ + $commonTail
 }
 
+# 28) A definition disabled by #if 0 comes first; the active definition has no guard.
+$cases += [PSCustomObject]@{
+    Name     = 'if0-disabled-definition-before-active'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+#if 0
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+#endif
+
+void DebugRuntime::emitCIArtifacts()
+{
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 29) The Release literal is spelled in lower case, so it never matches at runtime.
+$cases += [PSCustomObject]@{
+    Name     = 'release-literal-lowercase'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 30) The guard sits inside a block that never runs.
+$cases += [PSCustomObject]@{
+    Name     = 'nested-release-guard'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (false) {
+        if (mode == "Release" && ! isForceEvidenceEmission()) {
+            return;
+        }
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 31) The trace call is reachable only on the Release path.
+$cases += [PSCustomObject]@{
+    Name     = 'hbtrace-inside-release-block'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    if (mode == "Release") {
+        emitHBTrace();
+    }
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 32) emitHBTrace() keeps the guard but the actual trace emission is gone.
+$cases += [PSCustomObject]@{
+    Name     = 'emittrace-call-missing'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+}
+'@ + $commonTail
+}
+
+# 33) A bad definition under #if 0 must be ignored, not rejected.
+$cases += [PSCustomObject]@{
+    Name     = 'if0-disabled-bad-definition'
+    Expected = 0
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+#if 0
+void DebugRuntime::emitCIArtifacts()
+{
+    emitHBTrace();
+}
+#endif
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 34) A bare compound block around the trace call still runs unconditionally.
+$cases += [PSCustomObject]@{
+    Name     = 'hbtrace-in-bare-block'
+    Expected = 0
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    {
+        emitHBTrace();
+    }
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 35) Two definitions under conditional compilation: which one is active cannot be decided.
+$cases += [PSCustomObject]@{
+    Name     = 'definition-under-conditional-compilation'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+#if defined(CONVOPEQ_ALT_TRACE)
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+#else
+void DebugRuntime::emitCIArtifacts()
+{
+}
+#endif
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 36) The Release guard lives inside an unresolved conditional-compilation block.
+$cases += [PSCustomObject]@{
+    Name     = 'guard-inside-conditional-compilation'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+#if defined(CONVOPEQ_TRACE_GUARD)
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#endif
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 37) The trace call lives inside an unresolved conditional-compilation block.
+$cases += [PSCustomObject]@{
+    Name     = 'hbtrace-inside-conditional-compilation'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#if defined(CONVOPEQ_TRACE)
+    emitHBTrace();
+#endif
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 38) The actual trace emission lives inside an unresolved conditional-compilation block.
+$cases += [PSCustomObject]@{
+    Name     = 'emittrace-inside-conditional-compilation'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#if defined(CONVOPEQ_TRACE)
+    hbTraceRuntime_.emitTrace(path);
+#endif
+}
+'@ + $commonTail
+}
+
+# 39) The violation report call lives inside an unresolved conditional-compilation block.
+$cases += [PSCustomObject]@{
+    Name     = 'violation-report-inside-conditional-compilation'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+
+void DebugRuntime::emitFinalViolationReport()
+{
+#if defined(CONVOPEQ_VIOLATION_REPORT)
+    const auto path = std::filesystem::current_path() / "evidence" / "hb_violation_report.json";
+    hbVerifier_.setTraceRuntime(&hbTraceRuntime_);
+    hbVerifier_.emitViolationReport(path);
+#endif
+}
+} // namespace convo::isr
+'@
+}
+
+# 40) A guard disabled by #if 0 must not count as a guard.
+$cases += [PSCustomObject]@{
+    Name     = 'guard-disabled-by-if0'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+#if 0
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#endif
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 41) A conditional guard next to a valid unconditional guard is still fine.
+$cases += [PSCustomObject]@{
+    Name     = 'conditional-guard-with-unconditional-guard'
+    Expected = 0
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#if defined(CONVOPEQ_EXTRA_GUARD)
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#endif
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 42) Conditional compilation that does not touch the contract items must still pass.
+$cases += [PSCustomObject]@{
+    Name     = 'conditional-compilation-elsewhere'
+    Expected = 0
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+#if defined(CONVOPEQ_TRACE_HELPER)
+std::string traceFileName()
+{
+    return "evidence/hb_graph_trace.json";
+}
+#endif
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
 $failures = 0
 foreach ($case in $cases) {
     if (-not ($case.PSObject.Properties.Name -contains 'MutateExporter')) {

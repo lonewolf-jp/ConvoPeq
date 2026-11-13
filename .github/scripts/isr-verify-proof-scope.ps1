@@ -193,77 +193,352 @@ function Get-MaskedText {
 }
 
 #-----------------------------------------------------------------------------
-# 関数本体を波括弧対応で切り出す。文字列・文字リテラル内の波括弧は数えない。
+# プリプロセッサ条件の走査。`#if 0` などで除外される領域を空白化し、条件次第で
+# 含まれるか決まらない領域は「曖昧」として記録する。
+# 無効化された定義を関数本体として選ばないために使う。
 #-----------------------------------------------------------------------------
-function Get-FunctionSpan {
+function Get-BranchState {
+    param([string]$Condition)
+
+    $c = $Condition.Trim()
+    if ($c -cmatch '^0+\b' -or $c -cmatch '^false\b') { return 'out' }
+    if ($c -cmatch '^1+\b' -or $c -cmatch '^true\b') { return 'in' }
+    return 'unknown'
+}
+
+function Get-PreprocessorRegions {
+    param([string]$Text)
+
+    $disabled = New-Object System.Collections.Generic.List[object]
+    $conditional = New-Object System.Collections.Generic.List[object]
+    if ($Text.Length -eq 0) {
+        return [pscustomobject]@{ Disabled = $disabled; Conditional = $conditional }
+    }
+
+    # 行ごとに a=有効 / d=無効 / c=条件次第 を割り当てる
+    $states = New-Object 'char[]' $Text.Length
+    for ($k = 0; $k -lt $states.Length; $k++) { $states[$k] = [char]'a' }
+
+    $frames = New-Object System.Collections.Generic.List[object]
+    $lineStart = 0
+    while ($lineStart -le $Text.Length) {
+        $nl = $Text.IndexOf("`n", $lineStart)
+        if ($nl -lt 0) { $nl = $Text.Length }
+        $line = $Text.Substring($lineStart, $nl - $lineStart).TrimEnd("`r")
+
+        $lineState = 'a'
+        foreach ($f in $frames) {
+            if ($f.State -eq 'out') { $lineState = 'd'; break }
+            if ($f.State -eq 'unknown') { $lineState = 'c' }
+        }
+        for ($k = $lineStart; $k -lt $nl -and $k -lt $states.Length; $k++) {
+            $states[$k] = [char]$lineState
+        }
+
+        $m = [System.Text.RegularExpressions.Regex]::Match(
+            $line, '^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$')
+        if ($m.Success) {
+            $directive = $m.Groups[1].Value
+            $argument = $m.Groups[2].Value.Trim()
+            if ($directive -ceq 'if') {
+                $state = Get-BranchState -Condition $argument
+                $frame = [pscustomobject]@{ State = $state; Taken = 'none' }
+                if ($state -eq 'in') { $frame.Taken = 'true' }
+                elseif ($state -eq 'unknown') { $frame.Taken = 'unknown' }
+                $frames.Add($frame)
+            }
+            elseif ($directive -ceq 'ifdef' -or $directive -ceq 'ifndef') {
+                $frames.Add([pscustomobject]@{ State = 'unknown'; Taken = 'unknown' })
+            }
+            elseif ($directive -ceq 'elif') {
+                if ($frames.Count -gt 0) {
+                    $frame = $frames[$frames.Count - 1]
+                    if ($frame.Taken -eq 'unknown') { $frame.State = 'unknown' }
+                    elseif ($frame.Taken -eq 'true') { $frame.State = 'out' }
+                    else {
+                        $frame.State = Get-BranchState -Condition $argument
+                        if ($frame.State -eq 'in') { $frame.Taken = 'true' }
+                        elseif ($frame.State -eq 'unknown') { $frame.Taken = 'unknown' }
+                    }
+                }
+            }
+            elseif ($directive -ceq 'else') {
+                if ($frames.Count -gt 0) {
+                    $frame = $frames[$frames.Count - 1]
+                    if ($frame.Taken -eq 'unknown') { $frame.State = 'unknown' }
+                    elseif ($frame.Taken -eq 'true') { $frame.State = 'out' }
+                    else { $frame.State = 'in'; $frame.Taken = 'true' }
+                }
+            }
+            elseif ($directive -ceq 'endif') {
+                if ($frames.Count -gt 0) { $frames.RemoveAt($frames.Count - 1) }
+            }
+        }
+
+        if ($nl -ge $Text.Length) { break }
+        $lineStart = $nl + 1
+    }
+
+    $runState = $states[0]
+    $runStart = 0
+    for ($k = 1; $k -le $states.Length; $k++) {
+        $changed = ($k -ge $states.Length) -or ($states[$k] -ne $runState)
+        if (-not $changed) { continue }
+        if ($runState -ne [char]'a') {
+            $range = [pscustomobject]@{ Start = $runStart; End = $k }
+            if ($runState -eq [char]'d') { $disabled.Add($range) } else { $conditional.Add($range) }
+        }
+        if ($k -lt $states.Length) {
+            $runState = $states[$k]
+            $runStart = $k
+        }
+    }
+
+    return [pscustomobject]@{ Disabled = $disabled; Conditional = $conditional }
+}
+
+# 無効化された領域を空白化する（文字位置は変えない）。
+function Get-EnabledText {
+    param(
+        [string]$Text,
+        $DisabledRanges
+    )
+
+    if ($null -eq $DisabledRanges -or $DisabledRanges.Count -eq 0) { return $Text }
+    return (New-BlankedCopy -Text $Text -Ranges $DisabledRanges)
+}
+
+#-----------------------------------------------------------------------------
+# 関数本体を波括弧対応で切り出す。文字列・文字リテラル内の波括弧は数えない。
+# 同じシグネチャの定義が複数ある場合に備えて、見つかった定義をすべて返す。
+#-----------------------------------------------------------------------------
+function Get-FunctionSpans {
     param(
         [string]$CodeText,
         [string]$Signature
     )
-
-    # 署名は文字列リテラルの中に現れることもあるため、文字列範囲の外の最初の一致を使う。
-    $signatureRanges = (Get-LexicalRanges -Text $CodeText).Strings
-    $m = $null
-    foreach ($candidate in [System.Text.RegularExpressions.Regex]::Matches(
-                 $CodeText, $Signature + '\s*(?:noexcept\s*)?\{')) {
-        $insideString = $false
-        foreach ($r in $signatureRanges) {
-            if ($candidate.Index -ge $r.Start -and $candidate.Index -lt $r.End) { $insideString = $true; break }
-        }
-        if (-not $insideString) { $m = $candidate; break }
-    }
-    if ($null -eq $m) {
-        return $null
-    }
-
-    $openIndex = $CodeText.IndexOf('{', $m.Index + $m.Length - 1)
-    if ($openIndex -lt 0) { return $null }
 
     $stringRanges = (Get-LexicalRanges -Text $CodeText).Strings
     $rangeEnds = @{}
     foreach ($r in $stringRanges) { $rangeEnds[$r.Start] = $r.End }
 
-    $depth = 0
-    $i = $openIndex
-    while ($i -lt $CodeText.Length) {
-        if ($rangeEnds.ContainsKey($i)) {
-            $i = $rangeEnds[$i]
-            continue
+    $spans = @()
+    foreach ($candidate in [System.Text.RegularExpressions.Regex]::Matches(
+                 $CodeText, $Signature + '\s*(?:noexcept\s*)?\{')) {
+
+        # 署名は文字列リテラルの中に現れることもあるため、文字列範囲の外だけを見る。
+        $insideString = $false
+        foreach ($r in $stringRanges) {
+            if ($candidate.Index -ge $r.Start -and $candidate.Index -lt $r.End) { $insideString = $true; break }
         }
-        $ch = $CodeText[$i]
-        if ($ch -eq '{') { $depth++ }
-        elseif ($ch -eq '}') {
-            $depth--
-            if ($depth -eq 0) {
-                return [PSCustomObject]@{ Start = $openIndex; End = $i + 1 }
+        if ($insideString) { continue }
+
+        $openIndex = $CodeText.IndexOf('{', $candidate.Index + $candidate.Length - 1)
+        if ($openIndex -lt 0) { continue }
+
+        $depth = 0
+        $i = $openIndex
+        $end = -1
+        while ($i -lt $CodeText.Length) {
+            if ($rangeEnds.ContainsKey($i)) { $i = $rangeEnds[$i]; continue }
+            $ch = $CodeText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i + 1; break }
             }
+            $i++
         }
-        $i++
+        if ($end -lt 0) { continue }
+
+        $spans += [pscustomobject]@{ SignatureIndex = $candidate.Index; Start = $openIndex; End = $end }
     }
-    return $null
+    return $spans
 }
 
-function Get-FunctionBody {
-    param(
-        [string]$CodeText,
-        [string]$Signature
-    )
-
-    $span = Get-FunctionSpan -CodeText $CodeText -Signature $Signature
-    if ($null -eq $span) { return $null }
-    return $CodeText.Substring($span.Start, $span.End - $span.Start)
-}
-
-function Get-FunctionBodyMasked {
+# 定義が 1 つに定まるときだけ本体を返す。無効化された定義は、呼ぶ前に
+# Get-PreprocessorRegions で空白化しておくこと。条件次第で含まれる定義や、
+# 有効な定義が複数ある場合は Problem に理由を入れて本体を返さない。
+function Resolve-FunctionBody {
     param(
         [string]$CodeText,
         [string]$MaskedText,
+        $ConditionalRanges,
         [string]$Signature
     )
 
-    $span = Get-FunctionSpan -CodeText $CodeText -Signature $Signature
-    if ($null -eq $span) { return $null }
-    return $MaskedText.Substring($span.Start, $span.End - $span.Start)
+    $spans = @(Get-FunctionSpans -CodeText $CodeText -Signature $Signature)
+    if ($spans.Count -eq 0) {
+        return [pscustomobject]@{ Code = $null; Masked = $null; Conditional = @(); Problem = 'notfound' }
+    }
+
+    foreach ($s in $spans) {
+        foreach ($r in $ConditionalRanges) {
+            if ($s.SignatureIndex -ge $r.Start -and $s.SignatureIndex -lt $r.End) {
+                return [pscustomobject]@{ Code = $null; Masked = $null; Conditional = @(); Problem = 'conditional' }
+            }
+        }
+    }
+
+    if ($spans.Count -gt 1) {
+        return [pscustomobject]@{ Code = $null; Masked = $null; Conditional = @(); Problem = 'ambiguous' }
+    }
+
+    $s = $spans[0]
+    $bodyCode = $CodeText.Substring($s.Start, $s.End - $s.Start)
+    $bodyMasked = $MaskedText.Substring($s.Start, $s.End - $s.Start)
+
+    # 本体の内側にある条件コンパイルも記録する。必須のガードや呼び出しがその中に
+    # ある場合、どのビルドで有効かを決められないため呼び出し側で FAIL にする。
+    $bodyConditional = (Get-PreprocessorRegions -Text $bodyCode).Conditional
+
+    return [pscustomobject]@{
+        Code        = $bodyCode
+        Masked      = $bodyMasked
+        Conditional = $bodyConditional
+        Problem     = $null
+    }
+}
+
+# 指定位置が条件コンパイル下（有効・無効を確定できない領域）にあるか。
+function Test-InRanges {
+    param(
+        [int]$Index,
+        $Ranges
+    )
+
+    foreach ($r in $Ranges) {
+        if ($Index -ge $r.Start -and $Index -lt $r.End) { return $true }
+    }
+    return $false
+}
+
+function Add-BodyProblem {
+    param(
+        $Errors,
+        [string]$FunctionName,
+        [string]$Problem
+    )
+
+    if ($Problem -ceq 'notfound') {
+        $Errors.Add("DebugRuntime contract violation: $FunctionName() body not found")
+    }
+    elseif ($Problem -ceq 'conditional') {
+        $Errors.Add("DebugRuntime contract violation: $FunctionName() is defined inside a conditional compilation block; the active definition cannot be determined")
+    }
+    elseif ($Problem -ceq 'ambiguous') {
+        $Errors.Add("DebugRuntime contract violation: $FunctionName() has more than one active definition")
+    }
+}
+
+#-----------------------------------------------------------------------------
+# 波括弧ブロックを列挙し、そのブロックを導入した構文（if / for / else など）を記録する。
+# 条件付きブロックの中でしか実行されない呼び出しを見つけるために使う。
+#-----------------------------------------------------------------------------
+function Get-BraceFrames {
+    param([string]$MaskedBody)
+
+    $frames = New-Object System.Collections.Generic.List[object]
+    $stack = New-Object System.Collections.Generic.List[object]
+    $lastDelimiter = 0
+    $parenDepth = 0
+    for ($i = 0; $i -lt $MaskedBody.Length; $i++) {
+        $ch = $MaskedBody[$i]
+        if ($ch -eq '(') { $parenDepth++; continue }
+        if ($ch -eq ')') { if ($parenDepth -gt 0) { $parenDepth-- }; continue }
+        if ($ch -eq ';' -and $parenDepth -eq 0) { $lastDelimiter = $i; continue }
+
+        if ($ch -eq '{') {
+            $prefix = $MaskedBody.Substring($lastDelimiter, $i - $lastDelimiter)
+            $kind = 'block'
+            if ($prefix -match '(?s)\b(if|else|for|while|switch|do|try|catch)\b[^{}]*$') {
+                $kind = $Matches[1]
+            }
+            $stack.Add([pscustomobject]@{ Start = $i; End = -1; Kind = $kind })
+            $lastDelimiter = $i
+        }
+        elseif ($ch -eq '}') {
+            if ($stack.Count -gt 0) {
+                $frame = $stack[$stack.Count - 1]
+                $frame.End = $i
+                $frames.Add($frame)
+                $stack.RemoveAt($stack.Count - 1)
+            }
+            $lastDelimiter = $i
+        }
+    }
+    return $frames
+}
+
+# 波括弧ブロックを導入した条件式を取り出す。位置は伏せ字版で取り、文字列を残した
+# 本文から切り出す（条件式の中の文字列を比較するため）。
+function Get-FrameCondition {
+    param(
+        [string]$CodeBody,
+        [string]$MaskedBody,
+        [int]$Start
+    )
+
+    $i = $Start - 1
+    while ($i -ge 0 -and [char]::IsWhiteSpace($MaskedBody[$i])) { $i-- }
+    if ($i -lt 0 -or $MaskedBody[$i] -ne ')') { return '' }
+
+    $depth = 0
+    $j = $i
+    while ($j -ge 0) {
+        if ($MaskedBody[$j] -eq ')') { $depth++ }
+        elseif ($MaskedBody[$j] -eq '(') {
+            $depth--
+            if ($depth -eq 0) { break }
+        }
+        $j--
+    }
+    if ($j -lt 0) { return '' }
+    return $CodeBody.Substring($j + 1, $i - $j - 1)
+}
+
+# 指定位置を含み、条件・ループで導入されたブロックを返す（裸のブロックは除く）。
+function Get-ConditionalFramesContaining {
+    param(
+        [string]$CodeBody,
+        [string]$MaskedBody,
+        [int]$Index
+    )
+
+    $result = @()
+    foreach ($f in (Get-BraceFrames -MaskedBody $MaskedBody)) {
+        if ($f.Start -lt $Index -and $f.End -gt $Index -and $f.Kind -cne 'block') {
+            $condition = Get-FrameCondition -CodeBody $CodeBody -MaskedBody $MaskedBody -Start $f.Start
+            $result += [pscustomobject]@{
+                Kind      = $f.Kind
+                Start     = $f.Start
+                End       = $f.End
+                Condition = $condition
+            }
+        }
+    }
+    return $result
+}
+
+# Release でしか成立しない条件か。`mode == "Release"` を含み、強制証跡の抜け道
+# （isForceEvidenceEmission）を持たない条件は、Release 以外では実行されない。
+function Test-ReleaseOnlyCondition {
+    param([string]$Condition)
+
+    if ([string]::IsNullOrWhiteSpace($Condition)) { return $false }
+    $c = $Condition -replace '\s+', ' '
+    if ($c -cnotmatch 'mode\s*==\s*"Release"') { return $false }
+    if ($c -cmatch 'isForceEvidenceEmission') { return $false }
+    return $true
+}
+
+# 定数で偽と書かれた条件か（if (false) / if (0) の中は実行されない）。
+function Test-NeverTrueCondition {
+    param([string]$Condition)
+
+    if ([string]::IsNullOrWhiteSpace($Condition)) { return $false }
+    $c = $Condition.Trim()
+    return ($c -cmatch '^(false|0+)$')
 }
 
 #-----------------------------------------------------------------------------
@@ -279,20 +554,27 @@ function Get-ConditionalReturns {
 
     # 構造（if (...) { return; }）は文字列を伏せた本文で探し、条件式の文字列だけを
     # 元の本文から取り出す。文字列に書かれた偽のガードを拾わないため。
+    # Depth は関数本体の開き波括弧を 1 としたときの深さ。トップレベル文だけを
+    # ガードとして数えるために使う（実行されないブロック内のガードを除く）。
     $results = @()
     $pattern = 'if\s*\((?<cond>[^{};]*?)\)\s*\{\s*return\s*;\s*\}'
     foreach ($m in [System.Text.RegularExpressions.Regex]::Matches($MaskedBody, $pattern)) {
+        $depth = 0
+        for ($k = 0; $k -lt $m.Index; $k++) {
+            if ($MaskedBody[$k] -eq '{') { $depth++ }
+            elseif ($MaskedBody[$k] -eq '}') { $depth-- }
+        }
         $condGroup = $m.Groups['cond']
         $condText = $CodeBody.Substring($condGroup.Index, $condGroup.Length)
         $results += [PSCustomObject]@{
             Condition = $condText
             Index     = $m.Index
+            Depth     = $depth
             Text      = $m.Value
         }
     }
     return $results
 }
-
 function Remove-OuterParens {
     param([string]$Text)
 
@@ -320,6 +602,8 @@ function Remove-OuterParens {
 #   - "||" で結ばれた条件（強制時にも抑制してしまう）
 #   - "!" で全体を反転した条件（!(mode == "Release") など）
 #   - 項が 3 つ以上ある条件
+#   - 文字列リテラルの綴りが違う条件（mode == "release" は実行時に一致しない）
+# 文字列リテラルの比較は大文字小文字を区別する（-ceq / -ccontains）。
 function Test-ReleaseGuardCondition {
     param(
         [string]$Condition,
@@ -333,15 +617,15 @@ function Test-ReleaseGuardCondition {
     $c = $c -replace '!\s*', '! '
     $c = $c.Trim()
 
-    if ($c -match '\|\|') { return $false }
+    if ($c -cmatch '\|\|') { return $false }
 
     if (-not $ForceSwitchExists) {
-        return ((Remove-OuterParens -Text $c) -eq $releaseTerm)
+        return ((Remove-OuterParens -Text $c) -ceq $releaseTerm)
     }
 
     $terms = @($c -split '&&' | ForEach-Object { Remove-OuterParens -Text $_.Trim() })
     if ($terms.Count -ne 2) { return $false }
-    return (($terms -contains $releaseTerm) -and ($terms -contains $forceTerm))
+    return (($terms -ccontains $releaseTerm) -and ($terms -ccontains $forceTerm))
 }
 
 #-----------------------------------------------------------------------------
@@ -364,9 +648,20 @@ function Test-ProofScopeContract {
         return ($errors | ForEach-Object { $_ })
     }
 
-    $exporterCode = Get-CodeText (Get-Content -Path $evidenceExporterPath -Raw -Encoding UTF8)
-    $runtimeCode = Get-CodeText (Get-Content -Path $debugRuntimePath -Raw -Encoding UTF8)
-    $runtimeMasked = Get-MaskedText (Get-Content -Path $debugRuntimePath -Raw -Encoding UTF8)
+    $exporterRaw = Get-Content -Path $evidenceExporterPath -Raw -Encoding UTF8
+    $runtimeRaw = Get-Content -Path $debugRuntimePath -Raw -Encoding UTF8
+
+    # `#if 0` などで無効化された定義を本体として選ばない。条件次第で含まれる定義は、
+    # 有効な定義を決められないため後段で曖昧として扱う。
+    $exporterRegions = Get-PreprocessorRegions -Text $exporterRaw
+    $runtimeRegions = Get-PreprocessorRegions -Text $runtimeRaw
+    $exporterEnabled = Get-EnabledText -Text $exporterRaw -DisabledRanges $exporterRegions.Disabled
+    $runtimeEnabled = Get-EnabledText -Text $runtimeRaw -DisabledRanges $runtimeRegions.Disabled
+
+    $exporterCode = Get-CodeText $exporterEnabled
+    $runtimeCode = Get-CodeText $runtimeEnabled
+    $runtimeMasked = Get-MaskedText $runtimeEnabled
+    $runtimeConditional = $runtimeRegions.Conditional
 
     #--- R25-1: proofLevel の割り当て（Release=off / Debug=partial / それ以外=full）
     if ($exporterCode -notmatch 'if \(mode == "Release"\)\s*\{\s*return "off";\s*\}') {
@@ -393,50 +688,94 @@ function Test-ProofScopeContract {
     #--- R25-3: 強制証跡モード（B-11）の有無
     $hasForceEvidenceSwitch = $runtimeMasked -match 'isForceEvidenceEmission\s*\(\s*\)'
 
-    $emitCIArtifacts = Get-FunctionBody -CodeText $runtimeCode -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
-    $emitCIArtifactsMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
-        -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
-    if ($null -eq $emitCIArtifacts) {
-        $errors.Add("DebugRuntime contract violation: emitCIArtifacts() body not found")
+    $emitCIArtifacts = Resolve-FunctionBody -CodeText $runtimeCode -MaskedText $runtimeMasked `
+        -ConditionalRanges $runtimeConditional -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
+    if ($null -ne $emitCIArtifacts.Problem) {
+        Add-BodyProblem -Errors $errors -FunctionName 'emitCIArtifacts' -Problem $emitCIArtifacts.Problem
     }
     else {
-        $returns = @(Get-ConditionalReturns -CodeBody $emitCIArtifacts -MaskedBody $emitCIArtifactsMasked)
-        $releaseReturns = @($returns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
+        $ciReturns = @(Get-ConditionalReturns -CodeBody $emitCIArtifacts.Code -MaskedBody $emitCIArtifacts.Masked)
+        $ciReleaseAll = @($ciReturns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
+        # 条件コンパイル下のガードは、どのビルドで有効かを決められないため数えない。
+        $ciReleaseFixed = @($ciReleaseAll | Where-Object { -not (Test-InRanges -Index $_.Index -Ranges $emitCIArtifacts.Conditional) })
+        $ciReleaseTop = @($ciReleaseFixed | Where-Object { $_.Depth -eq 1 })
 
-        if ($releaseReturns.Count -eq 0) {
+        if ($ciReleaseAll.Count -eq 0) {
             $errors.Add("DebugRuntime contract violation: Release early-return not found or its condition is wrong in emitCIArtifacts()")
+        }
+        elseif ($ciReleaseFixed.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: the Release early-return of emitCIArtifacts() is inside conditional compilation; the guard cannot be guaranteed")
+        }
+        elseif ($ciReleaseTop.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: the Release early-return of emitCIArtifacts() is nested inside another block; it must be a top-level statement")
         }
 
         # 呼び出しの有無は文字列を伏せた本文で見る（文字列内の "emitHBTrace();" を拾わない）。
-        $traceMatch = [System.Text.RegularExpressions.Regex]::Match($emitCIArtifactsMasked, 'emitHBTrace\s*\(\s*\)\s*;')
-        if (-not $traceMatch.Success) {
+        $traceMatches = @([System.Text.RegularExpressions.Regex]::Matches($emitCIArtifacts.Masked, 'emitHBTrace\s*\(\s*\)\s*;'))
+        $traceFixed = @($traceMatches | Where-Object { -not (Test-InRanges -Index $_.Index -Ranges $emitCIArtifacts.Conditional) })
+        if ($traceMatches.Count -eq 0) {
             $errors.Add("DebugRuntime contract violation: emitCIArtifacts() does not emit the HB trace")
         }
-        elseif ($releaseReturns.Count -gt 0) {
-            $firstReleaseReturn = ($releaseReturns | Sort-Object Index | Select-Object -First 1).Index
-            if ($traceMatch.Index -lt $firstReleaseReturn) {
-                $errors.Add("DebugRuntime contract violation: emitHBTrace() runs before the Release early-return")
+        elseif ($traceFixed.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: emitCIArtifacts() calls emitHBTrace() only inside conditional compilation; CI and Debug paths must call it")
+        }
+        else {
+            $traceMatch = $traceFixed[0]
+            if ($ciReleaseTop.Count -gt 0) {
+                $firstReleaseReturn = ($ciReleaseTop | Sort-Object Index | Select-Object -First 1).Index
+                if ($traceMatch.Index -lt $firstReleaseReturn) {
+                    $errors.Add("DebugRuntime contract violation: emitHBTrace() runs before the Release early-return")
+                }
+            }
+
+            # CI / Debug で必ず実行されること。Release でしか成立しない条件や、
+            # 定数で偽の条件の中でしか呼ばれない場合、Release 以外で trace が出ない。
+            $traceEnclosing = @(Get-ConditionalFramesContaining -CodeBody $emitCIArtifacts.Code `
+                    -MaskedBody $emitCIArtifacts.Masked -Index $traceMatch.Index)
+            $releaseOnly = @($traceEnclosing | Where-Object { Test-ReleaseOnlyCondition -Condition $_.Condition })
+            $neverTrue = @($traceEnclosing | Where-Object { Test-NeverTrueCondition -Condition $_.Condition })
+            if ($releaseOnly.Count -gt 0) {
+                $errors.Add("DebugRuntime contract violation: emitHBTrace() is only reachable inside a Release-only conditional block; CI and Debug paths must call it")
+            }
+            elseif ($neverTrue.Count -gt 0) {
+                $errors.Add("DebugRuntime contract violation: emitHBTrace() is inside a block whose condition is never true")
             }
         }
     }
 
     #--- R25-4: emitHBTrace() 自身の Release 抑制（トレース発行より前にあること）
-    $emitHBTrace = Get-FunctionBody -CodeText $runtimeCode -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
-    $emitHBTraceMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
-        -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
-    if ($null -eq $emitHBTrace) {
-        $errors.Add("DebugRuntime contract violation: emitHBTrace() body not found")
+    $emitHBTrace = Resolve-FunctionBody -CodeText $runtimeCode -MaskedText $runtimeMasked `
+        -ConditionalRanges $runtimeConditional -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
+    if ($null -ne $emitHBTrace.Problem) {
+        Add-BodyProblem -Errors $errors -FunctionName 'emitHBTrace' -Problem $emitHBTrace.Problem
     }
     else {
-        $traceReturns = @(Get-ConditionalReturns -CodeBody $emitHBTrace -MaskedBody $emitHBTraceMasked)
-        $traceReleaseReturns = @($traceReturns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
-        if ($traceReleaseReturns.Count -eq 0) {
+        $traceReturns = @(Get-ConditionalReturns -CodeBody $emitHBTrace.Code -MaskedBody $emitHBTrace.Masked)
+        $traceReleaseAll = @($traceReturns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
+        $traceReleaseFixed = @($traceReleaseAll | Where-Object { -not (Test-InRanges -Index $_.Index -Ranges $emitHBTrace.Conditional) })
+        $traceReleaseTop = @($traceReleaseFixed | Where-Object { $_.Depth -eq 1 })
+
+        if ($traceReleaseAll.Count -eq 0) {
             $errors.Add("DebugRuntime contract violation: emitHBTrace() lost its Release suppression or its condition is wrong")
         }
-        else {
-            $emitMatch = [System.Text.RegularExpressions.Regex]::Match($emitHBTraceMasked, 'emitTrace\s*\(')
-            $firstTraceReturn = ($traceReleaseReturns | Sort-Object Index | Select-Object -First 1).Index
-            if ($emitMatch.Success -and $emitMatch.Index -lt $firstTraceReturn) {
+        elseif ($traceReleaseFixed.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: the Release suppression of emitHBTrace() is inside conditional compilation; the guard cannot be guaranteed")
+        }
+        elseif ($traceReleaseTop.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: the Release suppression of emitHBTrace() is nested inside another block; it must be a top-level statement")
+        }
+
+        $emitMatches = @([System.Text.RegularExpressions.Regex]::Matches($emitHBTrace.Masked, 'emitTrace\s*\('))
+        $emitFixed = @($emitMatches | Where-Object { -not (Test-InRanges -Index $_.Index -Ranges $emitHBTrace.Conditional) })
+        if ($emitMatches.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: emitHBTrace() does not emit the trace")
+        }
+        elseif ($emitFixed.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: emitHBTrace() emits the trace only inside conditional compilation")
+        }
+        elseif ($traceReleaseTop.Count -gt 0) {
+            $firstTraceReturn = ($traceReleaseTop | Sort-Object Index | Select-Object -First 1).Index
+            if ($emitFixed[0].Index -lt $firstTraceReturn) {
                 $errors.Add("DebugRuntime contract violation: emitHBTrace() emits the trace before the Release suppression")
             }
         }
@@ -444,13 +783,20 @@ function Test-ProofScopeContract {
 
     #--- R25-5: A(D1) の最終違反レポート生成。関数本体の中で emitViolationReport を呼ぶこと。
     #   ソース全体の後方一致だと、別関数の呼び出しで PASS してしまうため本体に限定する。
-    $emitFinalMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
-        -Signature 'void\s+DebugRuntime::emitFinalViolationReport\s*\(\s*\)'
-    if ($null -eq $emitFinalMasked) {
-        $errors.Add("DebugRuntime contract violation: emitFinalViolationReport() not found")
+    $emitFinal = Resolve-FunctionBody -CodeText $runtimeCode -MaskedText $runtimeMasked `
+        -ConditionalRanges $runtimeConditional -Signature 'void\s+DebugRuntime::emitFinalViolationReport\s*\(\s*\)'
+    if ($null -ne $emitFinal.Problem) {
+        Add-BodyProblem -Errors $errors -FunctionName 'emitFinalViolationReport' -Problem $emitFinal.Problem
     }
-    elseif ($emitFinalMasked -notmatch 'emitViolationReport\s*\(') {
-        $errors.Add("DebugRuntime contract violation: emitFinalViolationReport() does not emit the violation report")
+    else {
+        $finalMatches = @([System.Text.RegularExpressions.Regex]::Matches($emitFinal.Masked, 'emitViolationReport\s*\('))
+        $finalFixed = @($finalMatches | Where-Object { -not (Test-InRanges -Index $_.Index -Ranges $emitFinal.Conditional) })
+        if ($finalMatches.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: emitFinalViolationReport() does not emit the violation report")
+        }
+        elseif ($finalFixed.Count -eq 0) {
+            $errors.Add("DebugRuntime contract violation: emitFinalViolationReport() emits the violation report only inside conditional compilation")
+        }
     }
 
     return ($errors | ForEach-Object { $_ })
