@@ -321,8 +321,42 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
     const int boundedPollIntervalMs = juce::jlimit(1, 5, pollIntervalMs);
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
+
+    // ★ C3-D (2026-11-13, Owner 承認): 待機ループ内で epoch を前進させてから drain する。
+    //   設計 §2.7: 前進は waitForDrain に限定し、drainDeferredRetireQueues の内部には置かない
+    //   （同関数は shutdown の他 2 経路からも呼ばれるため）。waitForDrain の呼出し元は
+    //   releaseResources の 2 箇所（100ms / 2000ms）だけで、いずれも shutdown 待機経路。
+    //   設計 §2.3/§2.4: 同一 head identity (slot, sequence, epoch) への前進は最大 1 回。
+    //   epoch 前進は minReaderEpoch を変えないため、Reader の安全条件
+    //   （retireEpoch < minReaderEpoch）はそのまま維持される（INV-C3-3 / INV-C3-7）。
+    bool     advancedOnce = false;
+    uint32_t advancedSlot = 0xFFFFFFFFu;
+    uint32_t advancedSequence = 0xFFFFFFFFu;
+    uint64_t advancedEpoch = 0;
+
     while (!isFullyDrained())
     {
+        // (1) epoch 前進（同一 identity につき 1 回だけ）
+        {
+            const auto head = m_epochDomain.inspectRetireHead();
+            if (head.valid && !head.epochOlderThanMinReader)
+            {
+                const bool sameIdentity = advancedOnce
+                    && head.headSlotIndex == advancedSlot
+                    && head.headSequence == advancedSequence
+                    && head.headEpoch == advancedEpoch;
+                if (!sameIdentity)
+                {
+                    (void) advanceRetireEpoch();
+                    advancedSlot = head.headSlotIndex;
+                    advancedSequence = head.headSequence;
+                    advancedEpoch = head.headEpoch;
+                    advancedOnce = true;
+                }
+            }
+        }
+
+        // (2) drain（必ず前進の後）
         drainDeferredRetireQueues(true);
 
         const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;

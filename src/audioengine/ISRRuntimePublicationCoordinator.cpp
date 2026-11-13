@@ -15,7 +15,7 @@ RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     , shutdownScheduler_(*this)
     , priorityScheduler_(*this)
     , lastRejectCode_(RejectCode::None)
-    , retireBacklogCount_(0)
+    , retireAcceptedCount_(0)
     , publicationBacklogCount_(0)
     , pendingIntentCount_(0)
     , reclaimInFlightCount_(0)
@@ -137,9 +137,9 @@ void RuntimeIntentCoordinator::retire(RetireAuthority,
     //   ［本メソッドは入力契約（NonRTWorld・oldWorld 非 null）の検証 + Fault のみを維持］
 
     // ★ dash2 §1.4 (B0-3): 本メソッドは world-retire 時に AudioEngine.Commit.cpp:461 から呼ばれる。
-    //   retireBacklogCount_ はここで増加させない — 元コードは Commit.cpp:481 の setRetireBacklogCount
+    //   retireAcceptedCount_ はここで増加させない — 元コードは Commit.cpp:481 の setRetireAcceptedCount
     //   （lifetime pendingIntentCount スナップショット）で上書きされており、external setter 撤去後は
-    //   retireBacklogCount_ が commit ごとに無制限増加して Layer 2 の isFullyDrained（retireBacklogCount_==0）
+    //   retireAcceptedCount_ が commit ごとに無制限増加して Layer 2 の isFullyDrained（retireAcceptedCount_==0）
     //   がシャットダウンで失敗する回帰を防ぐ。retire バックログの実測判定は Layer 1
     //   （AudioEngine::isFullyDrained）が m_retireRouter->pendingRetireCount() と
     //   worldAuthority_.lifetime().pendingIntentCount() を直接参照する（dash2 §1.4 設計方針）。
@@ -173,8 +173,8 @@ RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
     if (result != RetireEnqueueResult::Success)
         return result;
 
-    // ★ dash2 §1.4 (B0-3): 非原子的 load+setRetireBacklogCount RMW を semantic event に置換。
-    //   （本メソッドは production で未使用 — 将来の retire 経路用。retireBacklogCount_ は
+    // ★ dash2 §1.4 (B0-3): 非原子的 load+setRetireAcceptedCount RMW を semantic event に置換。
+    //   （本メソッドは production で未使用 — 将来の retire 経路用。retireAcceptedCount_ は
     //   onRetireConsumed と対で維持される。Layer 1 が実測で drain 判定するため authoritative ではない。）
     onRetireAccepted();
 
@@ -197,16 +197,16 @@ std::uint64_t RuntimeIntentCoordinator::retireAuthorityCount() const noexcept
 //   違反時は Faulted → Proof 生成不能へ遷移（dash2 §1.4 第三者的レビュー反映 3）。
 void RuntimeIntentCoordinator::onRetireAccepted() noexcept {
     // fetch_add 後（= 更新後の絶対値）を noteRetireBacklogChanged に渡し、pressure slope 検出を共通化。
-    const auto newCount = convo::fetchAddAtomic(retireBacklogCount_,
+    const auto newCount = convo::fetchAddAtomic(retireAcceptedCount_,
                                                 std::uint64_t{1},
                                                 std::memory_order_acq_rel) + std::uint64_t{1};
     noteRetireBacklogChanged(newCount);
 }
 
 void RuntimeIntentCoordinator::onRetireConsumed() noexcept {
-    const auto old = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+    const auto old = convo::consumeAtomic(retireAcceptedCount_, std::memory_order_acquire);
     if (old > 0) {
-        convo::fetchSubAtomic(retireBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        convo::fetchSubAtomic(retireAcceptedCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     } else {
         // underflow 違反（consume と fetch_sub の間の race では old==0 でも他 writer が先に
         // 書いている可能性があるため、ここでは Faulted 化のみ行う。実害のある負方向超過は
@@ -271,8 +271,8 @@ void RuntimeIntentCoordinator::noteRetireBacklogChanged(std::uint64_t count) noe
 }
 
 // ⚠️ TEST-ONLY（dash2 §1.4）: production からの絶対値上書きは禁止。テスト初期化リセットのみ。
-void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(retireBacklogCount_, count, std::memory_order_release);
+void RuntimeIntentCoordinator::setRetireAcceptedCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(retireAcceptedCount_, count, std::memory_order_release);
     noteRetireBacklogChanged(count);
 }
 
@@ -455,8 +455,8 @@ std::uint64_t RuntimeIntentCoordinator::getPendingIntentCount() const noexcept {
     return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimeIntentCoordinator::getRetireBacklogCount() const noexcept {
-    return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+std::uint64_t RuntimeIntentCoordinator::getRetireAcceptedCount() const noexcept {
+    return convo::consumeAtomic(retireAcceptedCount_, std::memory_order_acquire);
 }
 
 // ★ work88 (X6 §6.6): Quarantine transport residency counters（INV-X6-4）。
@@ -474,6 +474,30 @@ std::uint64_t RuntimeIntentCoordinator::getQuarantineRingResidencyCount() const 
 // ★ Phase5: Delegation to ShutdownScheduler
 bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
     return shutdownScheduler_.isFullyDrained();
+}
+
+// ★ AC_DIAG (2026-11-13, Owner 承認 A2): 診断専用 — c9 の 14 条件の生値。
+//   各式は ShutdownScheduler::isFullyDrained()（本ファイル :521-572）と同一。
+//   相違点は短絡評価をしないことだけで、判定結果は変わらない。
+//   isFullyDrained() 側は変更していない（A2）。
+RuntimeIntentCoordinator::DrainBreakdown
+RuntimeIntentCoordinator::collectDrainBreakdown() const noexcept {
+    DrainBreakdown d;
+    d.swapPending = convo::consumeAtomic(swapPending_, std::memory_order_acquire);
+    d.intentQueue = static_cast<std::uint32_t>(intentQueue_.sizeApprox());
+    d.observeDeferredRing = static_cast<std::uint32_t>(observeDeferredRing_.size());
+    d.quarantineFallback = static_cast<std::uint32_t>(quarantineFallbackQueue_.sizeApprox());
+    d.recoveryIntentQueue = static_cast<std::uint32_t>(recoveryIntentQueue_.size());
+    d.retireBacklog = convo::consumeAtomic(retireAcceptedCount_, std::memory_order_acquire);
+    d.publicationBacklog = convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire);
+    d.publicationIntentResidency = convo::consumeAtomic(publicationIntentResidencyCount_, std::memory_order_acquire);
+    d.pendingIntent = convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
+    d.reclaimInFlight = convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
+    d.quarantineIntentResidency = convo::consumeAtomic(quarantineIntentResidencyCount_, std::memory_order_acquire);
+    d.quarantineRingResidency = convo::consumeAtomic(quarantineRingResidencyCount_, std::memory_order_acquire);
+    d.recoveryAdmissionPending = convo::consumeAtomic(recoveryAdmissionPending_, std::memory_order_acquire);
+    d.liveRecoveryObligation = liveLogicalRecoveryObligationCount();
+    return d;
 }
 
 void RuntimeIntentCoordinator::requestShutdown() noexcept {
@@ -534,11 +558,15 @@ bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcep
     //     coordinator state が ShuttingDown へ遷移した後（producer が全て閉じた後）に
     //     isFullyDrained が呼ばれる前提。進行中 producer が居る最中はキューが空でも
     //     新たな Intent が到着し得るため、単独では drain 完了を保証しない。
+    // ★ C9-A (2026-11-13, Owner 承認): retireAcceptedCount_ == 0 の条件を外した。
+    //   この counter は onRetireAccepted() で +1 されるが production に減算経路が無く
+    //   （onRetireConsumed() の呼出し元が 0）、実 backlog を表さない。retire 資源の実測は
+    //   Layer 1（AudioEngine::isFullyDrained の pendingRetireCount）が担う。
+    //   残る条件は 13 個（swapPending の早期 return ＋ 12 個の &&）。
     return coordinator_.intentQueue_.sizeApprox() == 0
         && coordinator_.observeDeferredRing_.size() == 0
         && coordinator_.quarantineFallbackQueue_.sizeApprox() == 0
         && coordinator_.recoveryIntentQueue_.size() == 0
-        && convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
         // ★ work88 (X5 §6.5): Publish Intent residency も独立に == 0 を要求（INV-X5-1）。
         //   queue emptiness と pendingIntentCount_ だけでは Publish 残留（intentQueue_ 内の

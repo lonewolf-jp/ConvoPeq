@@ -1649,6 +1649,15 @@ public:
     // ★ A-2.5: シャットダウン完了条件の監査構造体を収集
     [[nodiscard]] convo::isr::RuntimeDrainAudit collectDrainAudit() noexcept;
 
+    // ★ DRAIN_DIAG (2026-11-13): 診断専用 — pending reclaim の件数。
+    //   isFullyDrained() の条件2（pendingReclaimHandles_.empty()）と同じ mutex で保護して読む。
+    //   値の取得のみで状態は変えない（ロックなしの size() 読み取りは禁止）。
+    [[nodiscard]] std::size_t pendingReclaimHandleCount() const noexcept
+    {
+        const std::lock_guard<std::mutex> lock (pendingReclaimHandlesMutex_);
+        return pendingReclaimHandles_.size();
+    }
+
     // ★ A-1.6: 3系統の隔離を1トランザクションとして実行
     bool quarantineSlot(uint32_t slot, uint64_t generation,
                         convo::isr::QuarantineReason reason) noexcept;
