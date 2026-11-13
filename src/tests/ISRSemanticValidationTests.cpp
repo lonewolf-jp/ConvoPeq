@@ -17,6 +17,7 @@
 #include "audioengine/ISRRuntimeWorldAuthority.h"  // ★ A-1: Authority Adapter
 #include "AudioEngine.h"
 #include "ISRRuntimeSemanticSchema.h"
+#include "DeferredDeletionQueue.h"                 // ★ C3-D: head identity の取得契約テスト
 
 using convo::isr::PublicationSemantic;  // FUTURE-4: world publication fields
 
@@ -328,7 +329,7 @@ namespace {
                        1,
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
     // ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
@@ -364,11 +365,13 @@ namespace {
                        1,
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    coordinator.setRetireBacklogCount(1); // drained 条件を破る
+    // ★ C9-A (2026-11-13): retireBacklog は drain 述語から外れたため、drain 違反は
+    //   残る 13 条件の 1 つ（pendingIntentCount_）で駆動する。
+    coordinator.setRetireAcceptedCount(0);
     coordinator.setPublicationBacklogCount(0);
-    coordinator.setPendingIntentCount(0);
+    coordinator.setPendingIntentCount(1); // drained 条件を破る
     // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
-    //   fresh instance 初期値 0。drain 違反は setRetireBacklogCount(1) のみで駆動。
+    //   fresh instance 初期値 0。drain 違反は setPendingIntentCount(1) で駆動。
     coordinator.setSwapPending(false);
 
     if (coordinator.isFullyDrained())
@@ -396,25 +399,25 @@ namespace {
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
     // slope > threshold で Pressure へ遷移
-    coordinator.setRetireBacklogCount(9);
+    coordinator.setRetireAcceptedCount(9);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 中は normalization しない
     coordinator.setSwapPending(true);
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 解除後、3 window で Ready へ復帰
     coordinator.setSwapPending(false);
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
 
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready;
 }
@@ -434,7 +437,7 @@ namespace {
                        1,
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
     // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
@@ -2594,6 +2597,174 @@ namespace {
     }
 }
 
+// =============================================================================
+// ★ AC_DIAG (2026-11-13, Owner 承認 A2): collectDrainBreakdown() と isFullyDrained() の対応。
+//   isFullyDrained() は変更していない（A2: 複写方式）ため、診断側が判定式から乖離しないことを
+//   ここで固定する。既存 getter を持つ 9 項目は値の一致を、残りは述語の一致を確認する。
+// =============================================================================
+[[nodiscard]] bool testAC1_drainBreakdownMatchesPredicate()
+{
+    auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+
+    auto allDrained = [](const convo::isr::RuntimeIntentCoordinator::DrainBreakdown& b)
+    {
+        return !b.swapPending
+            && b.intentQueue == 0
+            && b.observeDeferredRing == 0
+            && b.quarantineFallback == 0
+            && b.recoveryIntentQueue == 0
+            && b.retireBacklog == 0
+            && b.publicationBacklog == 0
+            && b.publicationIntentResidency == 0
+            && b.pendingIntent == 0
+            && b.reclaimInFlight == 0
+            && b.quarantineIntentResidency == 0
+            && b.quarantineRingResidency == 0
+            && !b.recoveryAdmissionPending
+            && b.liveRecoveryObligation == 0;
+    };
+
+    // (1) 初期状態: 述語は true、内訳はすべて 0。
+    const auto b0 = c->collectDrainBreakdown();
+    if (!c->isFullyDrained()) return false;
+    if (!allDrained(b0)) return false;
+
+    // (2) 既存 getter を持つ 9 項目は値が一致すること。
+    if (b0.swapPending != c->isSwapPending()) return false;
+    if (b0.retireBacklog != c->getRetireAcceptedCount()) return false;
+    if (b0.publicationBacklog != c->getPublicationBacklogCount()) return false;
+    if (b0.publicationIntentResidency != c->getPublicationIntentResidencyCount()) return false;
+    if (b0.pendingIntent != c->getPendingIntentCount()) return false;
+    if (b0.reclaimInFlight != c->getReclaimInFlightCount()) return false;
+    if (b0.quarantineIntentResidency != c->getQuarantineIntentResidencyCount()) return false;
+    if (b0.quarantineRingResidency != c->getQuarantineRingResidencyCount()) return false;
+    if (b0.liveRecoveryObligation != c->liveLogicalRecoveryObligationCount()) return false;
+
+    // (3) Publish Intent を 1 件積むと両者とも「未 drain」で一致し、滞留が内訳に現れる。
+    convo::isr::RuntimeIntentCoordinator::Intent intent{};
+    intent.type = convo::isr::RuntimeIntentCoordinator::IntentType::Publish;
+    intent.sequenceId = 1;
+    if (!c->enqueuePublicationIntent(intent)) return false;
+
+    const auto b1 = c->collectDrainBreakdown();
+    if (c->isFullyDrained()) return false;          // 未 drain のはず
+    if (allDrained(b1)) return false;               // 内訳も同じ結論
+    if (b1.intentQueue == 0 && b1.pendingIntent == 0 && b1.publicationIntentResidency == 0)
+        return false;                               // 滞留が内訳に現れていること
+
+    return true;
+}
+
+// =============================================================================
+// ★ C3-D (2026-11-13, Owner 承認): head identity の取得契約。
+//   identity = (slotIndex, sequence, epoch)。失敗時は out 引数を書かない（推定値を返さない）。
+//   キューは変更しない（peek 後も sizeApprox が変わらず、reclaim が正常に動く）。
+// =============================================================================
+[[nodiscard]] bool testAC2_headIdentity()
+{
+    // DeferredDeletionQueue は約 280 KB（4096 entry + sequences）なのでヒープに置く。
+    auto qStorage = std::make_unique<DeferredDeletionQueue>();
+    auto& q = *qStorage;
+    int a = 0;
+    int b = 0;
+    auto del = [](void* p) noexcept { *static_cast<int*>(p) += 1; };
+
+    // (1) 空キュー: false かつ out 引数は不変（推定値を返さない）
+    {
+        DeletionEntry e{};
+        e.epoch = 999;                                  // sentinel
+        std::uint32_t slot = 0xFFFFFFFFu;
+        std::uint32_t seq = 0xFFFFFFFFu;
+        if (q.peekHead(e, slot, seq)) return false;
+        if (e.epoch != 999 || slot != 0xFFFFFFFFu || seq != 0xFFFFFFFFu) return false;
+    }
+
+    // (2) 2 件 enqueue: 先頭の 3 要素（slot / sequence / epoch）が取れる
+    if (!q.enqueue(&a, del, 10, convo::RetireDomainId::EngineISR)) return false;
+    if (!q.enqueue(&b, del, 11, convo::RetireDomainId::EngineISR)) return false;
+
+    DeletionEntry h1{};
+    std::uint32_t slot1 = 0;
+    std::uint32_t seq1 = 0;
+    if (!q.peekHead(h1, slot1, seq1)) return false;
+    if (h1.epoch != 10) return false;
+    if (slot1 != 0u) return false;                      // dequeuePos=0 → slot 0
+    if (seq1 != 1u) return false;                       // pos + 1
+    if (h1.domainId != convo::RetireDomainId::EngineISR) return false;
+
+    // (3) peek はキューを変えない（反復しても同じ identity・件数不変）
+    for (int i = 0; i < 5; ++i)
+    {
+        DeletionEntry t{};
+        std::uint32_t s = 0;
+        std::uint32_t sq = 0;
+        if (!q.peekHead(t, s, sq)) return false;
+        if (s != slot1 || sq != seq1 || t.epoch != 10) return false;
+    }
+    if (q.sizeApprox() != 2u) return false;
+
+    // (4) 先頭だけ reclaim すると identity が変わる（slot / sequence が進む）
+    if (q.reclaim(11) != 1u) return false;              // epoch 10 < 11 のみ回収
+    DeletionEntry h2{};
+    std::uint32_t slot2 = 0;
+    std::uint32_t seq2 = 0;
+    if (!q.peekHead(h2, slot2, seq2)) return false;
+    if (h2.epoch != 11) return false;
+    if (slot2 == slot1 && seq2 == seq1) return false;   // 同一 identity ではないこと
+
+    // (5) 全回収後は false（空 / sequence 不一致）
+    if (q.reclaim(12) != 1u) return false;
+    {
+        DeletionEntry e{};
+        e.epoch = 777;                                  // sentinel
+        std::uint32_t slot = 0xFFFFFFFFu;
+        std::uint32_t seq = 0xFFFFFFFFu;
+        if (q.peekHead(e, slot, seq)) return false;
+        if (e.epoch != 777 || slot != 0xFFFFFFFFu || seq != 0xFFFFFFFFu) return false;
+    }
+
+    // (6) 副作用なし: deleter は各 1 回だけ走り、キューは空
+    if (a != 1 || b != 1) return false;
+    if (q.sizeApprox() != 0u) return false;
+
+    return true;
+}
+
+// =============================================================================
+// ★ C9-A (2026-11-13, Owner 承認): Coordinator の drain 述語から retireBacklog 条件を外した。
+//   Bootstrapping 側: retireBacklog が非 0 でも、他の 13 条件が成立すれば drained。
+//   Faulted 側: 残した 13 条件のいずれかが非 0 なら Faulted（述語が空になっていない）。
+// =============================================================================
+[[nodiscard]] bool testC9A_retireBacklogDoesNotBlockDrain()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    coordinator.setRetireAcceptedCount(5);   // 旧述語ではこれだけで未 drain になっていた
+    if (!coordinator.isFullyDrained())
+        return false;                        // C9-A: retireBacklog は判定に使わない
+
+    coordinator.requestShutdown();
+    coordinator.markShutdownComplete();
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Bootstrapping;
+}
+
+[[nodiscard]] bool testC9A_faultedWhenOtherConditionSet()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    coordinator.setRetireAcceptedCount(5);   // 除外した条件（これ単独では Faulted にしない）
+    coordinator.setPendingIntentCount(1);   // 残した 13 条件の 1 つを非 0 にする
+
+    if (coordinator.isFullyDrained())
+        return false;
+
+    coordinator.requestShutdown();
+    coordinator.markShutdownComplete();
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
+}
+
 int main()
 {
     try
@@ -2851,6 +3022,20 @@ int main()
         throw std::runtime_error("T3c NT-4: adjudication after terminal resolve must be a no-op (single -1, no exhaustion, drop counted)");
     if (!testT3c_NT5_twoThreadIdentitySafety())
         throw std::runtime_error("T3c NT-5: postSignal/adjudicate/resolve races must preserve identity and liveCount invariants");
+
+    // --- AC_DIAG (2026-11-13, Owner 承認 A2): 診断側 14 条件と isFullyDrained() の対応 ---
+    if (!testAC1_drainBreakdownMatchesPredicate())
+        throw std::runtime_error("AC1: collectDrainBreakdown must match isFullyDrained (A2 copy)");
+
+    // --- C3-D (2026-11-13, Owner 承認): head identity の取得契約 ---
+    if (!testAC2_headIdentity())
+        throw std::runtime_error("AC2: head identity (slot, sequence, epoch) contract failed");
+
+    // --- C9-A (2026-11-13, Owner 承認): drain 述語から retireBacklog を除外 ---
+    if (!testC9A_retireBacklogDoesNotBlockDrain())
+        throw std::runtime_error("C9-A: retireBacklog must not block drain (Bootstrapping side)");
+    if (!testC9A_faultedWhenOtherConditionSet())
+        throw std::runtime_error("C9-A: other non-zero condition must still yield Faulted");
 
     return 0;
     }

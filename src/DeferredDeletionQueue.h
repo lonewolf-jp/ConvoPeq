@@ -274,6 +274,42 @@ public:
         return static_cast<uint32_t>(enq - deq);
     }
 
+    // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): 先頭 entry の読み取り専用スナップショット。
+    //   キューを変更しない（dequeue しない・CAS しない・ロックしない）。POD のコピーのみ。
+    //
+    //   整合性: Vyukov の bounded MPMC では「slot の seq == pos + 1」が
+    //   「producer が書き込みを終えて publish 済み」を意味する（reclaim() の Empty 判定と同じ式）。
+    //   コピー中に slot が解放→再利用されると seq が変わるため、コピー後に seq と dequeuePos を
+    //   読み直し、変化していれば false（＝推定しない）を返す。ABA は 4096 回の周回が必要で、
+    //   shutdown 時（producer join 済み・consumer は 1 本）には成立しない。
+    //
+    //   ★ C3-D (2026-11-13, Owner 承認): head identity の 3 要素を out 引数で返す。
+    //     identity = (slotIndex, sequence, epoch)。slotIndex と sequence は「同じ物理 entry か」の
+    //     判定に使う（epoch だけでは同一性を保証できない）。**失敗時は out 引数を一切書かない**
+    //     （推定値を返さない契約）。epoch/type/domain で identity を代用してはならない。
+    [[nodiscard]] bool peekHead(DeletionEntry& out,
+                                uint32_t& slotIndex,
+                                uint32_t& sequence) const noexcept
+    {
+        const uint32_t pos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
+        const uint32_t idx = pos & kMask;
+        const uint32_t seqBefore = convo::consumeAtomic(sequences[idx], std::memory_order_acquire);
+        if (static_cast<int32_t>(static_cast<uint32_t>(seqBefore - (pos + 1))) != 0)
+            return false;                       // 空、または未 publish
+
+        const DeletionEntry snapshot = ringBuffer[idx];   // POD コピー（ポインタは辿らない）
+
+        const uint32_t seqAfter = convo::consumeAtomic(sequences[idx], std::memory_order_acquire);
+        const uint32_t posAfter = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
+        if (seqAfter != seqBefore || posAfter != pos)
+            return false;                       // コピー中に上書き・破棄された → 値を出さない
+
+        out = snapshot;
+        slotIndex = idx;
+        sequence = seqBefore;
+        return true;
+    }
+
     // ★ P1-7: 最大滞留時間 (us) 追跡
     [[nodiscard]] uint64_t getMaxRetireAgeUs() const noexcept {
         return convo::consumeAtomic(maxRetireAgeUs_, std::memory_order_acquire);
