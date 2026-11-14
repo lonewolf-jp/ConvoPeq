@@ -1000,7 +1000,10 @@ static bool test_T11_CompleteFadeRecords()
     // --- (1) 正常系: D キューが受領する ---
     {
         rec.reset();
-        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        // ★ D8 stack fix (2026-11-14): EpochDomain は約 245 KB。Debug(/Od) は
+        //   スコープごとに別スロットを確保するため、複数をスタックに置くと 1 MB を超える。
+        auto domStorage = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+        auto& dom = *domStorage;
         convo::isr::ISRRetireRouter router(dom);
         convo::SnapshotCoordinator coord(dom);
         coord.setRetireSink(&router);
@@ -1074,7 +1077,9 @@ static bool test_T11_CompleteFadeRecords()
     // --- (2) queue 失敗 → quarantine 移送: 記録が重複しない ---
     {
         rec.reset();
-        FullQueueEpochProvider fdom;
+        // ★ D8 stack fix (2026-11-14): FullQueueEpochProvider も EpochDomain を継承（約 245 KB）。
+        auto fdomStorage = std::make_unique<FullQueueEpochProvider>();
+        auto& fdom = *fdomStorage;
         convo::isr::ISRRetireRouter frouter(fdom);
         convo::SnapshotCoordinator fcoord(fdom);
         fcoord.setRetireSink(&frouter);
@@ -1138,7 +1143,10 @@ static bool test_T12_FinalizeRetiresTargetAndCurrent()
     bool pass = true;
 
     rec.reset();
-    convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+    // ★ D8 stack fix (2026-11-14): EpochDomain は約 245 KB。Debug(/Od) は
+    //   スコープごとに別スロットを確保するため、複数をスタックに置くと 1 MB を超える。
+    auto domStorage = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+    auto& dom = *domStorage;
     convo::isr::ISRRetireRouter router(dom);
     convo::SnapshotCoordinator coord(dom);
     coord.setRetireSink(&router);
@@ -1231,7 +1239,10 @@ static bool test_T13_C2NonRtOnly()
     // --- (1) Non-RT 成功 ---
     {
         rec.reset();
-        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        // ★ D8 stack fix (2026-11-14): EpochDomain は約 245 KB。Debug(/Od) は
+        //   スコープごとに別スロットを確保するため、複数をスタックに置くと 1 MB を超える。
+        auto domStorage = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+        auto& dom = *domStorage;
         convo::isr::ISRRetireRouter router(dom);
         convo::SnapshotCoordinator coord(dom);
         coord.setRetireSink(&router);
@@ -1273,7 +1284,9 @@ static bool test_T13_C2NonRtOnly()
     // --- (2) Q 移送 ---
     {
         rec.reset();
-        FullQueueEpochProvider fdom;
+        // ★ D8 stack fix (2026-11-14): FullQueueEpochProvider も EpochDomain を継承（約 245 KB）。
+        auto fdomStorage = std::make_unique<FullQueueEpochProvider>();
+        auto& fdom = *fdomStorage;
         convo::isr::ISRRetireRouter router(fdom);
         convo::SnapshotCoordinator coord(fdom);
         coord.setRetireSink(&router);
@@ -1315,7 +1328,9 @@ static bool test_T13_C2NonRtOnly()
     // --- (3) Q 満杯 → E ---
     {
         rec.reset();
-        FullQueueEpochProvider fdom;
+        // ★ D8 stack fix (2026-11-14): FullQueueEpochProvider も EpochDomain を継承（約 245 KB）。
+        auto fdomStorage = std::make_unique<FullQueueEpochProvider>();
+        auto& fdom = *fdomStorage;
         convo::isr::ISRRetireRouter router(fdom);
         convo::SnapshotCoordinator coord(fdom);
         coord.setRetireSink(&router);
@@ -1343,7 +1358,9 @@ static bool test_T13_C2NonRtOnly()
     // --- (4) Q/E 満杯 → T ---
     {
         rec.reset();
-        FullQueueEpochProvider fdom;
+        // ★ D8 stack fix (2026-11-14): FullQueueEpochProvider も EpochDomain を継承（約 245 KB）。
+        auto fdomStorage = std::make_unique<FullQueueEpochProvider>();
+        auto& fdom = *fdomStorage;
         convo::isr::ISRRetireRouter router(fdom);
         convo::SnapshotCoordinator coord(fdom);
         coord.setRetireSink(&router);
@@ -1378,7 +1395,10 @@ static bool test_T13_C2NonRtOnly()
     // --- (5) RT 違反: 状態を変更しない ---
     {
         rec.reset();
-        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        // ★ D8 stack fix (2026-11-14): EpochDomain は約 245 KB。Debug(/Od) は
+        //   スコープごとに別スロットを確保するため、複数をスタックに置くと 1 MB を超える。
+        auto domStorage = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+        auto& dom = *domStorage;
         convo::isr::ISRRetireRouter router(dom);
         convo::SnapshotCoordinator coord(dom);
         coord.setRetireSink(&router);
