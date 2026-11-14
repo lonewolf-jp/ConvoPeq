@@ -61,38 +61,38 @@ if (-not [regex]::IsMatch($cppText, 'if \(boundary != RuntimeBoundary::NonRTWorl
 }
 
 # ★ work93 refresh (dash2 §1.4 同期): 现行 accounting contract —
-#   retire() は retireBacklogCount_ を直接増やさない（元 setRetireBacklogCount 上書き設計の
+#   retire() は retireAcceptedCount_ を直接増やさない（元 setRetireAcceptedCount 上書き設計の
 #   commit 毎無制限増加回帰を防止。retire の実測判定は Layer 1 が pendingRetireCount +
 #   pendingIntentCount を直参照）。accounting の本体は semantic event 対
 #   onRetireAccepted()（fetch_add + noteRetireBacklogChanged）/ onRetireConsumed()
-#   （old>0 underflow guard + fetch_sub、違反時 Faulted）。setRetireBacklogCount は
+#   （old>0 underflow guard + fetch_sub、違反時 Faulted）。setRetireAcceptedCount は
 #   TEST-ONLY（production 絶対値上書き禁止）。旧条項「retire must update backlog through
-#   setRetireBacklogCount(backlog+1)」は c8ca439b (08-11) 時点形で 3b43a35d (09-10) の
+#   setRetireAcceptedCount(backlog+1)」は c8ca439b (08-11) 時点形で 3b43a35d (09-10) の
 #   意図的再設計が未反映 → 検査側を现行契约へ同期（production code は変更しない）。
 $retireFn = [regex]::Match($cppText, 'void RuntimeIntentCoordinator::retire\([^{]*\{[\s\S]*?\n\}')
 if (-not $retireFn.Success) {
     $violations.Add('retire(...) definition not found for backlog contract check')
-} elseif ([regex]::IsMatch($retireFn.Value, 'fetchAddAtomic\(retireBacklogCount_')) {
-    $violations.Add('retire must NOT increment retireBacklogCount_ directly (dash2 §1.4: accounting via onRetireAccepted/onRetireConsumed)')
+} elseif ([regex]::IsMatch($retireFn.Value, 'fetchAddAtomic\(retireAcceptedCount_')) {
+    $violations.Add('retire must NOT increment retireAcceptedCount_ directly (dash2 §1.4: accounting via onRetireAccepted/onRetireConsumed)')
 }
-if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::onRetireAccepted\(\) noexcept \{[\s\S]*?fetchAddAtomic\(retireBacklogCount_')) {
-    $violations.Add('onRetireAccepted must account backlog via fetchAddAtomic(retireBacklogCount_ ...) (dash2 §1.4)')
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::onRetireAccepted\(\) noexcept \{[\s\S]*?fetchAddAtomic\(retireAcceptedCount_')) {
+    $violations.Add('onRetireAccepted must account backlog via fetchAddAtomic(retireAcceptedCount_ ...) (dash2 §1.4)')
 }
-if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::onRetireConsumed\(\) noexcept \{[\s\S]*?if \(old > 0\)[\s\S]*?fetchSubAtomic\(retireBacklogCount_')) {
-    $violations.Add('onRetireConsumed must guard underflow (old > 0) before fetchSubAtomic(retireBacklogCount_ ...) (dash2 §1.4)')
+if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::onRetireConsumed\(\) noexcept \{[\s\S]*?if \(old > 0\)[\s\S]*?fetchSubAtomic\(retireAcceptedCount_')) {
+    $violations.Add('onRetireConsumed must guard underflow (old > 0) before fetchSubAtomic(retireAcceptedCount_ ...) (dash2 §1.4)')
 }
-if (-not [regex]::IsMatch($cppText, 'TEST-ONLY[\s\S]{0,160}void RuntimeIntentCoordinator::setRetireBacklogCount')) {
-    $violations.Add('setRetireBacklogCount must remain TEST-ONLY marked (dash2 §1.4: production absolute-value overwrite prohibited)')
+if (-not [regex]::IsMatch($cppText, 'TEST-ONLY[\s\S]{0,160}void RuntimeIntentCoordinator::setRetireAcceptedCount')) {
+    $violations.Add('setRetireAcceptedCount must remain TEST-ONLY marked (dash2 §1.4: production absolute-value overwrite prohibited)')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(backlog > 0\) \{\s*convo::publishAtomic\(state_, CoordinatorState::Pressure') -and
     -not [regex]::IsMatch($cppText, 'if \(slope > kPressureSlopeThreshold\) \{\s*convo::publishAtomic\(pressureNormalizedWindows_, static_cast<std::uint32_t>\(0\), std::memory_order_release\);\s*convo::publishAtomic\(state_, CoordinatorState::Pressure')) {
-    $violations.Add('retire/setRetireBacklogCount must transition to Pressure on configured pressure signal (backlog or slope threshold)')
+    $violations.Add('retire/setRetireAcceptedCount must transition to Pressure on configured pressure signal (backlog or slope threshold)')
 }
 
 if (-not [regex]::IsMatch($cppText, 'if \(state == CoordinatorState::Pressure \|\| state == CoordinatorState::Publishing\) \{[\s\S]*?CoordinatorState::Ready') -and
     -not [regex]::IsMatch($cppText, 'if \(state == CoordinatorState::Pressure\) \{[\s\S]*?if \(nextWindow < kPressureNormalizeWindows\) \{\s*return;\s*\}[\s\S]*?CoordinatorState::Ready')) {
-    $violations.Add('setRetireBacklogCount must restore Ready when pressure is normalized and swap is not pending')
+    $violations.Add('setRetireAcceptedCount must restore Ready when pressure is normalized and swap is not pending')
 }
 
 if (-not [regex]::IsMatch($cppText, 'void RuntimeIntentCoordinator::markTransitionStart\(\) noexcept \{[\s\S]*?CoordinatorState::Transitioning')) {

@@ -1408,7 +1408,7 @@ $retirePressureScriptText.Contains('isr_v73_retire_pressure_report_v1') -and
 $retirePressureScriptText.Contains('CI-RETIREPRESS-001') -and
 $retirePressureScriptText.Contains('CI-RETIREPRESS-005') -and
 $retirePressureScriptText.Contains('deferredDeleteFallbackQueue') -and
-$retirePressureScriptText.Contains('setRetireBacklogCount') -and
+$retirePressureScriptText.Contains('setRetireAcceptedCount') -and
 $retirePressureScriptText.Contains('drainDeferredRetireQueues')
 if (-not $retirePressureNeedsContracts) {
     throw 'v7.3 retire pressure verifier missing required contract checks'
