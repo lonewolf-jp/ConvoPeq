@@ -9,8 +9,9 @@
 // 測定条件（実装準備仕様 §3.3）:
 //   48 kHz、IR 0.5 / 1.0 / 3.0 秒、block 64〜32768、インパルス入力、
 //   誤差はピーク整合後の max|out - ir|（倍精度）。
-//   CPU は Add+Get の壁時計時間 ÷ 処理音声秒数（5 回の中央値）。
 //   メモリは SetImpulse 前後の PrivateUsage 差分（1 インスタンス）。
+//   CPU（RES-F）は仕様 §3.3 の基準構成が MSVC Release x64 のため、このテストでは判定しない。
+//   Release 専用の TailLayerPerfTests が「ウォームアップ除外・5 回の中央値」で評価する。
 //
 // 出力: [PASS]/[FAIL] 行（受入 ID ごと）と測定値。FAIL は exit 1（fail-closed）。
 //============================================================================
@@ -38,7 +39,9 @@ constexpr double kPi         = 3.14159265358979323846;
 constexpr double kReconTolerance   = 1.0e-10; // F-1
 constexpr double kTailEnergyTolDb  = 0.1;     // F-2 / H-1
 constexpr double kWindowRatio      = 0.5;     // F-3
-constexpr double kCpuLimitMsPerSec = 10.0;    // §3.3
+// CPU 許容値（10 ms/s）は Release 専用の TailLayerPerfTests が判定に使う。値は変更しない。
+// このテストでは CPU を判定しないが、閾値がここから消えないよう定数は残す。
+[[maybe_unused]] constexpr double kCpuLimitMsPerSec = 10.0;    // §3.3
 constexpr double kMemLimitMB       = 32.0;    // §3.3
 
 int gFailures = 0;
@@ -47,6 +50,13 @@ void report (const char* id, bool ok, const std::string& detail)
 {
     std::printf ("[%s] %s %s\n", ok ? "PASS" : "FAIL", id, detail.c_str());
     if (! ok) ++gFailures;
+}
+
+// ★ RES-F の CPU 判定は Release 専用の TailLayerPerfTests が行う（仕様 §3.3 の基準構成は
+//   MSVC Release x64）。ここでは判定せず、SKIP として明示する。PASS と表示してはならない。
+void reportSkip (const char* id, const std::string& detail)
+{
+    std::printf ("[SKIP] %s %s\n", id, detail.c_str());
 }
 
 std::string fmt (const char* format, ...)
@@ -256,9 +266,11 @@ void checkF (const std::vector<double>& ir, int block)
             fmt ("block=%d ir=%d tailDelta=%.3f dB", block, irLen, r.tailEnergyDeltaDb));
     report ("F-3", r.minWindowRatio >= kWindowRatio,
             fmt ("block=%d ir=%d minWindowRatio=%.3f", block, irLen, r.minWindowRatio));
-    report ("RES-F", r.cpuMsPerAudioSec <= kCpuLimitMsPerSec && r.memDeltaMB <= kMemLimitMB,
-            fmt ("block=%d ir=%d cpu=%.3f ms/s mem=%.2f MB", block, irLen,
-                 r.cpuMsPerAudioSec, r.memDeltaMB));
+    report ("RES-M", r.memDeltaMB <= kMemLimitMB,
+            fmt ("block=%d ir=%d mem=%.2f MB", block, irLen, r.memDeltaMB));
+    reportSkip ("RES-F-cpu",
+                fmt ("block=%d ir=%d cpu_diag=%.3f ms/s (RES-F CPU is evaluated by "
+                     "TailLayerPerfTests in Release)", block, irLen, r.cpuMsPerAudioSec));
 }
 
 void checkH (int block, double baselineDb, double tolDb, const char* id)

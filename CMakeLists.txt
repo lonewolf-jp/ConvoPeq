@@ -1438,6 +1438,68 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(DEFINED ENV{IPPROOT})
         target_include_directories(TailLayerIntegrityTests SYSTEM PRIVATE "$ENV{IPPROOT}/include")
     endif()
+
+    #------------------------------------------------------------
+    # ★ RES-F: CPU 性能予算の Release 専用テスト（実装準備仕様 §3.3）
+    #   基準構成が MSVC Release x64 のため、CTest には Release 構成でのみ登録する。
+    #   Debug では登録されない（＝評価していないことが ctest 一覧から判別できる）。
+    #   1 サンプルあたり最低 5 音声秒、ウォームアップ 1 回を除外した 5 回の中央値、
+    #   外乱検出（壁時計 / プロセス CPU 時間比）付き。閾値は 10 ms/s・32 MB で変更しない。
+    #------------------------------------------------------------
+    juce_add_console_app(TailLayerPerfTests)
+    target_sources(TailLayerPerfTests PRIVATE
+        src/tests/TailLayerPerfTests.cpp
+        src/MKLNonUniformConvolver.cpp
+        src/FFTBackend.cpp
+        src/FFTExecutionContext.cpp
+    )
+    target_include_directories(TailLayerPerfTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(TailLayerPerfTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(TailLayerPerfTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TailLayerPerfTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(TailLayerPerfTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TailLayerPerfTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    if(TARGET IPP::ippcore)
+        target_link_libraries(TailLayerPerfTests PRIVATE IPP::ippcore IPP::ipps)
+    endif()
+    target_link_libraries(TailLayerPerfTests PRIVATE r8brain Psapi)
+    # Release 構成のみ登録する（Debug / RelWithDebInfo では実行しない）。
+    add_test(NAME TailLayerPerfTests COMMAND TailLayerPerfTests CONFIGURATIONS Release)
+    # 性能測定は他テストと同時に走らせない（仕様 §3.3「他プロセスの負荷を排除」）。
+    set_tests_properties(TailLayerPerfTests PROPERTIES RUN_SERIAL TRUE LABELS "perf")
+    juce_generate_juce_header(TailLayerPerfTests)
+    target_link_libraries(TailLayerPerfTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+    if(DEFINED ENV{IPPROOT})
+        target_include_directories(TailLayerPerfTests SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    endif()
 endif()
 
 #------------------------------------------------------------
