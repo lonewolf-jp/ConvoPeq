@@ -704,12 +704,30 @@ void AudioEngine::releaseResources()
         const std::uint64_t c8TerminalReclaim = (m_retireRouter != nullptr)
             ? static_cast<std::uint64_t>(m_retireRouter->terminalReclaimResidentCount()) : 0u;
         const std::size_t c2PendingReclaim = pendingReclaimHandleCount();
-        const bool c9BridgeDrained = runtimePublicationBridge_.isFullyDrained();
 
         // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): c9 の 14 条件と、退役キュー先頭の epoch 安全条件。
         //   A2: isFullyDrained() は変更せず、同じ式を診断側（collectDrainBreakdown）に複写している。
         //   head は peekHead が sequence を前後で確認できたときだけ present になる。
         const auto c9 = runtimePublicationBridge_.collectDrainBreakdown();
+        // ★ CI-SHUTDOWN-006 (2026-11-14): 診断のために isFullyDrained() の callsite を増やさない。
+        //   policy は runtimePublicationBridge_.isFullyDrained() を AudioEngine.Threading.cpp の
+        //   単一 drain authority に限定している（ReleaseResources から呼ぶと second authority）。
+        //   総合判定は、上で取得済みの collectDrainBreakdown() から述語と同じ 13 条件で求める。
+        //   retireBacklog は C9-A (2026-11-13) で述語から外れているため含めない（診断表示のみ）。
+        const bool c9BridgeDrained =
+            !c9.swapPending
+            && c9.intentQueue == 0
+            && c9.observeDeferredRing == 0
+            && c9.quarantineFallback == 0
+            && c9.recoveryIntentQueue == 0
+            && c9.publicationBacklog == 0
+            && c9.publicationIntentResidency == 0
+            && c9.pendingIntent == 0
+            && c9.reclaimInFlight == 0
+            && c9.quarantineIntentResidency == 0
+            && c9.quarantineRingResidency == 0
+            && !c9.recoveryAdmissionPending
+            && c9.liveRecoveryObligation == 0;
         const auto head = m_epochDomain.inspectRetireHead();
         auto u64OrNa = [](bool ok, juce::uint64 v)
         {
