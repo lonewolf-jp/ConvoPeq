@@ -479,7 +479,8 @@ bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
 // ★ AC_DIAG (2026-11-13, Owner 承認 A2): 診断専用 — c9 の 14 条件の生値。
 //   各式は ShutdownScheduler::isFullyDrained()（本ファイル :521-572）と同一。
 //   相違点は短絡評価をしないことだけで、判定結果は変わらない。
-//   isFullyDrained() 側は変更していない（A2）。
+//   C9-A (2026-11-13) で述語から retireAcceptedCount_ == 0 を外したため、述語は 13 条件。
+//   retireBacklog は内訳には残すが、判定には使わない（診断表示専用）。
 RuntimeIntentCoordinator::DrainBreakdown
 RuntimeIntentCoordinator::collectDrainBreakdown() const noexcept {
     DrainBreakdown d;
