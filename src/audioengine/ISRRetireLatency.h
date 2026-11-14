@@ -7,6 +7,7 @@
 #include <limits>
 #include <vector>
 
+#include "AtomicAccess.h"                 // ★ atomic 直接 dot-call を廃止（convo::*Atomic 経由）
 #include "../core/RetireDomain.h"   // ★ domain tag (v2.9): ドメイン別集計
 
 
@@ -77,7 +78,7 @@ public:
             return 0;
 
         // 終了処理（drainAll 以降）の要求は測定対象外として別集計する
-        if (shutdownPhase_.load (std::memory_order_acquire))
+        if (convo::consumeAtomic (shutdownPhase_, std::memory_order_acquire))
         {
             addCount (postShutdown_);
             addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
@@ -96,10 +97,10 @@ public:
         // 同じポインタの再 enqueue（リトライ段階）では既存の要求を再利用する。
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            const std::uint8_t state = slots_[i].state.load (std::memory_order_acquire);
+            const std::uint8_t state = convo::consumeAtomic (slots_[i].state, std::memory_order_acquire);
 
             if (state != kStateFree
-                && slots_[i].object.load (std::memory_order_acquire) == object)
+                && convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) == object)
             {
                 // 既存記録。作成フラグは false のまま。未確定の最小 reader 情報だけ補完する
                 //   （既知の情報は上書きしない）。
@@ -118,9 +119,9 @@ public:
         {
             std::uint8_t expected = kStateFree;
 
-            if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed))
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed))
             {
                 continue;
             }
@@ -132,7 +133,7 @@ public:
             slots_[i].epoch.store (epoch, std::memory_order_relaxed);
             slots_[i].minReaderEpoch.store (minReaderEpoch, std::memory_order_relaxed);
             slots_[i].minReaderSlot.store (minReaderSlot, std::memory_order_relaxed);
-            slots_[i].state.store (kStateReady, std::memory_order_release);
+            convo::publishAtomic (slots_[i].state, kStateReady, std::memory_order_release);
 
             addCount (requests_);
 
@@ -157,7 +158,7 @@ public:
         if (object == nullptr)
             return 0;
 
-        if (shutdownPhase_.load (std::memory_order_acquire))
+        if (convo::consumeAtomic (shutdownPhase_, std::memory_order_acquire))
         {
             addCount (postShutdown_);
             addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
@@ -181,9 +182,9 @@ public:
         {
             std::uint8_t expected = kStateFree;
 
-            if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed))
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed))
             {
                 continue;
             }
@@ -195,10 +196,10 @@ public:
             slots_[i].epoch.store (epoch, std::memory_order_relaxed);
             slots_[i].minReaderEpoch.store (minReaderEpoch, std::memory_order_relaxed);
             slots_[i].minReaderSlot.store (0xFFFFFFFFu, std::memory_order_relaxed);
-            slots_[i].state.store (kStateReady, std::memory_order_release);
+            convo::publishAtomic (slots_[i].state, kStateReady, std::memory_order_release);
 
             addCount (requests_);
-            rtRequests_.fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (rtRequests_, 1u, std::memory_order_acq_rel);
 
             if (created != nullptr)
                 *created = true;
@@ -219,10 +220,10 @@ public:
 
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
                 continue;
 
-            if (slots_[i].object.load (std::memory_order_acquire) != object)
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
                 continue;
 
             if (slots_[i].id.load (std::memory_order_relaxed) != requestId)
@@ -230,9 +231,9 @@ public:
 
             std::uint8_t expected = kStateReady;
 
-            if (slots_[i].state.compare_exchange_strong (expected, kStateFree,
-                                                         std::memory_order_acq_rel,
-                                                         std::memory_order_acquire))
+            if (convo::compareExchangeAtomic (slots_[i].state, expected, kStateFree,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
             {
                 addCount (cancelled_);
             }
@@ -253,10 +254,10 @@ public:
 
         for (std::size_t i = begin; i < end; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
                 continue;
 
-            if (slots_[i].object.load (std::memory_order_acquire) != object)
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
                 continue;
 
             if (slots_[i].id.load (std::memory_order_relaxed) != requestId)
@@ -264,9 +265,9 @@ public:
 
             std::uint8_t expected = kStateReady;
 
-            if (slots_[i].state.compare_exchange_strong (expected, kStateFree,
-                                                         std::memory_order_acq_rel,
-                                                         std::memory_order_acquire))
+            if (convo::compareExchangeAtomic (slots_[i].state, expected, kStateFree,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
             {
                 addCount (cancelled_);
             }
@@ -282,7 +283,7 @@ public:
 
         if (claim (object, index))
         {
-            slots_[index].state.store (kStateFree, std::memory_order_release);
+            convo::publishAtomic (slots_[index].state, kStateFree, std::memory_order_release);
             addCount (cancelled_);
         }
     }
@@ -295,18 +296,18 @@ public:
 
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
                 continue;
 
-            if (slots_[i].object.load (std::memory_order_acquire) != object)
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
                 continue;
 
             const std::uint64_t now = nowNs();
             std::uint64_t expected = 0;
 
-            slots_[i].safeTsNs.compare_exchange_strong (expected, now,
-                                                        std::memory_order_acq_rel,
-                                                        std::memory_order_relaxed);
+            convo::compareExchangeAtomic (slots_[i].safeTsNs, expected, now,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_relaxed);
             return;
         }
     }
@@ -318,7 +319,7 @@ public:
                          std::uint64_t firstScanTsNs = 0, bool providerAbsent = false) noexcept
     {
         // ★ W-2: shutdown 相以降の完了を要求拒否数とは別に数える
-        if (shutdownPhase_.load (std::memory_order_acquire))
+        if (convo::consumeAtomic (shutdownPhase_, std::memory_order_acquire))
             addCount (postShutdownCompletions_);
 
         std::size_t index = 0;
@@ -335,7 +336,7 @@ public:
         const std::uint64_t epoch = slots_[index].epoch.load (std::memory_order_relaxed);
         const std::uint64_t minReaderEpoch = slots_[index].minReaderEpoch.load (std::memory_order_relaxed);
         const std::uint32_t minReaderSlot = slots_[index].minReaderSlot.load (std::memory_order_relaxed);
-        slots_[index].state.store (kStateFree, std::memory_order_release);
+        convo::publishAtomic (slots_[index].state, kStateFree, std::memory_order_release);
 
         const std::uint64_t now = nowNs();
         const std::uint64_t latency = (now >= ts) ? (now - ts) : 0u;
@@ -348,16 +349,16 @@ public:
         {
             const std::uint64_t ebrNs = safeTs - ts;
             const std::uint64_t execNs = (now >= safeTs) ? (now - safeTs) : 0u;
-            ebrCount_.fetch_add (1u, std::memory_order_acq_rel);
-            ebrSumNs_.fetch_add (ebrNs, std::memory_order_acq_rel);
-            execCount_.fetch_add (1u, std::memory_order_acq_rel);
-            execSumNs_.fetch_add (execNs, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (ebrCount_, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (ebrSumNs_, ebrNs, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (execCount_, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (execSumNs_, execNs, std::memory_order_acq_rel);
             updateMax (ebrMaxNs_, ebrNs);
             updateMax (execMaxNs_, execNs);
         }
         else
         {
-            unobservedSafe_.fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (unobservedSafe_, 1u, std::memory_order_acq_rel);
         }
 
         // ★ 段階③ (2026-11-11, Owner 承認): 3 分類の計算と集計
@@ -376,17 +377,17 @@ public:
         if (cls.excluded)
         {
             if (pathIndex < kPathCount)
-                classExcluded_[pathIndex].fetch_add (1u, std::memory_order_acq_rel);
-            classExcludedTotal_.fetch_add (1u, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (classExcluded_[pathIndex], 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classExcludedTotal_, 1u, std::memory_order_acq_rel);
         }
         else if (cls.inconsistent)
         {
-            classConsistencyErrors_.fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classConsistencyErrors_, 1u, std::memory_order_acq_rel);
             accumulateUnclassified (pathIndex, cls.unclassifiedNs);
         }
         else if (cls.classified)
         {
-            classClassifiedTotal_.fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classClassifiedTotal_, 1u, std::memory_order_acq_rel);
             accumulateComponent (driverCount_[pathIndex], driverSumNs_[pathIndex],
                                  driverMaxNs_[pathIndex], driverOver_[pathIndex], cls.driverWaitNs);
             accumulateComponent (ebrCountC_[pathIndex], ebrSumNsC_[pathIndex],
@@ -589,36 +590,36 @@ public:
     {
         StageStats s;
         s.valid = true;
-        s.requests = requests_.load (std::memory_order_acquire);
-        s.completions = completions_.load (std::memory_order_acquire);
-        s.unmatchedCompletions = unmatchedCompletions_.load (std::memory_order_acquire);
-        s.overflow = overflow_.load (std::memory_order_acquire);
-        s.idExhausted = idExhausted_.load (std::memory_order_acquire);
-        s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
-        s.postShutdownCompletions = postShutdownCompletions_.load (std::memory_order_acquire);
-        s.recordMisses = recordMisses_.load (std::memory_order_acquire);
-        s.ebrCount = ebrCount_.load (std::memory_order_acquire);
-        s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
-        s.ebrMaxNs = ebrMaxNs_.load (std::memory_order_acquire);
-        s.execCount = execCount_.load (std::memory_order_acquire);
-        s.execSumNs = execSumNs_.load (std::memory_order_acquire);
-        s.execMaxNs = execMaxNs_.load (std::memory_order_acquire);
-        s.unobservedSafe = unobservedSafe_.load (std::memory_order_acquire);
-        s.rtRequests = rtRequests_.load (std::memory_order_acquire);
+        s.requests = convo::consumeAtomic (requests_, std::memory_order_acquire);
+        s.completions = convo::consumeAtomic (completions_, std::memory_order_acquire);
+        s.unmatchedCompletions = convo::consumeAtomic (unmatchedCompletions_, std::memory_order_acquire);
+        s.overflow = convo::consumeAtomic (overflow_, std::memory_order_acquire);
+        s.idExhausted = convo::consumeAtomic (idExhausted_, std::memory_order_acquire);
+        s.postShutdownRequests = convo::consumeAtomic (postShutdown_, std::memory_order_acquire);
+        s.postShutdownCompletions = convo::consumeAtomic (postShutdownCompletions_, std::memory_order_acquire);
+        s.recordMisses = convo::consumeAtomic (recordMisses_, std::memory_order_acquire);
+        s.ebrCount = convo::consumeAtomic (ebrCount_, std::memory_order_acquire);
+        s.ebrSumNs = convo::consumeAtomic (ebrSumNs_, std::memory_order_acquire);
+        s.ebrMaxNs = convo::consumeAtomic (ebrMaxNs_, std::memory_order_acquire);
+        s.execCount = convo::consumeAtomic (execCount_, std::memory_order_acquire);
+        s.execSumNs = convo::consumeAtomic (execSumNs_, std::memory_order_acquire);
+        s.execMaxNs = convo::consumeAtomic (execMaxNs_, std::memory_order_acquire);
+        s.unobservedSafe = convo::consumeAtomic (unobservedSafe_, std::memory_order_acquire);
+        s.rtRequests = convo::consumeAtomic (rtRequests_, std::memory_order_acquire);
         s.pending = (s.requests > s.completions) ? (s.requests - s.completions) : 0;
 
         for (std::size_t p = 0; p < kPathCount; ++p)
         {
-            s.paths[p].count = pathCount_[p].load (std::memory_order_acquire);
-            s.paths[p].overThreshold = pathOver_[p].load (std::memory_order_acquire);
-            s.paths[p].maxNs = pathMaxNs_[p].load (std::memory_order_acquire);
+            s.paths[p].count = convo::consumeAtomic (pathCount_[p], std::memory_order_acquire);
+            s.paths[p].overThreshold = convo::consumeAtomic (pathOver_[p], std::memory_order_acquire);
+            s.paths[p].maxNs = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
         }
 
         std::size_t slot = 0;
-        const std::size_t current = runtimeStageSlot_.load (std::memory_order_acquire);
+        const std::size_t current = convo::consumeAtomic (runtimeStageSlot_, std::memory_order_acquire);
         slot = (current == 0u) ? 1u : 0u;
         runtimeStage_[slot] = s;
-        runtimeStageSlot_.store (static_cast<std::size_t> (slot + 1u), std::memory_order_release);
+        convo::publishAtomic (runtimeStageSlot_, static_cast<std::size_t> (slot + 1u), std::memory_order_release);
     }
 
     // ★ W-2 (2026-11-10): 違反レポート生成時点（final 段）の累積値を保持する。
@@ -649,7 +650,7 @@ public:
             st.paths[p] = s.paths[p];
 
         finalStage_ = st;
-        finalStageValid_.store (true, std::memory_order_release);
+        convo::publishAtomic (finalStageValid_, true, std::memory_order_release);
     }
 
     StageStats finalStage() const noexcept
@@ -658,7 +659,7 @@ public:
     }
 
     StageStats runtimeStage() const noexcept
-    {        const std::size_t marker = runtimeStageSlot_.load (std::memory_order_acquire);
+    {        const std::size_t marker = convo::consumeAtomic (runtimeStageSlot_, std::memory_order_acquire);
 
         if (marker == 0u)
             return StageStats{};
@@ -669,35 +670,35 @@ public:
     Snapshot snapshot() const
     {
         Snapshot s;
-        s.requests = requests_.load (std::memory_order_acquire);
-        s.completions = completions_.load (std::memory_order_acquire);
-        s.unmatchedCompletions = unmatchedCompletions_.load (std::memory_order_acquire);
-        s.overflow = overflow_.load (std::memory_order_acquire);
-        s.idExhausted = idExhausted_.load (std::memory_order_acquire);
-        s.cancelled = cancelled_.load (std::memory_order_acquire);
-        s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
-        s.postShutdownCompletions = postShutdownCompletions_.load (std::memory_order_acquire);
-        s.recordMisses = recordMisses_.load (std::memory_order_acquire);
-        s.ebrCount = ebrCount_.load (std::memory_order_acquire);
-        s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
-        s.ebrMaxNs = ebrMaxNs_.load (std::memory_order_acquire);
-        s.execCount = execCount_.load (std::memory_order_acquire);
-        s.execSumNs = execSumNs_.load (std::memory_order_acquire);
-        s.execMaxNs = execMaxNs_.load (std::memory_order_acquire);
-        s.unobservedSafe = unobservedSafe_.load (std::memory_order_acquire);
-        s.rtRequests = rtRequests_.load (std::memory_order_acquire);
+        s.requests = convo::consumeAtomic (requests_, std::memory_order_acquire);
+        s.completions = convo::consumeAtomic (completions_, std::memory_order_acquire);
+        s.unmatchedCompletions = convo::consumeAtomic (unmatchedCompletions_, std::memory_order_acquire);
+        s.overflow = convo::consumeAtomic (overflow_, std::memory_order_acquire);
+        s.idExhausted = convo::consumeAtomic (idExhausted_, std::memory_order_acquire);
+        s.cancelled = convo::consumeAtomic (cancelled_, std::memory_order_acquire);
+        s.postShutdownRequests = convo::consumeAtomic (postShutdown_, std::memory_order_acquire);
+        s.postShutdownCompletions = convo::consumeAtomic (postShutdownCompletions_, std::memory_order_acquire);
+        s.recordMisses = convo::consumeAtomic (recordMisses_, std::memory_order_acquire);
+        s.ebrCount = convo::consumeAtomic (ebrCount_, std::memory_order_acquire);
+        s.ebrSumNs = convo::consumeAtomic (ebrSumNs_, std::memory_order_acquire);
+        s.ebrMaxNs = convo::consumeAtomic (ebrMaxNs_, std::memory_order_acquire);
+        s.execCount = convo::consumeAtomic (execCount_, std::memory_order_acquire);
+        s.execSumNs = convo::consumeAtomic (execSumNs_, std::memory_order_acquire);
+        s.execMaxNs = convo::consumeAtomic (execMaxNs_, std::memory_order_acquire);
+        s.unobservedSafe = convo::consumeAtomic (unobservedSafe_, std::memory_order_acquire);
+        s.rtRequests = convo::consumeAtomic (rtRequests_, std::memory_order_acquire);
 
         for (std::size_t p = 0; p < kPathCount; ++p)
         {
-            s.paths[p].count = pathCount_[p].load (std::memory_order_acquire);
-            s.paths[p].overThreshold = pathOver_[p].load (std::memory_order_acquire);
-            s.paths[p].maxNs = pathMaxNs_[p].load (std::memory_order_acquire);
+            s.paths[p].count = convo::consumeAtomic (pathCount_[p], std::memory_order_acquire);
+            s.paths[p].overThreshold = convo::consumeAtomic (pathOver_[p], std::memory_order_acquire);
+            s.paths[p].maxNs = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
         }
 
         // 未完了の要求（診断用に先頭 8 件だけ）
         for (std::size_t i = 0; i < kSlots && s.pending.size() < 8; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
                 continue;
 
             Observation o;
@@ -708,7 +709,7 @@ public:
             s.pending.push_back (o);
         }
 
-        const std::uint64_t written = observationCount_.load (std::memory_order_acquire);
+        const std::uint64_t written = convo::consumeAtomic (observationCount_, std::memory_order_acquire);
         const std::uint64_t limit = written < kObservationCapacity ? written : kObservationCapacity;
 
         for (std::uint64_t i = 0; i < limit; ++i)
@@ -725,29 +726,29 @@ public:
         for (std::size_t p = 0; p < kPathCount; ++p)
         {
             auto& cp = s.classifiedPaths[p];
-            cp.driverWait.count = driverCount_[p].load (std::memory_order_acquire);
-            cp.driverWait.sumNs = driverSumNs_[p].load (std::memory_order_acquire);
-            cp.driverWait.maxNs = driverMaxNs_[p].load (std::memory_order_acquire);
-            cp.driverWait.overThreshold = driverOver_[p].load (std::memory_order_acquire);
-            cp.ebrWait.count = ebrCountC_[p].load (std::memory_order_acquire);
-            cp.ebrWait.sumNs = ebrSumNsC_[p].load (std::memory_order_acquire);
-            cp.ebrWait.maxNs = ebrMaxNsC_[p].load (std::memory_order_acquire);
-            cp.ebrWait.overThreshold = ebrOverC_[p].load (std::memory_order_acquire);
-            cp.execWait.count = execCountC_[p].load (std::memory_order_acquire);
-            cp.execWait.sumNs = execSumNsC_[p].load (std::memory_order_acquire);
-            cp.execWait.maxNs = execMaxNsC_[p].load (std::memory_order_acquire);
-            cp.execWait.overThreshold = execOverC_[p].load (std::memory_order_acquire);
-            cp.unclassifiedCount = classUnclassifiedCount_[p].load (std::memory_order_acquire);
-            cp.unclassifiedSumNs = classUnclassifiedSumNs_[p].load (std::memory_order_acquire);
-            cp.excludedCount = classExcluded_[p].load (std::memory_order_acquire);
+            cp.driverWait.count = convo::consumeAtomic (driverCount_[p], std::memory_order_acquire);
+            cp.driverWait.sumNs = convo::consumeAtomic (driverSumNs_[p], std::memory_order_acquire);
+            cp.driverWait.maxNs = convo::consumeAtomic (driverMaxNs_[p], std::memory_order_acquire);
+            cp.driverWait.overThreshold = convo::consumeAtomic (driverOver_[p], std::memory_order_acquire);
+            cp.ebrWait.count = convo::consumeAtomic (ebrCountC_[p], std::memory_order_acquire);
+            cp.ebrWait.sumNs = convo::consumeAtomic (ebrSumNsC_[p], std::memory_order_acquire);
+            cp.ebrWait.maxNs = convo::consumeAtomic (ebrMaxNsC_[p], std::memory_order_acquire);
+            cp.ebrWait.overThreshold = convo::consumeAtomic (ebrOverC_[p], std::memory_order_acquire);
+            cp.execWait.count = convo::consumeAtomic (execCountC_[p], std::memory_order_acquire);
+            cp.execWait.sumNs = convo::consumeAtomic (execSumNsC_[p], std::memory_order_acquire);
+            cp.execWait.maxNs = convo::consumeAtomic (execMaxNsC_[p], std::memory_order_acquire);
+            cp.execWait.overThreshold = convo::consumeAtomic (execOverC_[p], std::memory_order_acquire);
+            cp.unclassifiedCount = convo::consumeAtomic (classUnclassifiedCount_[p], std::memory_order_acquire);
+            cp.unclassifiedSumNs = convo::consumeAtomic (classUnclassifiedSumNs_[p], std::memory_order_acquire);
+            cp.excludedCount = convo::consumeAtomic (classExcluded_[p], std::memory_order_acquire);
         }
 
         s.classTotals.requests = s.requests;
         s.classTotals.completions = s.completions;
-        s.classTotals.classified = classClassifiedTotal_.load (std::memory_order_acquire);
-        s.classTotals.unclassified = classUnclassifiedTotal_.load (std::memory_order_acquire);
-        s.classTotals.excluded = classExcludedTotal_.load (std::memory_order_acquire);
-        s.classTotals.consistencyErrors = classConsistencyErrors_.load (std::memory_order_acquire);
+        s.classTotals.classified = convo::consumeAtomic (classClassifiedTotal_, std::memory_order_acquire);
+        s.classTotals.unclassified = convo::consumeAtomic (classUnclassifiedTotal_, std::memory_order_acquire);
+        s.classTotals.excluded = convo::consumeAtomic (classExcludedTotal_, std::memory_order_acquire);
+        s.classTotals.consistencyErrors = convo::consumeAtomic (classConsistencyErrors_, std::memory_order_acquire);
         s.classTotals.pending = (s.requests > s.completions) ? (s.requests - s.completions) : 0;
 
         // ★ domain tag (v2.9 §5.1): 4 ドメイン分を常に埋める（0 件でも省略しない）
@@ -755,40 +756,40 @@ public:
         {
             auto& ds = s.domains[d];
             const auto& t = domainTotals_[d];
-            ds.count = t.count.load (std::memory_order_acquire);
-            ds.classified = t.classified.load (std::memory_order_acquire);
-            ds.unclassified = t.unclassified.load (std::memory_order_acquire);
-            ds.excluded = t.excluded.load (std::memory_order_acquire);
-            ds.consistencyErrors = t.consistencyErrors.load (std::memory_order_acquire);
-            ds.sumNs = t.sumNs.load (std::memory_order_acquire);
-            ds.maxNs = t.maxNs.load (std::memory_order_acquire);
-            ds.overThreshold = t.overThreshold.load (std::memory_order_acquire);
+            ds.count = convo::consumeAtomic (t.count, std::memory_order_acquire);
+            ds.classified = convo::consumeAtomic (t.classified, std::memory_order_acquire);
+            ds.unclassified = convo::consumeAtomic (t.unclassified, std::memory_order_acquire);
+            ds.excluded = convo::consumeAtomic (t.excluded, std::memory_order_acquire);
+            ds.consistencyErrors = convo::consumeAtomic (t.consistencyErrors, std::memory_order_acquire);
+            ds.sumNs = convo::consumeAtomic (t.sumNs, std::memory_order_acquire);
+            ds.maxNs = convo::consumeAtomic (t.maxNs, std::memory_order_acquire);
+            ds.overThreshold = convo::consumeAtomic (t.overThreshold, std::memory_order_acquire);
 
             for (std::size_t p = 0; p < kPathCount; ++p)
             {
                 const auto& dp = domainPaths_[d][p];
                 auto& cp = ds.paths[p];
-                cp.driverWait.count = dp.driverCount.load (std::memory_order_acquire);
-                cp.driverWait.sumNs = dp.driverSum.load (std::memory_order_acquire);
-                cp.driverWait.maxNs = dp.driverMax.load (std::memory_order_acquire);
-                cp.driverWait.overThreshold = dp.driverOver.load (std::memory_order_acquire);
-                cp.ebrWait.count = dp.ebrCount.load (std::memory_order_acquire);
-                cp.ebrWait.sumNs = dp.ebrSum.load (std::memory_order_acquire);
-                cp.ebrWait.maxNs = dp.ebrMax.load (std::memory_order_acquire);
-                cp.ebrWait.overThreshold = dp.ebrOver.load (std::memory_order_acquire);
-                cp.execWait.count = dp.execCount.load (std::memory_order_acquire);
-                cp.execWait.sumNs = dp.execSum.load (std::memory_order_acquire);
-                cp.execWait.maxNs = dp.execMax.load (std::memory_order_acquire);
-                cp.execWait.overThreshold = dp.execOver.load (std::memory_order_acquire);
-                cp.unclassifiedCount = dp.unclassifiedCount.load (std::memory_order_acquire);
-                cp.unclassifiedSumNs = dp.unclassifiedSum.load (std::memory_order_acquire);
-                cp.excludedCount = dp.excluded.load (std::memory_order_acquire);
+                cp.driverWait.count = convo::consumeAtomic (dp.driverCount, std::memory_order_acquire);
+                cp.driverWait.sumNs = convo::consumeAtomic (dp.driverSum, std::memory_order_acquire);
+                cp.driverWait.maxNs = convo::consumeAtomic (dp.driverMax, std::memory_order_acquire);
+                cp.driverWait.overThreshold = convo::consumeAtomic (dp.driverOver, std::memory_order_acquire);
+                cp.ebrWait.count = convo::consumeAtomic (dp.ebrCount, std::memory_order_acquire);
+                cp.ebrWait.sumNs = convo::consumeAtomic (dp.ebrSum, std::memory_order_acquire);
+                cp.ebrWait.maxNs = convo::consumeAtomic (dp.ebrMax, std::memory_order_acquire);
+                cp.ebrWait.overThreshold = convo::consumeAtomic (dp.ebrOver, std::memory_order_acquire);
+                cp.execWait.count = convo::consumeAtomic (dp.execCount, std::memory_order_acquire);
+                cp.execWait.sumNs = convo::consumeAtomic (dp.execSum, std::memory_order_acquire);
+                cp.execWait.maxNs = convo::consumeAtomic (dp.execMax, std::memory_order_acquire);
+                cp.execWait.overThreshold = convo::consumeAtomic (dp.execOver, std::memory_order_acquire);
+                cp.unclassifiedCount = convo::consumeAtomic (dp.unclassifiedCount, std::memory_order_acquire);
+                cp.unclassifiedSumNs = convo::consumeAtomic (dp.unclassifiedSum, std::memory_order_acquire);
+                cp.excludedCount = convo::consumeAtomic (dp.excluded, std::memory_order_acquire);
             }
         }
 
-        s.stampMissing = domainStampMissing_.load (std::memory_order_acquire);
-        s.providerUnknown = domainProviderUnknown_.load (std::memory_order_acquire);
-        s.providerAbsent = domainProviderAbsent_.load (std::memory_order_acquire);
+        s.stampMissing = convo::consumeAtomic (domainStampMissing_, std::memory_order_acquire);
+        s.providerUnknown = convo::consumeAtomic (domainProviderUnknown_, std::memory_order_acquire);
+        s.providerAbsent = convo::consumeAtomic (domainProviderAbsent_, std::memory_order_acquire);
 
         return s;
     }
@@ -797,21 +798,26 @@ public:
     void markShutdownPhase() noexcept
     {
         captureRuntimeStage();   // ★ 最終 drain 直前の状態を保存する
-        shutdownPhase_.store (true, std::memory_order_release);
+        convo::publishAtomic (shutdownPhase_, true, std::memory_order_release);
     }
 
+    // ★ 呼び出し契約: reset() は「誰も記録・参照していない静止状態」からのみ呼ぶ。
+    //   本番の呼び出しは AudioEngine の ctor（initialize() 前・オーディオコールバック登録前）だけで、
+    //   テストでは各テストの初期化で 1 回。RT スレッドやワーカーが動いている間に呼ぶと、
+    //   記録系と同じスロット・カウンタへ並行アクセスするため、オーダーの強弱に関係なく競合になる。
+    //   カウンタの初期化は release で行い、読み手は acquire で観測する（同時実行を前提にしない）。
     void reset() noexcept
     {
-        shutdownPhase_.store (false, std::memory_order_release);
+        convo::publishAtomic (shutdownPhase_, false, std::memory_order_release);
         runtimeStage_[0] = StageStats{};
         runtimeStage_[1] = StageStats{};
-        runtimeStageSlot_.store (0, std::memory_order_release);
-        postShutdown_.store (0, std::memory_order_release);
-        postShutdownCompletions_.store (0, std::memory_order_release);
-        recordMisses_.store (0, std::memory_order_release);
+        convo::publishAtomic (runtimeStageSlot_, 0, std::memory_order_release);
+        convo::publishAtomic (postShutdown_, 0, std::memory_order_release);
+        convo::publishAtomic (postShutdownCompletions_, 0, std::memory_order_release);
+        convo::publishAtomic (recordMisses_, 0, std::memory_order_release);
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            slots_[i].state.store (kStateFree, std::memory_order_release);
+            convo::publishAtomic (slots_[i].state, kStateFree, std::memory_order_release);
             slots_[i].object.store (nullptr, std::memory_order_relaxed);
             slots_[i].id.store (0, std::memory_order_relaxed);
             slots_[i].tsNs.store (0, std::memory_order_relaxed);
@@ -821,74 +827,74 @@ public:
         for (std::size_t i = 0; i < kObservationCapacity; ++i)
             observations_[i] = Observation{0, 0, 0, 0xFFu};
 
-        requests_.store (0, std::memory_order_release);
-        completions_.store (0, std::memory_order_release);
-        unmatchedCompletions_.store (0, std::memory_order_release);
-        overflow_.store (0, std::memory_order_release);
-        idExhausted_.store (0, std::memory_order_release);
-        cancelled_.store (0, std::memory_order_release);
-        observationCount_.store (0, std::memory_order_release);
-        nextId_.store (0, std::memory_order_release);
-        nextRange_.store (0, std::memory_order_release);
-        ebrCount_.store (0, std::memory_order_release);
-        ebrSumNs_.store (0, std::memory_order_release);
-        ebrMaxNs_.store (0, std::memory_order_release);
-        execCount_.store (0, std::memory_order_release);
-        execSumNs_.store (0, std::memory_order_release);
-        execMaxNs_.store (0, std::memory_order_release);
-        unobservedSafe_.store (0, std::memory_order_release);
-        rtRequests_.store (0, std::memory_order_release);
+        convo::publishAtomic (requests_, 0, std::memory_order_release);
+        convo::publishAtomic (completions_, 0, std::memory_order_release);
+        convo::publishAtomic (unmatchedCompletions_, 0, std::memory_order_release);
+        convo::publishAtomic (overflow_, 0, std::memory_order_release);
+        convo::publishAtomic (idExhausted_, 0, std::memory_order_release);
+        convo::publishAtomic (cancelled_, 0, std::memory_order_release);
+        convo::publishAtomic (observationCount_, 0, std::memory_order_release);
+        convo::publishAtomic (nextId_, 0, std::memory_order_release);
+        convo::publishAtomic (nextRange_, 0, std::memory_order_release);
+        convo::publishAtomic (ebrCount_, 0, std::memory_order_release);
+        convo::publishAtomic (ebrSumNs_, 0, std::memory_order_release);
+        convo::publishAtomic (ebrMaxNs_, 0, std::memory_order_release);
+        convo::publishAtomic (execCount_, 0, std::memory_order_release);
+        convo::publishAtomic (execSumNs_, 0, std::memory_order_release);
+        convo::publishAtomic (execMaxNs_, 0, std::memory_order_release);
+        convo::publishAtomic (unobservedSafe_, 0, std::memory_order_release);
+        convo::publishAtomic (rtRequests_, 0, std::memory_order_release);
 
         for (std::size_t p = 0; p < kPathCount; ++p)
         {
-            pathCount_[p].store (0, std::memory_order_release);
-            pathOver_[p].store (0, std::memory_order_release);
-            pathMaxNs_[p].store (0, std::memory_order_release);
-            driverCount_[p].store (0, std::memory_order_release);
-            driverSumNs_[p].store (0, std::memory_order_release);
-            driverMaxNs_[p].store (0, std::memory_order_release);
-            driverOver_[p].store (0, std::memory_order_release);
-            ebrCountC_[p].store (0, std::memory_order_release);
-            ebrSumNsC_[p].store (0, std::memory_order_release);
-            ebrMaxNsC_[p].store (0, std::memory_order_release);
-            ebrOverC_[p].store (0, std::memory_order_release);
-            execCountC_[p].store (0, std::memory_order_release);
-            execSumNsC_[p].store (0, std::memory_order_release);
-            execMaxNsC_[p].store (0, std::memory_order_release);
-            execOverC_[p].store (0, std::memory_order_release);
-            classUnclassifiedCount_[p].store (0, std::memory_order_release);
-            classUnclassifiedSumNs_[p].store (0, std::memory_order_release);
-            classExcluded_[p].store (0, std::memory_order_release);
+            convo::publishAtomic (pathCount_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathOver_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathMaxNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverCount_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverSumNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverMaxNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverOver_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrCountC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrSumNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrMaxNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrOverC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execCountC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execSumNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execMaxNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execOverC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (classUnclassifiedCount_[p], 0, std::memory_order_release);
+            convo::publishAtomic (classUnclassifiedSumNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (classExcluded_[p], 0, std::memory_order_release);
         }
-        classClassifiedTotal_.store (0, std::memory_order_release);
-        classUnclassifiedTotal_.store (0, std::memory_order_release);
-        classUnclassifiedSumTotal_.store (0, std::memory_order_release);
-        classExcludedTotal_.store (0, std::memory_order_release);
-        classConsistencyErrors_.store (0, std::memory_order_release);
+        convo::publishAtomic (classClassifiedTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classUnclassifiedTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classUnclassifiedSumTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classExcludedTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classConsistencyErrors_, 0, std::memory_order_release);
 
         // ★ domain tag: ドメイン別の集計も初期化する
         for (std::size_t d = 0; d < static_cast<std::size_t> (kRetireDomainCount); ++d)
         {
             auto& t = domainTotals_[d];
-            t.count.store (0); t.classified.store (0); t.unclassified.store (0);
-            t.excluded.store (0); t.consistencyErrors.store (0);
-            t.sumNs.store (0); t.maxNs.store (0); t.overThreshold.store (0);
+            convo::publishAtomic (t.count, 0); convo::publishAtomic (t.classified, 0); convo::publishAtomic (t.unclassified, 0);
+            convo::publishAtomic (t.excluded, 0); convo::publishAtomic (t.consistencyErrors, 0);
+            convo::publishAtomic (t.sumNs, 0); convo::publishAtomic (t.maxNs, 0); convo::publishAtomic (t.overThreshold, 0);
             for (std::size_t p = 0; p < kPathCount; ++p)
             {
                 auto& dp = domainPaths_[d][p];
-                dp.driverCount.store (0); dp.driverSum.store (0);
-                dp.driverMax.store (0); dp.driverOver.store (0);
-                dp.ebrCount.store (0); dp.ebrSum.store (0);
-                dp.ebrMax.store (0); dp.ebrOver.store (0);
-                dp.execCount.store (0); dp.execSum.store (0);
-                dp.execMax.store (0); dp.execOver.store (0);
-                dp.unclassifiedCount.store (0); dp.unclassifiedSum.store (0);
-                dp.excluded.store (0);
+                convo::publishAtomic (dp.driverCount, 0); convo::publishAtomic (dp.driverSum, 0);
+                convo::publishAtomic (dp.driverMax, 0); convo::publishAtomic (dp.driverOver, 0);
+                convo::publishAtomic (dp.ebrCount, 0); convo::publishAtomic (dp.ebrSum, 0);
+                convo::publishAtomic (dp.ebrMax, 0); convo::publishAtomic (dp.ebrOver, 0);
+                convo::publishAtomic (dp.execCount, 0); convo::publishAtomic (dp.execSum, 0);
+                convo::publishAtomic (dp.execMax, 0); convo::publishAtomic (dp.execOver, 0);
+                convo::publishAtomic (dp.unclassifiedCount, 0); convo::publishAtomic (dp.unclassifiedSum, 0);
+                convo::publishAtomic (dp.excluded, 0);
             }
         }
-        domainStampMissing_.store (0, std::memory_order_release);
-        domainProviderUnknown_.store (0, std::memory_order_release);
-        domainProviderAbsent_.store (0, std::memory_order_release);
+        convo::publishAtomic (domainStampMissing_, 0, std::memory_order_release);
+        convo::publishAtomic (domainProviderUnknown_, 0, std::memory_order_release);
+        convo::publishAtomic (domainProviderAbsent_, 0, std::memory_order_release);
     }
 
 private:
@@ -940,7 +946,7 @@ private:
 
         auto& t = domainTotals_[domainIdx];
         addCount (t.count);
-        t.sumNs.fetch_add (latency, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (t.sumNs, latency, std::memory_order_acq_rel);
         updateMax (t.maxNs, latency);
         if (latency > kThresholdNs)
             addCount (t.overThreshold);
@@ -959,8 +965,8 @@ private:
         {
             addCount (t.consistencyErrors);
             addCount (t.unclassified);
-            dp.unclassifiedCount.fetch_add (1u, std::memory_order_acq_rel);
-            dp.unclassifiedSum.fetch_add (cls.unclassifiedNs, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (dp.unclassifiedCount, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (dp.unclassifiedSum, cls.unclassifiedNs, std::memory_order_acq_rel);
         }
         else if (cls.classified)
         {
@@ -973,15 +979,15 @@ private:
             if (cls.unclassifiedNs > 0u)
             {
                 addCount (t.unclassified);
-                dp.unclassifiedCount.fetch_add (1u, std::memory_order_acq_rel);
-                dp.unclassifiedSum.fetch_add (cls.unclassifiedNs, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (dp.unclassifiedCount, 1u, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (dp.unclassifiedSum, cls.unclassifiedNs, std::memory_order_acq_rel);
             }
         }
         else
         {
             addCount (t.unclassified);
-            dp.unclassifiedCount.fetch_add (1u, std::memory_order_acq_rel);
-            dp.unclassifiedSum.fetch_add (cls.unclassifiedNs, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (dp.unclassifiedCount, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (dp.unclassifiedSum, cls.unclassifiedNs, std::memory_order_acq_rel);
         }
     }
 
@@ -1018,10 +1024,14 @@ private:
 
     std::uint32_t rangeForCurrentThread() noexcept
     {
-        thread_local std::uint32_t assigned = 0xFFFFFFFFu;
+        // RT スレッド（recordRequestRT → claim）から初回アクセスされ得る。
+        // 値は定数初期化される std::uint32_t で、TLS ブロックは .tdata に置かれ、
+        // 初回アクセス時の動的初期化・確保・ロック・ガード変数は発生しない（MSVC 実測）。
+        // 初回だけ relaxed な fetch_add と剰余で 8 range の 1 つを決め、以降は読み出しのみ。
+        thread_local std::uint32_t assigned = 0xFFFFFFFFu;  // NOLINT(thread-local) RT-SAFE: constant-initialized POD in .tdata (no dynamic init/alloc/lock/guard); first use is a relaxed fetch_add + modulo only and the 8-range assignment contract is unchanged
 
         if (assigned == 0xFFFFFFFFu)
-            assigned = nextRange_.fetch_add (1u, std::memory_order_relaxed)
+            assigned = convo::fetchAddAtomic (nextRange_, 1u, std::memory_order_relaxed)
                        % static_cast<std::uint32_t> (kRanges);
 
         return assigned;
@@ -1029,7 +1039,7 @@ private:
 
     static void addCount (std::atomic<std::uint64_t>& counter) noexcept
     {
-        counter.fetch_add (1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (counter, 1u, std::memory_order_acq_rel);
     }
 
     // object に対応する ready スロットを 1 つだけ確保する（CAS で二重取得を防ぐ）。
@@ -1040,17 +1050,17 @@ private:
 
         for (std::size_t i = 0; i < kSlots; ++i)
         {
-            if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
                 continue;
 
-            if (slots_[i].object.load (std::memory_order_acquire) != object)
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
                 continue;
 
             std::uint8_t expected = kStateReady;
 
-            if (slots_[i].state.compare_exchange_strong (expected, kStateFilling,
-                                                         std::memory_order_acq_rel,
-                                                         std::memory_order_acquire))
+            if (convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
             {
                 index = i;
                 return true;
@@ -1067,30 +1077,30 @@ private:
                                      std::atomic<std::uint64_t>& overThreshold,
                                      std::uint64_t value) noexcept
     {
-        count.fetch_add (1u, std::memory_order_acq_rel);
-        sumNs.fetch_add (value, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (count, 1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (sumNs, value, std::memory_order_acq_rel);
         if (value > kThresholdNs)
-            overThreshold.fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (overThreshold, 1u, std::memory_order_acq_rel);
         updateMax (maxNs, value);
     }
     void accumulateUnclassified (std::size_t pathIndex, std::uint64_t value) noexcept
     {
-        classUnclassifiedTotal_.fetch_add (1u, std::memory_order_acq_rel);
-        classUnclassifiedSumTotal_.fetch_add (value, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (classUnclassifiedTotal_, 1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (classUnclassifiedSumTotal_, value, std::memory_order_acq_rel);
         if (pathIndex < kPathCount)
         {
-            classUnclassifiedCount_[pathIndex].fetch_add (1u, std::memory_order_acq_rel);
-            classUnclassifiedSumNs_[pathIndex].fetch_add (value, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classUnclassifiedCount_[pathIndex], 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classUnclassifiedSumNs_[pathIndex], value, std::memory_order_acq_rel);
         }
     }
     static void updateMax (std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
     {
-        std::uint64_t current = target.load (std::memory_order_acquire);
+        std::uint64_t current = convo::consumeAtomic (target, std::memory_order_acquire);
 
         while (value > current
-               && ! target.compare_exchange_weak (current, value,
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_acquire))
+               && ! convo::compareExchangeWeakAtomic (target, current, value,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
         {
         }
     }
@@ -1102,17 +1112,17 @@ private:
         if (p >= kPathCount)
             return;
 
-        pathCount_[p].fetch_add (1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (pathCount_[p], 1u, std::memory_order_acq_rel);
 
         if (latency > kThresholdNs)
-            pathOver_[p].fetch_add (1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (pathOver_[p], 1u, std::memory_order_acq_rel);
 
-        std::uint64_t current = pathMaxNs_[p].load (std::memory_order_acquire);
+        std::uint64_t current = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
 
         while (latency > current
-               && ! pathMaxNs_[p].compare_exchange_weak (current, latency,
-                                                         std::memory_order_acq_rel,
-                                                         std::memory_order_acquire))
+               && ! convo::compareExchangeWeakAtomic (pathMaxNs_[p], current, latency,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
         {
         }
     }
@@ -1124,7 +1134,7 @@ private:
                             std::uint64_t firstScanTs = 0,
                             Classification cls = Classification{}) noexcept
     {
-        const std::uint64_t index = observationCount_.fetch_add (1u, std::memory_order_acq_rel);
+        const std::uint64_t index = convo::fetchAddAtomic (observationCount_, 1u, std::memory_order_acq_rel);
         Observation o;
         o.requestId = id;
         o.epoch = epoch;

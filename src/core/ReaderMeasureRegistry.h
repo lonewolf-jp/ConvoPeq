@@ -18,6 +18,8 @@
 #include <thread>
 #include <functional>
 
+#include "audioengine/AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
+
 namespace convo
 {
 
@@ -78,16 +80,16 @@ public:
             for (int i = 0; i < kRecords; ++i)
             {
                 std::uint8_t expected = 0;
-                if (recs_[i].state.compare_exchange_strong (expected, 1,
-                                                            std::memory_order_acq_rel,
-                                                            std::memory_order_relaxed))
+                if (convo::compareExchangeAtomic (recs_[i].state, expected, 1,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed))
                 {
                     recs_[i].enterUs.store (nowUs(), std::memory_order_relaxed);
                     recs_[i].slot.store (slot, std::memory_order_relaxed);
                     recs_[i].depth.store (depth, std::memory_order_relaxed);
-                    recs_[i].instKey.store (static_cast<std::uint64_t> (
+                    convo::publishAtomic (recs_[i].instKey, static_cast<std::uint64_t> (
                         reinterpret_cast<std::uintptr_t> (instance)), std::memory_order_relaxed);
-                    recs_[i].provKey.store (static_cast<std::uint64_t> (
+                    convo::publishAtomic (recs_[i].provKey, static_cast<std::uint64_t> (
                         reinterpret_cast<std::uintptr_t> (provider)), std::memory_order_relaxed);
                     recs_[i].threadTag.store (threadTag(), std::memory_order_relaxed);
                     recs_[i].seq.store (seq_.fetch_add (1u, std::memory_order_relaxed) + 1u,
@@ -118,7 +120,7 @@ public:
         int aggIdx = -1;
         for (int i = 0; i < kTags; ++i)
         {
-            if (aggs_[i].used.load (std::memory_order_acquire) == 1
+            if (convo::consumeAtomic (aggs_[i].used, std::memory_order_acquire) == 1
                 && std::strncmp (aggs_[i].tag, tag, sizeof (aggs_[i].tag)) == 0)
             {
                 aggIdx = i;
@@ -130,9 +132,9 @@ public:
             for (int i = 0; i < kTags; ++i)
             {
                 std::uint32_t expected = 0;
-                if (aggs_[i].used.compare_exchange_strong (expected, 1,
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed))
+                if (convo::compareExchangeAtomic (aggs_[i].used, expected, 1,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed))
                 {
                     std::memset (aggs_[i].tag, 0, sizeof (aggs_[i].tag));
                     std::strncpy (aggs_[i].tag, tag, sizeof (aggs_[i].tag) - 1);
@@ -147,9 +149,9 @@ public:
             aggs_[aggIdx].sumHoldUs.fetch_add (hold, std::memory_order_relaxed);
             std::uint64_t expectedMax = aggs_[aggIdx].maxHoldUs.load (std::memory_order_relaxed);
             while (hold > expectedMax
-                   && ! aggs_[aggIdx].maxHoldUs.compare_exchange_weak (expectedMax, hold,
-                                                                       std::memory_order_relaxed,
-                                                                       std::memory_order_relaxed))
+                   && ! convo::compareExchangeWeakAtomic (aggs_[aggIdx].maxHoldUs, expectedMax, hold,
+                                                          std::memory_order_relaxed,
+                                                          std::memory_order_relaxed))
             {
             }
         }
@@ -158,7 +160,7 @@ public:
             aggMisses_.fetch_add (1u, std::memory_order_relaxed);
         }
 
-        recs_[idx].state.store (0, std::memory_order_release);   // 再利用
+        convo::publishAtomic (recs_[idx].state, 0, std::memory_order_release);   // 再利用
         closed_.fetch_add (1u, std::memory_order_relaxed);
     }
 
@@ -183,7 +185,7 @@ public:
         bool first = true;
         for (int i = 0; i < kTags; ++i)
         {
-            if (aggs_[i].used.load (std::memory_order_acquire) != 1)
+            if (convo::consumeAtomic (aggs_[i].used, std::memory_order_acquire) != 1)
                 continue;
             std::fprintf (f, "%s\n    {\"tag\": \"%s\", \"count\": %llu, \"maxHoldUs\": %llu, \"sumHoldUs\": %llu}",
                           first ? "" : ",", aggs_[i].tag,
@@ -198,7 +200,7 @@ public:
         bool firstA = true;
         for (int i = 0; i < kRecords; ++i)
         {
-            if (recs_[i].state.load (std::memory_order_acquire) != 1)
+            if (convo::consumeAtomic (recs_[i].state, std::memory_order_acquire) != 1)
                 continue;
             const std::uint64_t enter = recs_[i].enterUs.load (std::memory_order_relaxed);
             std::fprintf (f,

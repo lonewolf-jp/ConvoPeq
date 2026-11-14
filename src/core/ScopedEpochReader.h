@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "IReaderEpochProvider.h"
+#include "audioengine/AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
 
 namespace convo
 {
@@ -238,17 +239,17 @@ public:
         for (int i = 0; i < kMeasureSlots; ++i)
         {
             std::uint8_t expected = 0;
-            if (measure_[i].state.compare_exchange_strong (expected, 1,
-                                                           std::memory_order_acq_rel,
-                                                           std::memory_order_relaxed))
+            if (convo::compareExchangeAtomic (measure_[i].state, expected, 1,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_relaxed))
             {
                 measure_[i].enterUs.store (nowUsMeas(), std::memory_order_relaxed);
                 measure_[i].exitUs.store (0, std::memory_order_relaxed);
                 measure_[i].slot.store (slot, std::memory_order_relaxed);
                 measure_[i].depth.store (depth, std::memory_order_relaxed);
-                measure_[i].providerKey.store (static_cast<std::uint64_t> (
+                convo::publishAtomic (measure_[i].providerKey, static_cast<std::uint64_t> (
                     reinterpret_cast<std::uintptr_t> (provider)), std::memory_order_relaxed);
-                measure_[i].threadTag.store (
+                convo::publishAtomic (measure_[i].threadTag, 
                     static_cast<std::uint64_t> (std::hash<std::thread::id>{}(std::this_thread::get_id())),
                     std::memory_order_relaxed);
                 measure_[i].seq.store (measureSeq_.fetch_add (1u, std::memory_order_relaxed) + 1u,
@@ -270,7 +271,7 @@ public:
         if (idx < 0 || idx >= kMeasureSlots)
             return;
         measure_[idx].exitUs.store (nowUsMeas(), std::memory_order_relaxed);
-        measure_[idx].state.store (2, std::memory_order_release);
+        convo::publishAtomic (measure_[idx].state, 2, std::memory_order_release);
     }
 
     // NonRT から呼ぶこと。タグ別集計と「終了時に active な guard」を分けて出す。
@@ -289,7 +290,7 @@ public:
         for (int i = 0; i < kMeasureSlots; ++i)
         {
             const auto& r = measure_[i];
-            if (r.state.load (std::memory_order_acquire) != 2)
+            if (convo::consumeAtomic (r.state, std::memory_order_acquire) != 2)
                 continue;
             const std::uint64_t hold = (r.exitUs.load (std::memory_order_relaxed)
                                         - r.enterUs.load (std::memory_order_relaxed));
@@ -298,7 +299,7 @@ public:
             for (int j = 0; j < kMeasureSlots; ++j)
             {
                 const auto& q = measure_[j];
-                if (q.state.load (std::memory_order_acquire) != 2)
+                if (convo::consumeAtomic (q.state, std::memory_order_acquire) != 2)
                     continue;
                 if (std::strncmp (q.tag, r.tag, sizeof (r.tag)) != 0)
                     continue;
@@ -311,7 +312,7 @@ public:
             for (int j = 0; j < i; ++j)
             {
                 const auto& q = measure_[j];
-                if (q.state.load (std::memory_order_acquire) == 2
+                if (convo::consumeAtomic (q.state, std::memory_order_acquire) == 2
                     && std::strncmp (q.tag, r.tag, sizeof (r.tag)) == 0)
                 {
                     already = true; break;
@@ -333,7 +334,7 @@ public:
         for (int i = 0; i < kMeasureSlots; ++i)
         {
             const auto& r = measure_[i];
-            if (r.state.load (std::memory_order_acquire) != 1)
+            if (convo::consumeAtomic (r.state, std::memory_order_acquire) != 1)
                 continue;
             const std::uint64_t enter = r.enterUs.load (std::memory_order_relaxed);
             std::fprintf (f,
@@ -357,7 +358,7 @@ public:
         {
             int n = 0;
             for (int i = 0; i < kMeasureSlots; ++i)
-                if (measure_[i].state.load (std::memory_order_acquire) == 1
+                if (convo::consumeAtomic (measure_[i].state, std::memory_order_acquire) == 1
                     && measure_[i].depth.load (std::memory_order_relaxed) == d)
                     ++n;
             if (n == 0)

@@ -93,7 +93,7 @@ Assert-Pattern -Text $threadingText -Pattern 'if\s*\(!allowDuringShutdown\s*&&\s
 #   fallbackDepth 実測）を AudioEngine.Retire.cpp で要求。旧 setter 形の復活は negative で検出。
 Assert-Pattern -Text $threadingText -Pattern 'convo::publishAtomic\(retireQueueDepth_,\s*retireDepth' -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Retire.cpp' -Message 'Retire backlog count telemetry publication is missing (measured retireQueueDepth_ publish required, dash2 §1.4).'
 Assert-Pattern -Text $threadingText -Pattern 'convo::publishAtomic\(fallbackQueueDepth_,\s*fallbackDepth' -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Retire.cpp' -Message 'Deferred retire residency telemetry publication is missing (measured fallbackQueueDepth_ publish required, dash2 §1.4).'
-if ([System.Text.RegularExpressions.Regex]::IsMatch($threadingText, 'setRetireBacklogCount\(|setDeferredRetireResidencyCount\(')) {
+if ([System.Text.RegularExpressions.Regex]::IsMatch($threadingText, 'setRetireAcceptedCount\(|setDeferredRetireResidencyCount\(')) {
     Add-Violation -CheckId 'CI-RETIREPRESS-004' -File 'src/audioengine/AudioEngine.Retire.cpp' -Message 'Retire backlog external absolute-value setter must NOT reappear (dash2 §1.4 B0-4 deprecation).'
 }
 

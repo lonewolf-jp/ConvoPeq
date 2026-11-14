@@ -2599,7 +2599,8 @@ namespace {
 
 // =============================================================================
 // ★ AC_DIAG (2026-11-13, Owner 承認 A2): collectDrainBreakdown() と isFullyDrained() の対応。
-//   isFullyDrained() は変更していない（A2: 複写方式）ため、診断側が判定式から乖離しないことを
+//   C9-A (2026-11-13) で述語から retireAcceptedCount_ == 0 を外したため、述語は 13 条件
+//   （早期 return 1 ＋ && 12）である。診断側も同じ 13 条件で判定し、判定式から乖離しないことを
 //   ここで固定する。既存 getter を持つ 9 項目は値の一致を、残りは述語の一致を確認する。
 // =============================================================================
 [[nodiscard]] bool testAC1_drainBreakdownMatchesPredicate()
@@ -2613,7 +2614,6 @@ namespace {
             && b.observeDeferredRing == 0
             && b.quarantineFallback == 0
             && b.recoveryIntentQueue == 0
-            && b.retireBacklog == 0
             && b.publicationBacklog == 0
             && b.publicationIntentResidency == 0
             && b.pendingIntent == 0
@@ -2651,6 +2651,18 @@ namespace {
     if (allDrained(b1)) return false;               // 内訳も同じ結論
     if (b1.intentQueue == 0 && b1.pendingIntent == 0 && b1.publicationIntentResidency == 0)
         return false;                               // 滞留が内訳に現れていること
+
+    // (4) C9-A: retire 受理数（retireBacklog）は述語から外れている。非 0 でも両者とも「drain」で
+    //     一致すること（ミラーが削除済みの条件を要求していないことの直接確認）。
+    //     step (3) の滞留と混ざらないよう、新しいインスタンスで確認する。
+    {
+        auto c2 = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        c2->setRetireAcceptedCount(7);
+        const auto b2 = c2->collectDrainBreakdown();
+        if (b2.retireBacklog != 7) return false;        // 内訳には現れる
+        if (!c2->isFullyDrained()) return false;        // 述語は retireBacklog を見ない
+        if (!allDrained(b2)) return false;              // ミラーも要求しない
+    }
 
     return true;
 }

@@ -303,7 +303,7 @@ public:
                 std::strncpy(w.tag, slot.ownerTag, sizeof(w.tag) - 1);
                 uint64_t expected = w.maxHoldUs.load(std::memory_order_relaxed);
                 while (nowUs - startUs > expected
-                       && ! w.maxHoldUs.compare_exchange_weak(expected, nowUs - startUs,
+                       && ! convo::compareExchangeWeakAtomic (w.maxHoldUs, expected, nowUs - startUs,
                                                               std::memory_order_relaxed,
                                                               std::memory_order_relaxed))
                 {
