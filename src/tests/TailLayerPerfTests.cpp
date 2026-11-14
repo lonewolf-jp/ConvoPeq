@@ -15,8 +15,12 @@
 //
 // 本テストの追加条件（測定区間の短時間化を防ぐ）:
 //   * 1 サンプルあたり最低 5 音声秒を測定する
-//   * 外乱検出（壁時計 / プロセス CPU 時間 > 1.25）で再測定し、3 回とも外乱なら FAIL
+//   * 外乱検出（壁時計 / プロセス CPU 時間 > 1.25、5 サンプルの max/min > 1.25）で再測定し、
+//     5 回とも外乱なら FAIL
 //   * プロセス CPU 時間は外乱判定と記録にのみ使い、合否判定には使わない
+//
+// 測定対象: block 64〜32768 × IR 0.5 / 1.0 / 3.0 秒の 30 通りを、バイパス（tailMode=2）と
+//           テール保持（tailMode=1）の両方で測る（旧 RES-F はバイパスのみだったため被覆を落とさない）。
 //
 // 出力: [PASS]/[FAIL] RES-F 行、[DIAG] 行（5 サンプル・中央値・音声秒・比・試行回数）。
 //       FAIL は exit 1（fail-closed）。Debug 構成では [SKIP] を出して 0 で終了する。
@@ -120,7 +124,7 @@ struct PerfResult
     bool   disturbed = false;
 };
 
-PerfResult runCase (const std::vector<double>& ir, int block)
+PerfResult runCase (const std::vector<double>& ir, int block, bool tailEnabled)
 {
     using convo::MKLNonUniformConvolver;
 
@@ -130,8 +134,8 @@ PerfResult runCase (const std::vector<double>& ir, int block)
     MKLNonUniformConvolver conv;
     convo::FilterSpec spec {};
     spec.sampleRate = kSampleRate;
-    spec.tailEnabled = true;
-    spec.tailMode = 1;
+    spec.tailEnabled = tailEnabled;
+    spec.tailMode = tailEnabled ? 1 : 2;   // 1 = テール保持 / 2 = バイパス
 
     if (! conv.SetImpulse (ir.data(), (int) ir.size(), block, 1.0, false, &spec))
         return r;
@@ -142,16 +146,19 @@ PerfResult runCase (const std::vector<double>& ir, int block)
 
     const int irLen = (int) ir.size();
     const int totalLen = ((irLen + 8 * block + block - 1) / block) * block;
-    std::vector<double> in ((size_t) block, 0.0);
     std::vector<double> out ((size_t) totalLen, 0.0);
+
+    // 入力は先頭サンプルだけ 1.0 のインパルス。ブロックごとの入力生成を計測区間から外すため、
+    // 先頭ブロック用と無音ブロック用の 2 本を事前に作る（仕様 §3.3 の「Add + Get」だけを測る）。
+    std::vector<double> firstIn ((size_t) block, 0.0);
+    firstIn[0] = 1.0;
+    const std::vector<double> zeroIn ((size_t) block, 0.0);
 
     const auto runOnce = [&]()
     {
         for (int t = 0; t < totalLen; t += block)
         {
-            for (int i = 0; i < block; ++i)
-                in[(size_t) i] = ((t + i) == 0) ? 1.0 : 0.0;
-            conv.Add (in.data(), block);
+            conv.Add (t == 0 ? firstIn.data() : zeroIn.data(), block);
             conv.Get (out.data() + t, block);
         }
     };
@@ -218,33 +225,34 @@ PerfResult runCase (const std::vector<double>& ir, int block)
     return r;
 }
 
-void runPerfCase (const std::vector<double>& ir, int block)
+void runPerfCase (const std::vector<double>& ir, int block, bool tailEnabled)
 {
-    const auto r = runCase (ir, block);
+    const char* mode = tailEnabled ? "tail" : "bypass";
+    const auto r = runCase (ir, block, tailEnabled);
     const int irLen = (int) ir.size();
 
     if (! r.ok)
     {
-        report ("RES-F", false, fmt ("block=%d ir=%d SetImpulse failed", block, irLen));
+        report ("RES-F", false, fmt ("mode=%s block=%d ir=%d SetImpulse failed", mode, block, irLen));
         return;
     }
 
     const bool cpuOk = ! r.disturbed && r.cpuMsPerAudioSec <= kCpuLimitMsPerSec;
     const bool memOk = r.memDeltaMB <= kMemLimitMB;
     report ("RES-F", cpuOk && memOk,
-            fmt ("block=%d ir=%d cpu=%.3f ms/s mem=%.2f MB", block, irLen,
+            fmt ("mode=%s block=%d ir=%d cpu=%.3f ms/s mem=%.2f MB", mode, block, irLen,
                  r.cpuMsPerAudioSec, r.memDeltaMB));
 
-    std::printf ("[DIAG] block=%d ir=%d samples=[%.3f %.3f %.3f %.3f %.3f] median=%.3f "
+    std::printf ("[DIAG] mode=%s block=%d ir=%d samples=[%.3f %.3f %.3f %.3f %.3f] median=%.3f "
                  "audio/sample=%.2fs wall/cpu=%.3f spread=%.3f attempts=%d%s\n",
-                 block, irLen, r.samples[0], r.samples[1], r.samples[2], r.samples[3],
+                 mode, block, irLen, r.samples[0], r.samples[1], r.samples[2], r.samples[3],
                  r.samples[4], r.cpuMsPerAudioSec, r.audioPerSample, r.wallCpuRatio,
                  r.spread, r.attempts, r.disturbed ? " DISTURBED" : "");
 
     if (r.disturbed)
-        std::printf ("[INFO] block=%d ir=%d: %d 回とも外乱（wall/cpu=%.3f > %.2f）。"
+        std::printf ("[INFO] mode=%s block=%d ir=%d: %d 回とも外乱（wall/cpu=%.3f > %.2f）。"
                      "他プロセスの負荷を排除した状態で再実行すること\n",
-                     block, irLen, r.attempts, r.wallCpuRatio, kDisturbWallCpuRatio);
+                     mode, block, irLen, r.attempts, r.wallCpuRatio, kDisturbWallCpuRatio);
 }
 } // namespace
 
@@ -277,8 +285,14 @@ int main()
         { 32768, 24000 }, { 32768, 48000 }, { 32768, 144000 },
     };
 
+    // 仕様 §3.3 は tailMode を限定していない。旧 RES-F はバイパス（tailMode=2）だけを測っていたため、
+    // 被覆を落とさないようバイパスとテール保持（tailMode=1）の両方を測る。
     for (const auto& c : cases)
-        runPerfCase (makeIr (c.irLen), c.block);
+    {
+        const auto ir = makeIr (c.irLen);
+        runPerfCase (ir, c.block, false);   // バイパス（旧 RES-F の被覆）
+        runPerfCase (ir, c.block, true);    // テール保持
+    }
 
     std::printf ("[SUMMARY] failures=%d\n", gFailures);
     return (gFailures == 0) ? 0 : 1;
