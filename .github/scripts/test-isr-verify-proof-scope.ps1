@@ -1510,6 +1510,105 @@ void DebugRuntime::emitHBTrace()
 '@ + $commonTail
 }
 
+# 43) A non-constant #if expression (1 && 0) must be unknown, not an active branch.
+$cases += [PSCustomObject]@{
+    Name     = 'if-expression-not-constant'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+#if 1 && 0
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#endif
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 44) Preprocessor directives inside a block comment must not create regions.
+$cases += [PSCustomObject]@{
+    Name     = 'directive-inside-block-comment'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    /* #if 0 */
+    hbTraceRuntime_.emitTrace(path);
+    /* #endif */
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
+# 45) A #define replacement list must not satisfy the guard checks.
+$cases += [PSCustomObject]@{
+    Name     = 'guard-macro-unused'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+#define UNUSED_GUARD if (mode == "Release" && ! isForceEvidenceEmission()) { return; }
+    const std::string mode = currentBuildMode();
+    emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
 $failures = 0
 foreach ($case in $cases) {
     if (-not ($case.PSObject.Properties.Name -contains 'MutateExporter')) {

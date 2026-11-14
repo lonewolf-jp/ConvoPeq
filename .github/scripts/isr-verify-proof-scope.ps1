@@ -200,9 +200,10 @@ function Get-MaskedText {
 function Get-BranchState {
     param([string]$Condition)
 
+    # 完全な定数だけを受理する（"1 && 0" のような式を有効分岐と誤認しない）。
     $c = $Condition.Trim()
-    if ($c -cmatch '^0+\b' -or $c -cmatch '^false\b') { return 'out' }
-    if ($c -cmatch '^1+\b' -or $c -cmatch '^true\b') { return 'in' }
+    if ($c -cmatch '^0+$' -or $c -ceq 'false') { return 'out' }
+    if ($c -cmatch '^1+$' -or $c -ceq 'true') { return 'in' }
     return 'unknown'
 }
 
@@ -219,12 +220,16 @@ function Get-PreprocessorRegions {
     $states = New-Object 'char[]' $Text.Length
     for ($k = 0; $k -lt $states.Length; $k++) { $states[$k] = [char]'a' }
 
+    # 指令はコメント・文字列リテラルの外でのみ認識する。同じ長さの伏せ字を作り、
+    # 行の切り出しだけを伏せ字から行う（位置は元テキストと一致する）。
+    $masked = Get-MaskedText -Text $Text
+
     $frames = New-Object System.Collections.Generic.List[object]
     $lineStart = 0
-    while ($lineStart -le $Text.Length) {
-        $nl = $Text.IndexOf("`n", $lineStart)
-        if ($nl -lt 0) { $nl = $Text.Length }
-        $line = $Text.Substring($lineStart, $nl - $lineStart).TrimEnd("`r")
+    while ($lineStart -le $masked.Length) {
+        $nl = $masked.IndexOf("`n", $lineStart)
+        if ($nl -lt 0) { $nl = $masked.Length }
+        $line = $masked.Substring($lineStart, $nl - $lineStart).TrimEnd("`r")
 
         $lineState = 'a'
         foreach ($f in $frames) {
@@ -308,6 +313,41 @@ function Get-EnabledText {
     return (New-BlankedCopy -Text $Text -Ranges $DisabledRanges)
 }
 
+# 行頭のプリプロセッサ指令（#define の置換リストを含む）を空白化する。長さと改行位置は変えない。
+# 未使用マクロの置換リストが「ガード」や「呼び出し」として数えられるのを防ぐ。
+function Get-DirectiveBlankedText {
+    param([string]$Text)
+
+    if ($Text.Length -eq 0) { return $Text }
+    $chars = $Text.ToCharArray()
+    $n = $Text.Length
+    $i = 0
+    while ($i -lt $n) {
+        $lineEnd = $Text.IndexOf("`n", $i)
+        if ($lineEnd -lt 0) { $lineEnd = $n }
+        $line = $Text.Substring($i, $lineEnd - $i)
+        if ($line -match '^\s*#') {
+            # 行継続（末尾のバックスラッシュ）が続く限り、次の行も置換リストの一部。
+            $blankEnd = $lineEnd
+            $check = $line.TrimEnd("`r")
+            while ($check.EndsWith('\') -and $blankEnd -lt $n) {
+                $nextStart = $blankEnd + 1
+                $nextEnd = $Text.IndexOf("`n", $nextStart)
+                if ($nextEnd -lt 0) { $nextEnd = $n }
+                $blankEnd = $nextEnd
+                $check = $Text.Substring($nextStart, $nextEnd - $nextStart).TrimEnd("`r")
+            }
+            for ($k = $i; $k -lt $blankEnd -and $k -lt $n; $k++) {
+                if ($chars[$k] -ne "`n" -and $chars[$k] -ne "`r") { $chars[$k] = ' ' }
+            }
+            $i = $blankEnd + 1
+            continue
+        }
+        $i = $lineEnd + 1
+    }
+    return (-join $chars)
+}
+
 #-----------------------------------------------------------------------------
 # 関数本体を波括弧対応で切り出す。文字列・文字リテラル内の波括弧は数えない。
 # 同じシグネチャの定義が複数ある場合に備えて、見つかった定義をすべて返す。
@@ -367,7 +407,9 @@ function Resolve-FunctionBody {
         [string]$Signature
     )
 
-    $spans = @(Get-FunctionSpans -CodeText $CodeText -Signature $Signature)
+    # 署名探索と本体の文走査からは、プリプロセッサ指令（#define の置換リストを含む）を除く。
+    # 位置は変わらないため、本体の切り出しと条件領域の計算は元テキストで行う。
+    $spans = @(Get-FunctionSpans -CodeText (Get-DirectiveBlankedText -Text $CodeText) -Signature $Signature)
     if ($spans.Count -eq 0) {
         return [pscustomobject]@{ Code = $null; Masked = $null; Conditional = @(); Problem = 'notfound' }
     }
@@ -393,8 +435,8 @@ function Resolve-FunctionBody {
     $bodyConditional = (Get-PreprocessorRegions -Text $bodyCode).Conditional
 
     return [pscustomobject]@{
-        Code        = $bodyCode
-        Masked      = $bodyMasked
+        Code        = (Get-DirectiveBlankedText -Text $bodyCode)
+        Masked      = (Get-DirectiveBlankedText -Text $bodyMasked)
         Conditional = $bodyConditional
         Problem     = $null
     }
