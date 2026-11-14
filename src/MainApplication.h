@@ -39,4 +39,10 @@ public:
 private:
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<juce::FileLogger> fileLogger;
+
+    // ★ Live evidence: `--verify-runtime-evidence-live`（実 Runtime 実行に基づく証拠）
+    //   既存の `--verify-runtime-evidence`（Exporter 単体呼び出し）とは独立したモード。
+    bool liveRuntimeEvidenceRequested = false;
+    std::uint64_t liveStartedAtNs = 0;
+    bool emitLiveRuntimeEvidence();
 };

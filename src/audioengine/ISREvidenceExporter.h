@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include "TelemetryRecorder.h"
+#include "LiveRuntimeEvidence.h"
 
 namespace convo::isr {
 
@@ -16,6 +17,13 @@ public:
                         uint64_t monotonicViolationCount = 0,
                         bool forceFullEvidence = false);
 };
+
+// ★ Live Runtime 証拠: 実行中のプロセス（AudioEngine）が観測した値を JSON に書く。
+//   本関数は「受け取った値を書くだけ」で、Runtime の実行・値の生成・補完は行わない。
+//   evidence/live_runtime_evidence.json を tmp + rename で書く。
+//   戻り値: 書き込みに成功したら true。runId 空・時刻不整合・I/O 失敗は false（fail-closed）。
+bool writeLiveRuntimeEvidence(const LiveRuntimeObservation& observation,
+                              std::string* errorOut = nullptr);
 
 class BudgetManager {
 public:

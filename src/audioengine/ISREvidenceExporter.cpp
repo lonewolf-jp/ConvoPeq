@@ -568,4 +568,94 @@ void reapplyRuntimeMetadata(const std::filesystem::path& path,
     ensureArtifactRuntimeMetadata(path, runId, generatedAtNs);
 }
 
+// ★ Live Runtime 証拠: 実行中のプロセスが観測した値を書く（値の生成はしない）。
+bool writeLiveRuntimeEvidence(const LiveRuntimeObservation& observation,
+                              std::string* errorOut)
+{
+    const auto fail = [errorOut](const std::string& reason) noexcept
+    {
+        if (errorOut != nullptr)
+            *errorOut = reason;
+        return false;
+    };
+
+    if (observation.runId.empty())
+        return fail("runId is empty (CONVO_ISR_RUNTIME_RUN_ID is required)");
+
+    if (observation.startedAtNs == 0 || observation.emittedAtNs < observation.startedAtNs)
+        return fail("invalid steady-clock timestamps (startedAtNs/emittedAtNs)");
+
+    const auto root = artifactRoot();
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    if (ec)
+        return fail("failed to create evidence directory: " + ec.message());
+
+    // 観測値（audioCallbackCount / sampleRateHz / blockSamples）から導出する参考値。
+    // 「観測」と「導出」を JSON 上で分離し、観測値と混同しない。
+    const double rateHz = (observation.sampleRateHz > 0.0) ? observation.sampleRateHz : 0.0;
+    const double audioSecondsProcessed =
+        (rateHz > 0.0 && observation.blockSamples > 0)
+            ? (static_cast<double>(observation.audioCallbackCount)
+               * static_cast<double>(observation.blockSamples)) / rateHz
+            : 0.0;
+    const double wallSeconds =
+        (observation.emittedAtNs > observation.startedAtNs)
+            ? static_cast<double>(observation.emittedAtNs - observation.startedAtNs) / 1.0e9
+            : 0.0;
+    const double dutyRatio = (wallSeconds > 0.0) ? (audioSecondsProcessed / wallSeconds) : 0.0;
+
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"schema\": \"live_runtime_evidence_v1\",\n";
+    oss << "  \"generationMode\": \"runtime-live\",\n";
+    oss << "  \"evidenceSource\": \"process\",\n";
+    oss << "  \"runId\": \"" << escapeJson(observation.runId) << "\",\n";
+    oss << "  \"processId\": " << observation.processId << ",\n";
+    oss << "  \"startedAtNs\": " << observation.startedAtNs << ",\n";
+    oss << "  \"emittedAtNs\": " << observation.emittedAtNs << ",\n";
+    oss << "  \"runtime\": {\n";
+    oss << "    \"engineInitialized\": " << (observation.engineInitialized ? "true" : "false") << ",\n";
+    oss << "    \"audioCallbackCount\": " << observation.audioCallbackCount << ",\n";
+    oss << "    \"sampleRateHz\": " << observation.sampleRateHz << ",\n";
+    oss << "    \"blockSamples\": " << observation.blockSamples << ",\n";
+    oss << "    \"irLoaded\": " << (observation.irLoaded ? "true" : "false") << ",\n";
+    oss << "    \"irLength\": " << observation.irLength << ",\n";
+    oss << "    \"deviceType\": \"" << escapeJson(observation.deviceType) << "\",\n";
+    oss << "    \"deviceName\": \"" << escapeJson(observation.deviceName) << "\"\n";
+    oss << "  },\n";
+    oss << "  \"derived\": {\n";
+    oss << "    \"audioSecondsProcessed\": " << audioSecondsProcessed << ",\n";
+    oss << "    \"wallSeconds\": " << wallSeconds << ",\n";
+    oss << "    \"dutyRatio\": " << dutyRatio << "\n";
+    oss << "  }\n";
+    oss << "}\n";
+
+    const auto path = root / "live_runtime_evidence.json";
+    const auto tmpPath = root / "live_runtime_evidence.json.tmp";
+
+    {
+        std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+        if (! file.is_open())
+            return fail("failed to open temp file: " + tmpPath.string());
+
+        file << oss.str();
+        file.close();
+        if (file.fail())
+        {
+            std::filesystem::remove(tmpPath, ec);
+            return fail("failed to write temp file: " + tmpPath.string());
+        }
+    }
+
+    std::filesystem::rename(tmpPath, path, ec);
+    if (ec)
+    {
+        std::filesystem::remove(tmpPath, ec);
+        return fail("failed to publish live evidence: " + path.string());
+    }
+
+    return true;
+}
+
 } // namespace convo::isr

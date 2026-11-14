@@ -1100,6 +1100,30 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
     }
 }
 
+// ★ Live evidence: 実行中 engine の観測値を集める（値の生成・補完はしない）。
+//   `--verify-runtime-evidence-live` の shutdown 時（engine 生存中）に 1 回だけ呼ばれる。
+bool MainWindow::collectLiveRuntimeObservation(convo::isr::LiveRuntimeObservation& out)
+{
+    auto* device = audioDeviceManager.getCurrentAudioDevice();
+
+    out.engineInitialized = (device != nullptr);
+    out.sampleRateHz = audioEngine.getSampleRate();
+    out.blockSamples = (device != nullptr) ? device->getCurrentBufferSizeSamples() : 0;
+    out.audioCallbackCount = audioEngine.audioCallbackCount();
+
+    if (device != nullptr)
+    {
+        out.deviceType = device->getTypeName().toStdString();
+        out.deviceName = device->getName().toStdString();
+    }
+
+    const auto& convolver = audioEngine.getConvolverProcessor();
+    out.irLoaded = convolver.isIRLoaded();
+    out.irLength = convolver.getIRLength();
+
+    return out.engineInitialized;
+}
+
 std::unique_ptr<juce::AccessibilityHandler> MainWindow::createAccessibilityHandler()
 {
    #if JUCE_WINDOWS && JUCE_DEBUG

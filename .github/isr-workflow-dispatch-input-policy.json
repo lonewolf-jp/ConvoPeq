@@ -14,6 +14,13 @@
                 "descriptionMustContain": "Require runtime-generated evidence"
             },
             {
+                "name": "requireLiveRuntimeEvidence",
+                "type": "boolean",
+                "required": false,
+                "default": "false",
+                "descriptionMustContain": "Require live runtime evidence"
+            },
+            {
                 "name": "verificationTier",
                 "type": "choice",
                 "required": false,
@@ -88,6 +95,10 @@
             {
                 "inputName": "requireRuntimeEvidence",
                 "runnerSwitch": "-RequireRuntimeEvidence"
+            },
+            {
+                "inputName": "requireLiveRuntimeEvidence",
+                "runnerSwitch": "-RequireLiveRuntimeEvidence"
             },
             {
                 "inputName": "enforceTriggerPolicy",

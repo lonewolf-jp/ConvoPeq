@@ -16,7 +16,9 @@ param(
     [int]$Enforce81CloseDecisionRetryMax = 0,
     [string]$PrOpenedAt = '',
     [string]$DeclaredClass = '',
-    [int]$SoakMinutes = 0
+    [int]$SoakMinutes = 0,
+    [switch]$RequireLiveRuntimeEvidence,
+    [int]$LiveRuntimeExitMs = 4000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -613,6 +615,18 @@ if ($Collect81CloseEvidence -and ($Tier -eq 'standard' -or $Tier -eq 'exhaustive
 
         Write-Host "[PASS] 8.1 close operational decision enforced: policyVersion=$policyVersion source=$decisionSource closeReady=true"
         break
+    }
+}
+
+if ($RequireLiveRuntimeEvidence) {
+    if ([string]::IsNullOrWhiteSpace($env:CONVO_ISR_RUNTIME_RUN_ID)) {
+        $env:CONVO_ISR_RUNTIME_RUN_ID = "live-$([guid]::NewGuid().ToString('N'))"
+    }
+
+    Write-Host "[INFO] tier=$Tier live runtime evidence mode enabled: runId=$($env:CONVO_ISR_RUNTIME_RUN_ID)"
+    & ./.github/scripts/isr-run-runtime-evidence-live.ps1 -ExitMs $LiveRuntimeExitMs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Live runtime evidence gate failed (exit=$LASTEXITCODE)"
     }
 }
 
