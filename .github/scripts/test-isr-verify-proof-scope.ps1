@@ -1609,6 +1609,40 @@ void DebugRuntime::emitHBTrace()
 '@ + $commonTail
 }
 
+# 46) A backslash-continued #define whose continuation is lost by string masking
+#     must still have its continuation line blanked.
+$cases += [PSCustomObject]@{
+    Name     = 'continued-macro-line-survives'
+    Expected = 1
+    Source   = @'
+namespace convo::isr
+{
+bool isForceEvidenceEmission()
+{
+    return false;
+}
+
+void DebugRuntime::emitCIArtifacts()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+#define UNUSED_TRACE "a\
+b" emitHBTrace();
+}
+
+void DebugRuntime::emitHBTrace()
+{
+    const std::string mode = currentBuildMode();
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
+        return;
+    }
+    hbTraceRuntime_.emitTrace(path);
+}
+'@ + $commonTail
+}
+
 $failures = 0
 foreach ($case in $cases) {
     if (-not ($case.PSObject.Properties.Name -contains 'MutateExporter')) {

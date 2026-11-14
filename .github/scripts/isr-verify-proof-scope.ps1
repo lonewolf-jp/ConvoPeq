@@ -315,27 +315,29 @@ function Get-EnabledText {
 
 # 行頭のプリプロセッサ指令（#define の置換リストを含む）を空白化する。長さと改行位置は変えない。
 # 未使用マクロの置換リストが「ガード」や「呼び出し」として数えられるのを防ぐ。
+# Reference は行構造と行継続の判定に使う元テキスト。伏せ字を渡す場合、文字列の空白化で
+# 末尾のバックスラッシュが消えるため、行の判定だけは元テキストで行う。
 function Get-DirectiveBlankedText {
-    param([string]$Text)
+    param([string]$Text, [string]$Reference = $Text)
 
     if ($Text.Length -eq 0) { return $Text }
     $chars = $Text.ToCharArray()
     $n = $Text.Length
     $i = 0
     while ($i -lt $n) {
-        $lineEnd = $Text.IndexOf("`n", $i)
+        $lineEnd = $Reference.IndexOf("`n", $i)
         if ($lineEnd -lt 0) { $lineEnd = $n }
-        $line = $Text.Substring($i, $lineEnd - $i)
+        $line = $Reference.Substring($i, $lineEnd - $i)
         if ($line -match '^\s*#') {
             # 行継続（末尾のバックスラッシュ）が続く限り、次の行も置換リストの一部。
             $blankEnd = $lineEnd
             $check = $line.TrimEnd("`r")
             while ($check.EndsWith('\') -and $blankEnd -lt $n) {
                 $nextStart = $blankEnd + 1
-                $nextEnd = $Text.IndexOf("`n", $nextStart)
+                $nextEnd = $Reference.IndexOf("`n", $nextStart)
                 if ($nextEnd -lt 0) { $nextEnd = $n }
                 $blankEnd = $nextEnd
-                $check = $Text.Substring($nextStart, $nextEnd - $nextStart).TrimEnd("`r")
+                $check = $Reference.Substring($nextStart, $nextEnd - $nextStart).TrimEnd("`r")
             }
             for ($k = $i; $k -lt $blankEnd -and $k -lt $n; $k++) {
                 if ($chars[$k] -ne "`n" -and $chars[$k] -ne "`r") { $chars[$k] = ' ' }
@@ -436,7 +438,7 @@ function Resolve-FunctionBody {
 
     return [pscustomobject]@{
         Code        = (Get-DirectiveBlankedText -Text $bodyCode)
-        Masked      = (Get-DirectiveBlankedText -Text $bodyMasked)
+        Masked      = (Get-DirectiveBlankedText -Text $bodyMasked -Reference $bodyCode)
         Conditional = $bodyConditional
         Problem     = $null
     }
