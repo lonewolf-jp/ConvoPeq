@@ -314,11 +314,15 @@ void checkI (const std::vector<double>& ir, int block)
                  on.eFirstTailGainDb, ref.eFirstTailGainDb));
 }
 
-void checkH4 (const std::vector<double>& ir, int block)
+void checkH4 (const std::vector<double>& ir, int block, double referenceDb, const char* id = "H-4")
 {
     const auto r = runCase (ir, block, true);
-    report ("H-4", r.ok && r.eFixedDb > -60.0,
-            fmt ("block=%d ir=%d eFixed=%.2f dB", block, (int) ir.size(), r.eFixedDb));
+    // ★ B-12: 下限 -60 dB だけでは均一損失を見逃す。IR 自身のエネルギーを独立参照に、
+    //   6 dB を超える落ち込みを不合格にする。
+    const bool ok = r.ok && r.eFixedDb > -60.0 && r.eFixedDb >= referenceDb - 6.0;
+    report (id, ok,
+            fmt ("block=%d ir=%d eFixed=%.2f dB ref=%.2f dB",
+                 block, (int) ir.size(), r.eFixedDb, referenceDb));
 }
 
 void checkGeometryAtMaxBlock()
@@ -339,6 +343,17 @@ void checkGeometryAtMaxBlock()
     const int layers = convo::NUPCTestAccess::numActiveLayers (conv);
     const int p0 = convo::NUPCTestAccess::layerPartSize (conv, 0);
     const int n0 = convo::NUPCTestAccess::layerNumPartsIR (conv, 0);
+    // ★ B-12: F-5 は形状だけでなく音声でも確認する（block 524288 は未検証域だった）。
+    {
+        const auto r = runCase (ir, 524288, true);
+        const double refDb = energyDb (ir, (int) ir.size() / 2, (int) ir.size());
+        const bool audioOk = r.ok
+                             && std::fabs (r.eFixedDb - refDb) <= 6.0
+                             && r.eFixedDb > -60.0;
+        report ("F-5-audio", audioOk,
+                fmt ("block=524288 eFixed=%.2f dB ref=%.2f dB", r.eFixedDb, refDb));
+    }
+
     const bool geomOk = layers >= 1 && layers <= 3 && p0 == 524288 && n0 >= 1 && n0 <= 256;
     report ("F-5", geomOk, fmt ("block=524288 layers=%d l0=%d/%d", layers, p0, n0));
 }
@@ -478,23 +493,49 @@ int main()
     }
 
     // ── H-4: 3.0 秒 IR のテール保持（無音区間がないこと） ──
-    for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 })
-        checkH4 (makeIr (144000), b);
+    //   ★ B-12: 下限 -60 dB だけでなく、IR 自身のエネルギーを独立参照にする。
+    {
+        const auto ir = makeIr (144000);
+        const double refDb = energyDb (ir, (int) ir.size() / 2, (int) ir.size());
+
+        // ★ B-12: 中間サイズを追加し、境界付近の不連続も見る。
+        for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
+                       65536, 131072, 262144, 524288 })
+            checkH4 (ir, b, refDb);
+    }
 
     // ── H: 既定 tailMode=1 のテール保持（IR 1.0 秒・固定区間 0.5〜1.0 秒） ──
+    //   ★ B-12: H-1/H-2 は block 間の一貫性（相対）を、H-6 は IR エネルギーに対する
+    //   絶対帯（±6 dB）を見る。相対だけでは全ブロック共通の均一損失を検出できない。
     {
         const auto ir = makeIr (48000);
+        const double refDb = energyDb (ir, (int) ir.size() / 2, (int) ir.size());
+
+        std::printf ("[record] H reference (IR energy) = %.3f dB\n", refDb);
+
         const auto base = runCase (ir, 256, true);
+
         if (base.ok)
         {
-            std::printf ("[record] H baseline block=256 eFixed=%.3f dB\n", base.eFixedDb);
             for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 })
                 checkH (b, base.eFixedDb, (b <= 128) ? 2.5 : 0.1, (b <= 128) ? "H-2" : "H-1");
+
+            // ★ B-12: block 不変（相対）を全対応ブロックで独立に確認する。
+            //   修正前は層の被覆区間が block で変わっていたため、この指標が block によって
+            //   変動していた（実測は doc/work113/20261110-1130_未修正修正/report.md §3.3。
+            //   1 秒 IR の block 32768 で 2.41 dB、3 秒 IR の 1024〜32768 で 3.15 dB、
+            //   3 秒 IR の 524288 で 0.83 dB）。0.1 dB を超える差は不合格にする（閾値の
+            //   緩和はしない）。
+            for (int b : { 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288 })
+                checkH (b, base.eFixedDb, 0.1, "H-7");
         }
         else
         {
             report ("H-1", false, "baseline block=256 SetImpulse failed");
         }
+
+        for (int b : { 64, 256, 4096, 32768 })
+            checkH4 (ir, b, refDb, "H-6");
     }
 
     std::printf ("[SUMMARY] failures=%d\n", gFailures);
