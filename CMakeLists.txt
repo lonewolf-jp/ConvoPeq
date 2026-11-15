@@ -869,6 +869,16 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(FFTBackendTests PRIVATE /EHsc)
     add_test(NAME FFTBackendTests COMMAND FFTBackendTests)
 
+    # ★ BUG-013: tailL1L2Multiplier の 2 冪制約（ヘッダ単体・外部依存なし）
+    #   L2 の FFT 長 = 2 * l1Part * 倍率 が 2 の冪であることを固定する。
+    add_executable(TailLayerMultiplierTests
+        src/tests/TailLayerMultiplierTests.cpp
+    )
+    target_include_directories(TailLayerMultiplierTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(TailLayerMultiplierTests PRIVATE cxx_std_20)
+    target_compile_options(TailLayerMultiplierTests PRIVATE /EHsc /utf-8)
+    add_test(NAME TailLayerMultiplierTests COMMAND TailLayerMultiplierTests)
+
     # ★ Week2: boundExcessDb 分布測定ベンチマーク
     #   JUCE/MKL に依存しない純粋数学ベンチマーク。
     add_executable(EQBoundExcessBenchmark

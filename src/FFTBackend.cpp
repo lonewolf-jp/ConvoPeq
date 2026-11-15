@@ -11,6 +11,18 @@
 namespace convo
 {
 
+namespace
+{
+// ★ BUG-013: IPP の実数 FFT が扱える最小長（2 点 = order 1）。
+constexpr int kMinFftSize = 2;
+
+// 2 の冪長か（0 と負値は false）。
+[[nodiscard]] constexpr bool isPowerOfTwoLength(int v) noexcept
+{
+    return v > 0 && (v & (v - 1)) == 0;
+}
+} // namespace
+
 //==============================================================================
 // ProductionFft::createPlan  ── NonRT only
 //
@@ -21,10 +33,19 @@ namespace convo
 ProductionFft::Plan ProductionFft::createPlan(int fftSize)
 {
     Plan plan{};
+
+    // ★ BUG-013 (fail-closed): IPP の実数 FFT は 2 の冪長のみを扱う。
+    //   非 2 冪を受け取ると下の order 計算が floor(log2) になり、実際のプラン長
+    //   (2^order) が fftSize より小さくなる。一方 complexSize は fftSize/2+1 の
+    //   ままなので、呼出側は「正しい長さのプラン」を得たと誤認してテールを破壊する。
+    //   ここで不正長を拒否し、Plan::isValid() == false として返す。
+    if (fftSize < kMinFftSize || ! isPowerOfTwoLength(fftSize))
+        return plan;
+
     plan.fftSize = fftSize;
     plan.complexSize = fftSize / 2 + 1;
 
-    // Determine IPP order (power-of-two exponent)
+    // Determine IPP order (power-of-two exponent) — 上の検証により厳密一致
     int order = 0;
     int tmp = fftSize;
     while (tmp > 1) { tmp >>= 1; ++order; }

@@ -17,6 +17,7 @@
 //============================================================================
 #include <JuceHeader.h>
 #include "MKLNonUniformConvolver.h"
+#include "TailLayerMultiplier.h"   // ★ BUG-013: 丸め規則の単一権威
 #include "tests/NUPCTestAccess.h"
 
 #include <windows.h>
@@ -341,6 +342,105 @@ void checkGeometryAtMaxBlock()
     const bool geomOk = layers >= 1 && layers <= 3 && p0 == 524288 && n0 >= 1 && n0 <= 256;
     report ("F-5", geomOk, fmt ("block=524288 layers=%d l0=%d/%d", layers, p0, n0));
 }
+
+//============================================================================
+// BUG-013: tailL1L2Multiplier の 2 冪制約
+//
+// L2 のパーティション長は l1Part * tailL1L2Multiplier、その FFT 長は 2 倍。
+// IPP の実数 FFT は 2 の冪長しか扱えないため、非 2 冪の倍率では L2 テールの
+// FFT プランが実長より小さく作られ、出力が壊れる。
+// 修正後は倍率が 2 の冪へ丸められ、丸め後の幾何と出力が倍率 8（既定）と一致する。
+//============================================================================
+struct MultProbe
+{
+    bool ok = false;
+    int layers = 0;
+    int partSize[3] { 0, 0, 0 };
+    std::vector<double> out;
+};
+
+MultProbe runWithTailMultiplier (const std::vector<double>& ir, int block, int mult, int tailMode)
+{
+    using convo::MKLNonUniformConvolver;
+
+    MultProbe p;
+    MKLNonUniformConvolver conv;
+    convo::FilterSpec spec {};
+    spec.sampleRate = kSampleRate;
+    spec.tailEnabled = (tailMode != 2);
+    spec.tailMode = tailMode;
+    spec.tailL1L2Multiplier = mult;
+
+    if (! conv.SetImpulse (ir.data(), (int) ir.size(), block, 1.0, false, &spec))
+        return p;
+
+    p.ok = true;
+    p.layers = convo::NUPCTestAccess::numActiveLayers (conv);
+    for (int li = 0; li < p.layers && li < 3; ++li)
+        p.partSize[li] = convo::NUPCTestAccess::layerPartSize (conv, li);
+
+    const int irLen = (int) ir.size();
+    const int totalLen = ((irLen + 8 * block + block - 1) / block) * block;
+    std::vector<double> in ((size_t) block, 0.0);
+    p.out.assign ((size_t) totalLen, 0.0);
+
+    for (int t = 0; t < totalLen; t += block)
+    {
+        for (int i = 0; i < block; ++i)
+            in[(size_t) i] = ((t + i) == 0) ? 1.0 : 0.0;
+        conv.Add (in.data(), block);
+        conv.Get (p.out.data() + t, block);
+    }
+    return p;
+}
+
+void checkTailMultiplierPowerOfTwo (const std::vector<double>& ir, int block)
+{
+    const int irLen = (int) ir.size();
+
+    // tailMode 0 = Air Absorption（旧下限 6）, 1 = Layer Tail Contouring（下限 8）
+    for (const int mode : { 0, 1 })
+    {
+        const MultProbe ref = runWithTailMultiplier (ir, block, 8, mode);
+        if (! ref.ok)
+        {
+            report ("BUG013-geom", false, fmt ("mode=%d mult=8 SetImpulse failed", mode));
+            return;
+        }
+
+        // L2 層が存在する構成でなければ意味がない（IR が短いと L2 は生成されない）
+        const bool hasL2 = ref.layers >= 3;
+        report ("BUG013-layers", hasL2,
+                fmt ("mode=%d block=%d ir=%d layers=%d", mode, block, irLen, ref.layers));
+
+        // 要求値 → 丸め後の倍率で作った参照と、要求値そのもので作った実体が一致すること。
+        // （丸め後の値は 2 の冪であり、モード別の下限引き上げも両方に同じく効く）
+        for (const int mult : { 2, 3, 5, 6, 7, 9, 10, 11, 12, 13, 15, 16 })
+        {
+            const int snapped = convo::sanitizeTailL1L2Multiplier (mult);
+            const bool snappedOk = snapped > 0 && (snapped & (snapped - 1)) == 0;
+
+            const MultProbe refSnapped = runWithTailMultiplier (ir, block, snapped, mode);
+            const MultProbe probe = runWithTailMultiplier (ir, block, mult, mode);
+
+            bool geomOk = snappedOk && probe.ok && refSnapped.ok
+                          && probe.layers == refSnapped.layers;
+            for (int li = 0; li < probe.layers && li < 3; ++li)
+            {
+                const int ps = probe.partSize[li];
+                geomOk = geomOk && ps > 0 && (ps & (ps - 1)) == 0;
+                geomOk = geomOk && ps == refSnapped.partSize[li];
+            }
+
+            const bool outOk = probe.out == refSnapped.out;
+            report ("BUG013-mult", geomOk && outOk,
+                    fmt ("mode=%d block=%d mult=%d->%d l0=%d l1=%d l2=%d outMatch=%d",
+                         mode, block, mult, snapped,
+                         probe.partSize[0], probe.partSize[1], probe.partSize[2],
+                         outOk ? 1 : 0));
+        }
+    }
+}
 } // namespace
 
 int main()
@@ -367,6 +467,9 @@ int main()
         checkF (ir, c.block);
     }
     checkGeometryAtMaxBlock();
+
+    // ── BUG-013: tailL1L2Multiplier の 2 冪制約（L2 が生成される 3.0 秒 IR） ──
+    checkTailMultiplierPowerOfTwo (makeIr (144000), 512);
 
     // ── I: block 512 の 3.0 秒 IR（先頭パーティション欠落の回帰） ──
     {
