@@ -2105,6 +2105,13 @@ public:
         return snapshot;
     }
 
+    // ★ Live evidence: 実行中 Runtime の単調カウンタ（加算は RT のみ。ここでは読むだけ）。
+    //   消費しない（リセットしない）ため、shutdown 時点でも実行全体の値が読める。
+    [[nodiscard]] std::uint64_t audioCallbackCount() const noexcept
+    {
+        return consumeAtomic(rtLocalState_.audioCallbackEpochCounter, std::memory_order_acquire);
+    }
+
     struct RebuildDispatchDiagnostics
     {
         std::uint64_t requestCount = 0;

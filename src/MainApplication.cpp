@@ -25,6 +25,11 @@
 #include <xmmintrin.h>
 #include <pmmintrin.h>
 
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+
 #include <mkl.h>
 #include <ipp.h>    // [v2.1] ippInit() の宣言 (IPP CPU ディスパッチ初期化)
 
@@ -52,6 +57,35 @@
 #endif
 #endif
 
+namespace
+{
+// ★ Live evidence: プロセス内の単調時計（証拠の startedAtNs / emittedAtNs に使う）
+std::uint64_t steadyNowNs() noexcept
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+// ★ Live evidence: 実行識別子（CI のスクリプトが 1 実行ごとに一意な値を渡す）
+std::string runtimeRunIdFromEnv()
+{
+    if (const char* value = std::getenv("CONVO_ISR_RUNTIME_RUN_ID");
+        value != nullptr && value[0] != '\0')
+    {
+        return std::string(value);
+    }
+
+    return {};
+}
+
+// ★ Live evidence: 終了コード（fail-closed）
+constexpr int kLiveExitOk = 0;              // 実 Runtime の観測値を証拠化できた
+constexpr int kLiveExitNoRuntime = 2;       // フラグ単独（Runtime を回していない）
+constexpr int kLiveExitEvidenceFailed = 3;  // 実行したが証拠化に失敗（callback 0・書込失敗など）
+} // namespace
+
 void MainApplication::initialise(const juce::String& commandLine)
 {
     // ★ [P0-1] AVX2 ランタイムチェック（非対応 CPU はここで終了）
@@ -69,7 +103,35 @@ void MainApplication::initialise(const juce::String& commandLine)
     //   GUI は起動せず、生成後に即終了する（isr-run-runtime-evidence.ps1 の
     //   Wait-Process -Timeout 20 前提。生成物は isr-verify-evidence-provenance.ps1 が
     //   runtime モードで検証する）。
-    if (commandLine.contains("--verify-runtime-evidence"))
+    // ★ Live evidence: `--verify-runtime-evidence-live`
+    //   実 Runtime（AudioEngine）を回したうえで、その観測値を証拠化する。
+    //   既存の `--verify-runtime-evidence`（Exporter 単体呼び出し）とは別モードであり、
+    //   既存モードの意味は変更しない。
+    //   実 Runtime を回すために `--cli-run` と `--cli-exit-ms <ms>` の併用を必須とする。
+    //   単独指定は Runtime を回さないため、証拠を作らずに失敗終了する（exit 2）。
+    if (commandLine.contains("--verify-runtime-evidence-live"))
+    {
+        const bool hasCliRun = commandLine.contains("--cli-run");
+        const bool hasExitMs = commandLine.contains("--cli-exit-ms");
+
+        if (! hasCliRun || ! hasExitMs)
+        {
+            juce::Logger::writeToLog("[verify-runtime-evidence-live] requires --cli-run and --cli-exit-ms; "
+                                     "no runtime was executed (exit=2)");
+            juce::JUCEApplicationBase::setApplicationReturnValue(kLiveExitNoRuntime);
+            juce::JUCEApplicationBase::quit();
+            return;
+        }
+
+        liveRuntimeEvidenceRequested = true;
+        liveStartedAtNs = steadyNowNs();
+        juce::Logger::writeToLog("[verify-runtime-evidence-live] armed: runId="
+                                 + juce::String(runtimeRunIdFromEnv())
+                                 + " startedAtNs="
+                                 + juce::String(static_cast<juce::int64>(liveStartedAtNs)));
+    }
+
+    if (! liveRuntimeEvidenceRequested && commandLine.contains("--verify-runtime-evidence"))
     {
         convo::isr::EvidenceExporter evidenceExporter;
         evidenceExporter.exportEvidence(nullptr, 0);
@@ -174,6 +236,15 @@ void MainApplication::initialise(const juce::String& commandLine)
 void MainApplication::shutdown()
 {
     juce::Logger::writeToLog("[DIAG] MainApplication::shutdown() enter");
+
+    // ★ Live evidence: engine 生存中（mainWindow.reset() より前）に観測値を集めて書く。
+    //   終了コードは fail-closed（callback 0・書込失敗は 3）。
+    if (liveRuntimeEvidenceRequested)
+    {
+        const bool evidenceOk = emitLiveRuntimeEvidence();
+        juce::JUCEApplicationBase::setApplicationReturnValue(evidenceOk ? kLiveExitOk
+                                                                       : kLiveExitEvidenceFailed);
+    }
     // ★ D127-E (diagnostic only): SHUTDOWN_BEGIN — teardown phase 計測の起点。
     //   production semantics 変更なし（ログ出力のみ）。
     juce::Logger::writeToLog("[D123] SHUTDOWN_BEGIN");
@@ -210,6 +281,56 @@ void MainApplication::shutdown()
 #ifdef _WIN32
     timeEndPeriod(1);
 #endif
+}
+
+// ★ Live evidence: 実行中 engine の観測値を収集し、証拠として書き出す。
+//   値の生成はせず（engine のカウンタを読むだけ）、書込みは EvidenceExporter に委譲する。
+//   戻り値 false は「Live 検証を成功扱いにできない」ことを意味する（fail-closed）。
+bool MainApplication::emitLiveRuntimeEvidence()
+{
+    if (mainWindow == nullptr)
+    {
+        juce::Logger::writeToLog("[verify-runtime-evidence-live] no MainWindow; cannot collect runtime observation");
+        return false;
+    }
+
+    convo::isr::LiveRuntimeObservation observation;
+    const bool runtimeReady = mainWindow->collectLiveRuntimeObservation(observation);
+
+    observation.runId = runtimeRunIdFromEnv();
+#if JUCE_WINDOWS
+    observation.processId = static_cast<int>(::GetCurrentProcessId());
+#else
+    observation.processId = 0;
+#endif
+    observation.startedAtNs = liveStartedAtNs;
+    observation.emittedAtNs = steadyNowNs();
+
+    juce::Logger::writeToLog("[verify-runtime-evidence-live] observation: engineInitialized="
+                             + juce::String(static_cast<int>(runtimeReady))
+                             + " callbacks="
+                             + juce::String(static_cast<juce::int64>(observation.audioCallbackCount))
+                             + " sampleRate=" + juce::String(observation.sampleRateHz)
+                             + " block=" + juce::String(observation.blockSamples)
+                             + " irLoaded=" + juce::String(static_cast<int>(observation.irLoaded)));
+
+    std::string error;
+    const bool written = convo::isr::writeLiveRuntimeEvidence(observation, &error);
+    if (! written)
+    {
+        juce::Logger::writeToLog("[verify-runtime-evidence-live] evidence write failed: " + juce::String(error));
+        return false;
+    }
+
+    // fail-closed: Runtime が音声を処理していなければ成功扱いにしない。
+    if (! runtimeReady || observation.audioCallbackCount == 0)
+    {
+        juce::Logger::writeToLog("[verify-runtime-evidence-live] runtime did not process audio (fail-closed)");
+        return false;
+    }
+
+    juce::Logger::writeToLog("[verify-runtime-evidence-live] live runtime evidence written");
+    return true;
 }
 
 // ── JUCEエントリポイント生成マクロ ──

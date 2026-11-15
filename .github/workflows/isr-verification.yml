@@ -19,6 +19,11 @@ on:
         required: false
         default: false
         type: boolean
+      requireLiveRuntimeEvidence:
+        description: "Require live runtime evidence (actual runtime execution via --verify-runtime-evidence-live)"
+        required: false
+        default: false
+        type: boolean
       verificationTier:
         description: "Verification tier (smoke/standard/exhaustive)"
         required: false
@@ -537,6 +542,7 @@ jobs:
           $invokeArgs += '-SoakMinutes'; $invokeArgs += $soakMinutes
           if ('${{ inputs.autoPruneCleanupDeferred }}' -eq 'true') { $invokeArgs += '-AutoPruneCleanupDeferred' }
           if ('${{ inputs.requireRuntimeEvidence }}' -eq 'true') { $invokeArgs += '-RequireRuntimeEvidence' }
+          if ('${{ inputs.requireLiveRuntimeEvidence }}' -eq 'true') { $invokeArgs += '-RequireLiveRuntimeEvidence' }
           if ('${{ inputs.enforceTriggerPolicy }}' -eq 'true') { $invokeArgs += '-EnforceTriggerPolicy' }
           if ('${{ inputs.requireAstTriggerCheck }}' -eq 'true') { $invokeArgs += '-RequireAstTriggerCheck' }
           if ('${{ inputs.requireClangTidyAudit }}' -eq 'true') { $invokeArgs += '-RequireClangTidyAudit' }

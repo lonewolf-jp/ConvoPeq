@@ -10,6 +10,7 @@
 
 #include "AudioEngine.h"
 #include "AudioEngineProcessor.h"
+#include "LiveRuntimeEvidence.h"
 #include "ConvolverControlPanel.h"
 #include "EQControlPanel.h"
 #include "SpectrumAnalyzerComponent.h"
@@ -31,6 +32,10 @@ public:
     void runCommandLineAutomation(const juce::String& commandLine);
     AudioEngine* getAudioEngine() noexcept { return &audioEngine; }
     const AudioEngine* getAudioEngine() const noexcept { return &audioEngine; }
+
+    // ★ Live evidence: 実行中 engine の観測値を収集する（値の生成・補完はしない）。
+    //   戻り値 false は「Runtime が初期化されていない」ことを意味する（fail-closed の入力）。
+    bool collectLiveRuntimeObservation(convo::isr::LiveRuntimeObservation& out);
 
 private:
     struct DownwardComboLookAndFeel : public juce::LookAndFeel_V4

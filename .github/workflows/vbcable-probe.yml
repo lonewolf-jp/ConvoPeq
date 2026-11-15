@@ -32,6 +32,12 @@ name: VB-CABLE Probe (R-50, dispatch only)
 
 on:
   workflow_dispatch:
+    inputs:
+      requireLiveRuntimeEvidence:
+        description: "Require live runtime evidence (actual runtime execution via --verify-runtime-evidence-live)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -162,6 +168,19 @@ jobs:
           if ($blocks.Count -lt 1) { throw "PROBE FAILED: blockSamples>0 was not observed." }
           Write-Host "PROBE OK: callbacks>0 and blockSamples>0 observed."
 
+      - name: Live runtime evidence (opt-in)
+        if: ${{ inputs.requireLiveRuntimeEvidence }}
+        shell: pwsh
+        run: |
+          # Live 検証は「実 Runtime が音声を処理した」ことを証拠で示す。
+          # VB-CABLE が無いランナーでは callbacks=0 になり fail-closed で落ちる（想定どおり）。
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:BUILD_DIR 'ConvoPeq_artefacts\Release\ConvoPeq.exe'
+          if (-not (Test-Path $exe)) { throw "ConvoPeq.exe not found: $exe" }
+          $env:CONVO_ISR_RUNTIME_RUN_ID = "live-ci-${{ github.run_id }}-${{ github.run_attempt }}"
+          & pwsh -NoProfile -File ./.github/scripts/isr-run-runtime-evidence-live.ps1 -ExitMs 6000 -ExePath $exe
+          if ($LASTEXITCODE -ne 0) { throw "Live runtime evidence failed (exit=$LASTEXITCODE)" }
+
       - name: ctest HeadlessAudioPathVerification (existing criteria)
         shell: pwsh
         run: |
@@ -179,4 +198,6 @@ jobs:
             build.log
             selected-tests.log
             ConvoPeq-run.log
+            evidence/live_runtime_evidence.json
+            evidence/evidence_manifest.json
           if-no-files-found: warn
