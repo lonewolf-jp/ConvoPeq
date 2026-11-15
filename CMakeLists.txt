@@ -1450,6 +1450,52 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     endif()
 
     #------------------------------------------------------------
+    # ★ B-1: AudioSegmentBuffer::create() の例外安全（RAII）
+    #   確保関数が例外を投げたときに確保済みバッファが解放されることを固定する。
+    #------------------------------------------------------------
+    juce_add_console_app(AudioSegmentBufferTests)
+    target_sources(AudioSegmentBufferTests PRIVATE
+        src/tests/AudioSegmentBufferTests.cpp
+    )
+    target_include_directories(AudioSegmentBufferTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(AudioSegmentBufferTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(AudioSegmentBufferTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioSegmentBufferTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(AudioSegmentBufferTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioSegmentBufferTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    target_link_libraries(AudioSegmentBufferTests PRIVATE Psapi)
+    add_test(NAME AudioSegmentBufferTests COMMAND AudioSegmentBufferTests)
+    juce_generate_juce_header(AudioSegmentBufferTests)
+    target_link_libraries(AudioSegmentBufferTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+
+    #------------------------------------------------------------
     # ★ RES-F: CPU 性能予算の Release 専用テスト（実装準備仕様 §3.3）
     #   基準構成が MSVC Release x64 のため、CTest には Release 構成でのみ登録する。
     #   Debug では登録されない（＝評価していないことが ctest 一覧から判別できる）。
