@@ -869,6 +869,16 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(FFTBackendTests PRIVATE /EHsc)
     add_test(NAME FFTBackendTests COMMAND FFTBackendTests)
 
+    # ★ BUG-013: tailL1L2Multiplier の 2 冪制約（ヘッダ単体・外部依存なし）
+    #   L2 の FFT 長 = 2 * l1Part * 倍率 が 2 の冪であることを固定する。
+    add_executable(TailLayerMultiplierTests
+        src/tests/TailLayerMultiplierTests.cpp
+    )
+    target_include_directories(TailLayerMultiplierTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(TailLayerMultiplierTests PRIVATE cxx_std_20)
+    target_compile_options(TailLayerMultiplierTests PRIVATE /EHsc /utf-8)
+    add_test(NAME TailLayerMultiplierTests COMMAND TailLayerMultiplierTests)
+
     # ★ Week2: boundExcessDb 分布測定ベンチマーク
     #   JUCE/MKL に依存しない純粋数学ベンチマーク。
     add_executable(EQBoundExcessBenchmark
@@ -1438,6 +1448,99 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     if(DEFINED ENV{IPPROOT})
         target_include_directories(TailLayerIntegrityTests SYSTEM PRIVATE "$ENV{IPPROOT}/include")
     endif()
+
+    #------------------------------------------------------------
+    # ★ B-1: AudioSegmentBuffer::create() の例外安全（RAII）
+    #   確保関数が例外を投げたときに確保済みバッファが解放されることを固定する。
+    #------------------------------------------------------------
+    juce_add_console_app(AudioSegmentBufferTests)
+    target_sources(AudioSegmentBufferTests PRIVATE
+        src/tests/AudioSegmentBufferTests.cpp
+    )
+    target_include_directories(AudioSegmentBufferTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(AudioSegmentBufferTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(AudioSegmentBufferTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioSegmentBufferTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(AudioSegmentBufferTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AudioSegmentBufferTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    target_link_libraries(AudioSegmentBufferTests PRIVATE Psapi)
+    add_test(NAME AudioSegmentBufferTests COMMAND AudioSegmentBufferTests)
+    juce_generate_juce_header(AudioSegmentBufferTests)
+    target_link_libraries(AudioSegmentBufferTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+
+    #------------------------------------------------------------
+    # ★ B-2: CMA-ES の早期終了条件（sigma 下限到達）の回帰
+    #   設計結果を [SIG] 行で出力し、早期終了の有効化前後で比較できるようにする。
+    #------------------------------------------------------------
+    juce_add_console_app(AllpassDesignerCmaesTests)
+    target_sources(AllpassDesignerCmaesTests PRIVATE
+        src/tests/AllpassDesignerCmaesTests.cpp
+        src/AllpassDesigner.cpp
+        src/CmaEsOptimizerDynamic.cpp
+    )
+    target_include_directories(AllpassDesignerCmaesTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(AllpassDesignerCmaesTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(AllpassDesignerCmaesTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AllpassDesignerCmaesTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(AllpassDesignerCmaesTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AllpassDesignerCmaesTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    add_test(NAME AllpassDesignerCmaesTests COMMAND AllpassDesignerCmaesTests)
+    juce_generate_juce_header(AllpassDesignerCmaesTests)
+    target_link_libraries(AllpassDesignerCmaesTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
 
     #------------------------------------------------------------
     # ★ RES-F: CPU 性能予算の Release 専用テスト（実装準備仕様 §3.3）

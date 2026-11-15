@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <new>
 
 #include <JuceHeader.h>
 #include "audioengine/AtomicAccess.h"
@@ -31,22 +32,33 @@ public:
     //   失敗時の _aligned_free も aligned_free（= mkl_free）に統一（no-op 安全: nullptr free）。
     [[nodiscard]] static std::unique_ptr<AudioSegmentBuffer> create()
     {
-        // aligned allocation on heap（RT-safe: 事前確保）
-        //   NonRT のみ呼び出し可能なため例外伝播は安全（aligned_malloc は bad_alloc 送出）。
-        auto* left = static_cast<double*>(convo::aligned_malloc(
-            kCapacity * sizeof(double), kAlignment));
-        auto* right = static_cast<double*>(convo::aligned_malloc(
-            kCapacity * sizeof(double), kAlignment));
-        if (!left || !right)
-        {
-            convo::aligned_free(left);   // nullptr free は no-op（mkl_free(ptr==nullptr) 安全）
-            convo::aligned_free(right);
-            return nullptr;  // Fail-Closed
-        }
-        // ScopedAlignedPtr に所有権移譲（aligned_malloc ↔ aligned_free pair 一致）
+        // ★ B-1: aligned_malloc は失敗時に std::bad_alloc を送出する（nullptr を返さない）。
+        //   旧実装は nullptr 判定（到達しないデッドコード）を持ち、2 本目の確保や
+        //   new AudioSegmentBuffer() で例外が出ると 1 本目／両方が解放されずに漏れていた。
+        //   ここでは確保関数を注入可能な 1 本の経路にまとめ、所有権を常に RAII に持たせる。
+        return createWithAllocator([](size_t bytes, size_t alignment) {
+            return convo::aligned_malloc(bytes, alignment);
+        });
+    }
+
+    // ★ B-1: 例外経路を検証するための確保関数注入（テスト専用）。
+    //   本番の呼出し元は create() のみ。テストは n 回目で std::bad_alloc を投げる
+    //   確保関数を渡し、確保済みバッファが解放されることを確かめる。
+    //   AudioSegmentBuffer を先に確保してからバッファを差し替えるため、
+    //   確保関数が例外を投げた時点の所有者は必ず buf（unique_ptr）になる。
+    //
+    //   契約: allocate は失敗時に必ず例外を送出すること。nullptr を返してはならない。
+    //   本番の convo::aligned_malloc は std::bad_alloc を送出するので create() は
+    //   この契約を満たす。契約違反（nullptr 返し）で不完全なバッファを返さないよう、
+    //   ここでも nullptr を検出したら std::bad_alloc にして fail-closed にする。
+    template <typename AllocateFn>
+    [[nodiscard]] static std::unique_ptr<AudioSegmentBuffer> createWithAllocator(AllocateFn&& allocate)
+    {
         auto buf = std::unique_ptr<AudioSegmentBuffer>(new AudioSegmentBuffer());
-        buf->leftSamples_.reset(left);
-        buf->rightSamples_.reset(right);
+
+        buf->leftSamples_.reset(allocateChecked(allocate));
+        buf->rightSamples_.reset(allocateChecked(allocate));
+
         return buf;
     }
 
@@ -140,6 +152,17 @@ public:
 
 private:
     AudioSegmentBuffer() = default;  // Factory create() のみ生成可能
+
+    // ★ B-1: 確保関数の契約を強制する。nullptr を返したら std::bad_alloc にして
+    //   不完全なバッファ（確保済みに見えるが中身が空）を返さない。
+    template <typename AllocateFn>
+    [[nodiscard]] static double* allocateChecked(AllocateFn&& allocate)
+    {
+        auto* p = static_cast<double*>(allocate(kCapacity * sizeof(double), kAlignment));
+        if (p == nullptr)
+            throw std::bad_alloc();
+        return p;
+    }
 
     convo::ScopedAlignedPtr<double> leftSamples_;   // heap, 64-byte aligned
     convo::ScopedAlignedPtr<double> rightSamples_;  // heap, 64-byte aligned

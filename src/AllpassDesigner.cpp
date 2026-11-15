@@ -322,14 +322,17 @@ DesignResult AllpassDesigner::designWithCMAES(
 
     const int D = 2 * config.numSections;   // (x_rho, x_theta) のペア
     CmaEsOptimizerDynamic optimizer(D);
-    optimizer.setParams(config.cmaesParams);
-    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : generateRandomSeed());
+
+    // ★ B-2: 有効な sigma 範囲を 1 箇所で決める。初期 sigma を範囲外に置かないための
+    //   調整（旧実装では setParams を 2 回呼んでいた）と、早期終了の下限判定で同じ値を
+    //   使うため、ここで確定して以降は effectiveParams だけを参照する。
+    CmaEsOptimizerDynamic::Params effectiveParams = config.cmaesParams;
     if (config.cmaesInitialSigma > 0.0) {
-        CmaEsOptimizerDynamic::Params p = config.cmaesParams;
-        p.sigmaMin = std::min(p.sigmaMin, config.cmaesInitialSigma);
-        p.sigmaMax = std::max(p.sigmaMax, config.cmaesInitialSigma);
-        optimizer.setParams(p);
+        effectiveParams.sigmaMin = std::min(effectiveParams.sigmaMin, config.cmaesInitialSigma);
+        effectiveParams.sigmaMax = std::max(effectiveParams.sigmaMax, config.cmaesInitialSigma);
     }
+    optimizer.setParams(effectiveParams);
+    optimizer.setSeed(config.cmaesSeed != 0 ? config.cmaesSeed : generateRandomSeed());
 
     // 初期平均値（無制約空間）
     // ρ: sigmoid(0) = 0.49 を起点に全セクションで共通
@@ -463,11 +466,18 @@ DesignResult AllpassDesigner::designWithCMAES(
             }
         }
 
-        // 早期終了条件：sigma が十分小さい、十分収束、または改善停滞
-        double currentSigma = optimizer.getSigma();
-        // sigmaMin が 1e-4 を超える設定の場合（例: sigmaMin=0.05）、固定値 1e-4 では
-        // 永遠に満たされない。設定された sigmaMin の 1/10 と 1e-4 の小さい方を閾値とする。
-        if (currentSigma < std::min(1e-4, config.cmaesParams.sigmaMin * 0.1)) break;
+        // 早期終了条件：十分収束、または改善停滞
+        // ★ B-2: ここには旧実装で `sigma < min(1e-4, sigmaMin * 0.1)` という条件があったが、
+        //   sigma は CmaEsOptimizerDynamic::update() で [sigmaMin, sigmaMax] にクランプ
+        //   されるため、既定構成（sigmaMin=1e-6, 初期 sigma=0.3）では閾値 1e-7 に到達せず
+        //   一度も成立しない死んだ条件だった。
+        //   実測（48 kHz / 8 セクション / 100 世代上限 / 一定群遅延 10 サンプル）では、
+        //   この条件を到達可能にすると gen=18 で打ち切られ、設計品質が
+        //   20.873414 → 20.874867 サンプルへ悪化した。sigmaMin を下限到達で判定する案も
+        //   sigmaMin=0.05 の構成で 14.846581 → 21.564231 サンプルへ悪化した
+        //   （この実装の sigma は収束指標ではなく、クランプされた固定ステップ幅として働く）。
+        //   実際の打ち切りは下の停滞判定が担っており（既定構成で gen=32）、
+        //   条件を削除しても実行世代数・設計結果は変わらない。
         // 収束閾値: 重み付き RMSE 1.0サンプル（≈20μs @ 48kHz、5μs @ 192kHz）
         // 旧値 1e-3 は 0.001サンプル ≈ 5ns @ 192kHz で到達不能だったため修正
         if (bestFitness < 1.0) break;

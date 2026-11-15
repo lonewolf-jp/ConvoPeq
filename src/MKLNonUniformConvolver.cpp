@@ -41,6 +41,7 @@
 
 #include "AlignedAllocation.h"
 #include "DspNumericPolicy.h"
+#include "TailLayerMultiplier.h"   // ★ BUG-013: tailL1L2Multiplier の 2 冪制約
 #include "AtomicAccess.h"  // convo::consumeAtomic
 
 // absNoLibm — 標準ライブラリ abs を経由せずビット操作で |x| を求める (RT-safe)
@@ -679,7 +680,22 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     double tailStartSec = (filterSpec != nullptr) ? juce::jlimit(0.01, 0.80, filterSpec->tailStartSeconds) : 0.085;
     const double userTailStrength = (filterSpec != nullptr) ? juce::jlimit(0.0, 2.0, filterSpec->tailStrength) : 1.0;
     double tailStrength = userTailStrength;
-    int tailL1L2Mult = (filterSpec != nullptr) ? juce::jlimit(2, 16, filterSpec->tailL1L2Multiplier) : 8;
+    // ★ BUG-013: L2 のパーティション長は l1Part * tailL1L2Mult、その FFT 長は 2 倍。
+    //   IPP の実数 FFT は 2 の冪長しか扱えないため、倍率を 2 の冪（2/4/8/16）へ丸める。
+    //   丸め前の非 2 冪（3, 5, 6, 7, 9〜15）は L2 テールの FFT プランが実長より小さく
+    //   作られ、テールが破壊されていた（既定値 8 と 2 の冪の値は従来どおり無変更）。
+    const int requestedTailL1L2Mult =
+        (filterSpec != nullptr)
+            ? juce::jlimit(convo::kTailL1L2MultMin, convo::kTailL1L2MultMax,
+                           filterSpec->tailL1L2Multiplier)
+            : convo::kTailL1L2MultDefault;
+    int tailL1L2Mult = convo::sanitizeTailL1L2Multiplier(requestedTailL1L2Mult);
+    if (tailL1L2Mult != requestedTailL1L2Mult)
+    {
+        juce::Logger::writeToLog("MKLNonUniformConvolver: tailL1L2Multiplier "
+            + juce::String(requestedTailL1L2Mult) + " -> " + juce::String(tailL1L2Mult)
+            + " (L2 FFT length must be a power of two)");
+    }
 
     double layer1Gain = 1.0;
     double layer2Gain = 1.0;
@@ -702,7 +718,9 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     {
         // Air Absorption mode: preserve early reflections while progressively damping late layers.
         tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.055));
-        tailL1L2Mult = juce::jlimit(2, 16, std::max(tailL1L2Mult, 6));
+        // ★ BUG-013: 旧下限 6 は 2 の冪でなく、L2 の FFT 長を非 2 冪にするため 8 へ引き上げる。
+        tailL1L2Mult = juce::jlimit(convo::kTailL1L2MultMin, convo::kTailL1L2MultMax,
+                                    std::max(tailL1L2Mult, 8));
         tailStrength = juce::jlimit(0.0, 2.0, userTailStrength);
 
         layer1Gain = juce::jlimit(0.0, 2.0, tailStrength * (0.95 - 0.25 * strength01));
@@ -873,6 +891,18 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
 
         l.complexSize = l.fftSize / 2 + 1;
         l.partStride  = (l.complexSize * 2 + 7) & ~7;
+
+        // ★ BUG-013 防御: FFT 長 = 2 * partSize は 2 の冪でなければならない。
+        //   partSize が非 2 冪だと createPlan 側の検証で弾かれるが、ここでも
+        //   明示的に fail-closed にして「壊れたプランで成功したように見える」経路を残さない。
+        if (! convo::isPowerOfTwoValue(l.partSize))
+        {
+            juce::Logger::writeToLog("MKLNonUniformConvolver: layer " + juce::String(li)
+                + " partSize is not a power of two (partSize=" + juce::String(l.partSize)
+                + ", fftSize=" + juce::String(l.fftSize) + ")");
+            releaseAllLayers();
+            return false;
+        }
 
         l.numPartsIR = (cfgs[li].len + l.partSize - 1) / l.partSize;
         l.numParts   = juce::nextPowerOfTwo(l.numPartsIR);

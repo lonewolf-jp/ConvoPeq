@@ -276,6 +276,58 @@ using convo::FFTExecutionContext;
     return true;
 }
 
+//==============================================================================
+// Test 9: createPlan の 2 冪契約（BUG-013 fail-closed）
+//   旧実装は非 2 冪長でも floor(log2) のプランを返して isValid()==true になった。
+//   その場合 complexSize (= fftSize/2+1) が実プラン長と食い違い、L2 テールが壊れる。
+//==============================================================================
+[[nodiscard]] bool testProductionFftPlanPowerOfTwoContract()
+{
+    const int validSizes[] = { 2, 4, 8, 64, 1024, 4096, 8192, 16384 };
+    for (const int n : validSizes)
+    {
+        ProductionFft::Plan plan = ProductionFft::createPlan(n);
+        const bool ok = plan.isValid()
+                        && plan.fftSize == n
+                        && plan.complexSize == n / 2 + 1;
+        ProductionFft::destroyPlan(plan);
+        if (!ok)
+        {
+            std::printf("FAIL testProductionFftPlanPowerOfTwoContract: valid size %d was rejected\n", n);
+            return false;
+        }
+    }
+
+    // 非 2 冪（BUG-013 の発火値）と範囲外は必ず拒否される
+    const int invalidSizes[] = { -1024, -1, 0, 1, 3, 5, 6, 7, 1000, 6144, 12288, 20000 };
+    for (const int n : invalidSizes)
+    {
+        ProductionFft::Plan plan = ProductionFft::createPlan(n);
+        const bool rejected = ! plan.isValid();
+        ProductionFft::destroyPlan(plan);
+        if (!rejected)
+        {
+            std::printf("FAIL testProductionFftPlanPowerOfTwoContract: non-power-of-two %d was accepted\n", n);
+            return false;
+        }
+    }
+
+    // BUG-013 の実際の経路: l1Part=1024, mult=6 → l2Part=6144 → fftSize=12288
+    {
+        ProductionFft::Plan plan = ProductionFft::createPlan(1024 * 6 * 2);
+        const bool rejected = ! plan.isValid();
+        ProductionFft::destroyPlan(plan);
+        if (!rejected)
+        {
+            std::printf("FAIL testProductionFftPlanPowerOfTwoContract: fftSize 12288 (BUG-013 path) was accepted\n");
+            return false;
+        }
+    }
+
+    std::printf("[PASS] testProductionFftPlanPowerOfTwoContract\n");
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -293,6 +345,7 @@ int main()
     allPassed &= testExecutionContextSetPlan();
     allPassed &= testFftStageStableIntegers();
     allPassed &= testProductionFftOutputCorrectness();
+    allPassed &= testProductionFftPlanPowerOfTwoContract();
 
     if (allPassed)
     {
