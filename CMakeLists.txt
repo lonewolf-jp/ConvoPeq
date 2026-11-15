@@ -1496,6 +1496,53 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     )
 
     #------------------------------------------------------------
+    # ★ B-2: CMA-ES の早期終了条件（sigma 下限到達）の回帰
+    #   設計結果を [SIG] 行で出力し、早期終了の有効化前後で比較できるようにする。
+    #------------------------------------------------------------
+    juce_add_console_app(AllpassDesignerCmaesTests)
+    target_sources(AllpassDesignerCmaesTests PRIVATE
+        src/tests/AllpassDesignerCmaesTests.cpp
+        src/AllpassDesigner.cpp
+        src/CmaEsOptimizerDynamic.cpp
+    )
+    target_include_directories(AllpassDesignerCmaesTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(AllpassDesignerCmaesTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(AllpassDesignerCmaesTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AllpassDesignerCmaesTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(AllpassDesignerCmaesTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AllpassDesignerCmaesTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    add_test(NAME AllpassDesignerCmaesTests COMMAND AllpassDesignerCmaesTests)
+    juce_generate_juce_header(AllpassDesignerCmaesTests)
+    target_link_libraries(AllpassDesignerCmaesTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+
+    #------------------------------------------------------------
     # ★ RES-F: CPU 性能予算の Release 専用テスト（実装準備仕様 §3.3）
     #   基準構成が MSVC Release x64 のため、CTest には Release 構成でのみ登録する。
     #   Debug では登録されない（＝評価していないことが ctest 一覧から判別できる）。
