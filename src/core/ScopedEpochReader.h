@@ -212,15 +212,21 @@ public:
 
     struct MeasureRecord
     {
-        std::atomic<uint8_t>  state{0};          // 0=free 1=active 2=exited
-        std::atomic<uint64_t> enterUs{0};
-        std::atomic<uint64_t> exitUs{0};
-        std::atomic<uint64_t> threadTag{0};
-        std::atomic<uint64_t> providerKey{0};
-        std::atomic<uint32_t> slot{0xFFFFFFFFu};
-        std::atomic<uint32_t> depth{0};
-        std::atomic<uint32_t> seq{0};
-        char tag[32]{};
+        std::atomic<uint8_t>  state;             // 0=free 1=active 2=exited
+        std::atomic<uint64_t> enterUs;
+        std::atomic<uint64_t> exitUs;
+        std::atomic<uint64_t> threadTag;
+        std::atomic<uint64_t> providerKey;
+        std::atomic<uint32_t> slot;
+        std::atomic<uint32_t> depth;
+        std::atomic<uint32_t> seq;
+        char tag[32];
+
+        // ★ icx (Clang) 対応: 既定メンバ初期化子は外側クラス定義内では使えない。
+        //   static inline 配列 measure_ の {} 初期化のため constexpr ctor にする。
+        constexpr MeasureRecord() noexcept
+            : state(0), enterUs(0), exitUs(0), threadTag(0), providerKey(0),
+              slot(0xFFFFFFFFu), depth(0), seq(0), tag{} {}
     };
 
     static inline MeasureRecord measure_[kMeasureSlots]{};
