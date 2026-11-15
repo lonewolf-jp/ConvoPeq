@@ -44,14 +44,18 @@ if ($TimeoutSec -le 0) {
 }
 
 # -- 1) clear the previous live evidence (never reuse an earlier run) ----------
-#    Existing artifacts (manifest etc.) are left untouched: live identity is
-#    established by runId and file mtime, not by deleting the whole directory.
+#    Also drop the previous manifest: the tier runner seeds one with
+#    generationMode='seed' and no runtimeRunId, which the checker would reject
+#    even when the live observations are valid. The app rewrites the manifest
+#    during the run with generationMode='runtime' and this run's runId.
 if (Test-Path -LiteralPath $evidenceRoot) {
-    $livePath = Join-Path $evidenceRoot 'live_runtime_evidence.json'
-    if (Test-Path -LiteralPath $livePath) {
-        Remove-Item -LiteralPath $livePath -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $livePath) {
-            throw "Failed to clear previous live evidence: $livePath"
+    foreach ($name in @('live_runtime_evidence.json', 'evidence_manifest.json')) {
+        $stalePath = Join-Path $evidenceRoot $name
+        if (Test-Path -LiteralPath $stalePath) {
+            Remove-Item -LiteralPath $stalePath -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $stalePath) {
+                throw "Failed to clear previous evidence: $stalePath"
+            }
         }
     }
 }

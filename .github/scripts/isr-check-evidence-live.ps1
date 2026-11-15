@@ -102,7 +102,13 @@ foreach ($field in $requiredRuntimeFields) {
     }
 }
 
-if (-not [bool]$runtime.engineInitialized) {
+# engineInitialized must be a JSON boolean: PowerShell 5.1 treats the non-empty
+# string "false" as $true, so a cast alone would accept a forged string.
+$engineInitialized = $runtime.engineInitialized
+if ($engineInitialized -isnot [bool]) {
+    Fail "engineInitialized must be a JSON boolean (actual type: $($engineInitialized.GetType().Name))"
+}
+if (-not $engineInitialized) {
     Fail "engineInitialized is false (runtime did not initialize)"
 }
 
@@ -120,7 +126,10 @@ if ($blockSamples -le 0) {
     Fail "blockSamples must be > 0 (actual=$blockSamples)"
 }
 
-# -- derived values against the measured run length --------------------------
+# -- derived values: recompute from the observations and compare --------------
+#    The gate must not trust the derived block; it is recomputed from the
+#    counters and the steady-clock timestamps, then compared with the stored
+#    values (the exporter rounds to about six digits).
 $derived = $evidence.derived
 if ($null -eq $derived) {
     Fail "derived block is missing"
@@ -135,15 +144,35 @@ $audioSeconds = [double]$derived.audioSecondsProcessed
 $wallSeconds = [double]$derived.wallSeconds
 $dutyRatio = [double]$derived.dutyRatio
 
-if ($audioSeconds -le 0) {
-    Fail "derived.audioSecondsProcessed must be > 0 (callbacks=$callbackCount block=$blockSamples rate=$sampleRateHz)"
+$recomputedAudioSeconds = ($callbackCount * $blockSamples) / $sampleRateHz
+$recomputedWallSeconds = ($emittedAtNs - $startedAtNs) / 1.0e9
+if ($recomputedWallSeconds -le 0) {
+    Fail "recomputed wall time is not positive (startedAtNs=$startedAtNs emittedAtNs=$emittedAtNs)"
 }
-if ($wallSeconds -le 0) {
-    Fail "derived.wallSeconds must be > 0"
+$recomputedDutyRatio = $recomputedAudioSeconds / $recomputedWallSeconds
+
+function Test-CloseEnough([double]$stored, [double]$recomputed, [double]$relative, [double]$absolute) {
+    $delta = [Math]::Abs($stored - $recomputed)
+    if ($delta -le $absolute) { return $true }
+    if ([Math]::Abs($recomputed) -gt 0.0 -and ($delta / [Math]::Abs($recomputed)) -le $relative) { return $true }
+    return $false
 }
-if ($dutyRatio -lt 0.25 -or $dutyRatio -gt 4.0) {
-    $rounded = [Math]::Round($dutyRatio, 3)
-    Fail "dutyRatio out of range: $rounded (audioSeconds=$audioSeconds wallSeconds=$wallSeconds)"
+
+if (-not (Test-CloseEnough $audioSeconds $recomputedAudioSeconds 0.01 0.01)) {
+    Fail ("derived.audioSecondsProcessed does not match callbacks*block/rate: stored=$audioSeconds " +
+        "recomputed=$recomputedAudioSeconds (callbacks=$callbackCount block=$blockSamples rate=$sampleRateHz)")
+}
+if (-not (Test-CloseEnough $wallSeconds $recomputedWallSeconds 0.01 0.01)) {
+    Fail ("derived.wallSeconds does not match emittedAtNs-startedAtNs: stored=$wallSeconds " +
+        "recomputed=$recomputedWallSeconds")
+}
+if (-not (Test-CloseEnough $dutyRatio $recomputedDutyRatio 0.01 0.01)) {
+    Fail ("derived.dutyRatio does not match audioSeconds/wallSeconds: stored=$dutyRatio " +
+        "recomputed=$recomputedDutyRatio")
+}
+if ($recomputedDutyRatio -lt 0.25 -or $recomputedDutyRatio -gt 4.0) {
+    $rounded = [Math]::Round($recomputedDutyRatio, 3)
+    Fail "dutyRatio out of range: $rounded (audioSeconds=$recomputedAudioSeconds wallSeconds=$recomputedWallSeconds)"
 }
 
 # -- file mtime inside the run window (wall clock) ---------------------------
@@ -180,21 +209,23 @@ if ($windowEndUtc -ne [datetime]::MinValue) {
 $manifestPath = Join-Path $evidenceRoot "evidence_manifest.json"
 if (Test-Path -LiteralPath $manifestPath) {
     $manifestRaw = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
-    if (-not [string]::IsNullOrWhiteSpace($manifestRaw)) {
-        try {
-            $manifest = $manifestRaw | ConvertFrom-Json
-        } catch {
-            Fail "evidence_manifest.json is not valid JSON: $($_.Exception.Message)"
-        }
+    if ([string]::IsNullOrWhiteSpace($manifestRaw)) {
+        # An empty manifest would skip both checks below; reject it instead.
+        Fail "evidence_manifest.json exists but is empty"
+    }
+    try {
+        $manifest = $manifestRaw | ConvertFrom-Json
+    } catch {
+        Fail "evidence_manifest.json is not valid JSON: $($_.Exception.Message)"
+    }
 
-        if ("$($manifest.generationMode)" -ne 'runtime') {
-            Fail "manifest generationMode is not runtime: actual=$($manifest.generationMode)"
-        }
-        if ("$($manifest.runtimeRunId)" -ne $runId) {
-            Fail "manifest runtimeRunId mismatch: actual=$($manifest.runtimeRunId) expected=$runId"
-        }
+    if ("$($manifest.generationMode)" -ne 'runtime') {
+        Fail "manifest generationMode is not runtime: actual=$($manifest.generationMode)"
+    }
+    if ("$($manifest.runtimeRunId)" -ne $runId) {
+        Fail "manifest runtimeRunId mismatch: actual=$($manifest.runtimeRunId) expected=$runId"
     }
 }
 
-Write-Host "[PASS] live evidence gate: callbacks=$callbackCount rate=$sampleRateHz block=$blockSamples duty=$([Math]::Round($dutyRatio, 3)) runId=$runId"
+Write-Host "[PASS] live evidence gate: callbacks=$callbackCount rate=$sampleRateHz block=$blockSamples duty=$([Math]::Round($recomputedDutyRatio, 3)) runId=$runId"
 exit 0
