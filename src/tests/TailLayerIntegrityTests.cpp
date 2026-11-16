@@ -325,6 +325,195 @@ void checkH4 (const std::vector<double>& ir, int block, double referenceDb, cons
                  block, (int) ir.size(), r.eFixedDb, referenceDb));
 }
 
+//============================================================================
+// B-12: ゲイン適用境界のサンプル単位検査
+//
+//   仕様（doc/AirAbsorption_LayerTailContouring_Algorithm_Spec_2026-05-23.md §4.1）:
+//     t < b1        : 1.0
+//     b1 <= t < b2  : g1
+//     b2 <= t       : g2
+//   b1 = llround(max(tailStartSeconds, 0.12) * sampleRate)
+//   b2 = b1 + kL1MaxParts * kRefL0Part * refL1Mult
+//
+//   H-4 は下限側（>= ref - 6 dB）だけを見るため、b2 以降に g1 を掛けても通る。
+//   H-7 の 1 秒 IR は b2 = 71296 より前で終わるため、b2 の境界が存在しない。
+//   その 2 つが固定できない g2 の境界を、ここでサンプル単位に固定する。
+//
+//   期待値は実装のヘルパを使わず、上の式から独立に計算する。
+//============================================================================
+std::vector<double> captureImpulseResponse (const std::vector<double>& ir, int block, int& lag)
+{
+    using convo::MKLNonUniformConvolver;
+
+    MKLNonUniformConvolver conv;
+    convo::FilterSpec spec {};
+    spec.sampleRate = kSampleRate;
+    spec.tailEnabled = true;
+    spec.tailMode = 1;                       // 既定（Layer Tail Contouring）
+
+    if (! conv.SetImpulse (ir.data(), (int) ir.size(), block, 1.0, false, &spec))
+        return {};
+
+    const int irLen = (int) ir.size();
+    const int totalLen = ((irLen + 8 * block + block - 1) / block) * block;
+    std::vector<double> in ((size_t) block, 0.0);
+    std::vector<double> out ((size_t) totalLen, 0.0);
+
+    for (int t = 0; t < totalLen; t += block)
+    {
+        for (int i = 0; i < block; ++i)
+            in[(size_t) i] = ((t + i) == 0) ? 1.0 : 0.0;
+        conv.Add (in.data(), block);
+        conv.Get (out.data() + t, block);
+    }
+
+    lag = argMaxAbs (out) - argMaxAbs (ir);
+    return out;
+}
+
+// 仕様 §4.1 の境界と §3.3(B) のゲイン（実装のヘルパは使わない）
+struct GainBoundaries
+{
+    int b1 = 0;
+    int b2 = 0;
+    int rCoverage = 1;   // max{ 2^k : 2^k * 256 <= max(256, b1) }
+    int refL1Mult = 1;   // min(rCoverage, 4, tailL1L2Mult)
+    double g1 = 1.0;
+    double g2 = 1.0;
+};
+
+GainBoundaries specGainBoundaries (int irLen)
+{
+    // §3.3(A): tailStartSec = clamp(max(FilterSpec 既定 0.085, 0.12))
+    const double tailStartSec = 0.12;
+    const int b1 = std::max (1, std::min (irLen,
+                                          (int) std::llround (tailStartSec * kSampleRate)));
+
+    // §4.1: b2 = b1 + kL1MaxParts * kRefL0Part * refL1Mult
+    //
+    //   refL1Mult の仕様（§4.1）: 「1 から始めて 2·r·256 <= max(256, b1) を満たす間 2 倍し、
+    //   4 と tailL1L2Mult で頭打ちにした値」。
+    //   実装のループ条件を写さず、この文言どおりに
+    //     rCoverage = max{ 2^k : 2^k · 256 <= max(256, b1) }
+    //     refL1Mult = min(rCoverage, 4, tailL1L2Mult)
+    //   として求める。4 と 8 はどちらも 2 の冪なので、min をどの順に適用しても結果は同じ。
+    //   b1 = 5760 のとき 2^4·256 = 4096 <= 5760、2^5·256 = 8192 > 5760 なので
+    //   rCoverage = 16、refL1Mult = min(16, 4, 8) = 4 になる。
+    constexpr int kRefL0Part    = 256;
+    constexpr int kL1MaxParts   = 64;
+    constexpr int kTailL1L2Mult = 8;         // FilterSpec 既定 tailL1L2Multiplier
+    constexpr int kRefL1MultCap = 4;         // §4.1 の頭打ち
+
+    const int coverage = std::max (kRefL0Part, b1);
+    int rCoverage = 1;
+    while (rCoverage * 2 * kRefL0Part <= coverage)
+        rCoverage *= 2;
+    const int refL1Mult = std::min (rCoverage, std::min (kRefL1MultCap, kTailL1L2Mult));
+
+    // §3.3(A)/(B): tailStrength = clamp(max(1.0, 1.25)) = 1.25、strength01 = 0.5
+    const double tailStrength = 1.25;
+    const double strength01   = 0.5;
+
+    GainBoundaries s;
+    s.b1 = b1;
+    s.rCoverage = rCoverage;
+    s.refL1Mult = refL1Mult;
+    s.b2 = b1 + kL1MaxParts * kRefL0Part * refL1Mult;
+    s.g1 = std::min (2.0, tailStrength * (1.05 + 0.20 * strength01));
+    s.g2 = std::min (2.0, tailStrength * (0.82 + 0.12 * strength01));
+    return s;
+}
+
+void checkGainBoundaries()
+{
+    // 3 秒 IR: b2 が IR の内側に入る（H-7 の 1 秒 IR では外側になる）
+    const auto ir = makeIr (144000);
+    const int irLen = (int) ir.size();
+    const auto s = specGainBoundaries (irLen);
+
+    const bool paramsOk = (s.b1 == 5760) && (s.rCoverage == 16) && (s.refL1Mult == 4)
+                          && (s.b2 == 71296) && (s.b2 < irLen)
+                          && (std::fabs (s.g1 - 1.4375) < 1.0e-12)
+                          && (std::fabs (s.g2 - 1.1000) < 1.0e-12);
+    report ("B12-G-param", paramsOk,
+            fmt ("b1=%d rCoverage=%d refL1Mult=%d b2=%d irLen=%d g1=%.4f g2=%.4f",
+                 s.b1, s.rCoverage, s.refL1Mult, s.b2, irLen, s.g1, s.g2));
+
+    const auto gainAt = [&s] (int i) -> double
+    {
+        if (i < s.b1) return 1.0;
+        if (i < s.b2) return s.g1;
+        return s.g2;
+    };
+    const auto regionAt = [&s] (int i) -> const char*
+    {
+        if (i < s.b1) return "t<b1";
+        if (i < s.b2) return "b1<=t<b2";
+        return "b2<=t";
+    };
+
+    const int points[] = { s.b1 - 1, s.b1, s.b2 - 1, s.b2, s.b2 + 1 };
+
+    for (int block : { 64, 256, 1024 })
+    {
+        int lag = 0;
+        const auto out = captureImpulseResponse (ir, block, lag);
+        if (out.empty())
+        {
+            report ("B12-G", false, fmt ("block=%d SetImpulse failed", block));
+            continue;
+        }
+
+        for (int idx : points)
+        {
+            const double expected = ir[(size_t) idx] * gainAt (idx);
+            const double actual   = out[(size_t) (lag + idx)];
+            const double err      = std::fabs (actual - expected);
+            const double scale    = std::max (std::fabs (expected), 1.0e-12);
+            const bool ok = (err <= 1.0e-9 * scale + 1.0e-15);
+
+            report ("B12-G", ok,
+                    fmt ("block=%d i=%d (%s) gain=%.4f exp=%.9g act=%.9g rel=%.2e",
+                         block, idx, regionAt (idx), gainAt (idx), expected, actual,
+                         err / scale));
+        }
+    }
+
+    // 検出力: b2 以降に誤って g1 を掛けた場合、b2 の検査が不合格になること。
+    //   b2 の期待値は ir[b2]*g2、誤った値は ir[b2]*g1。相対差は (g1-g2)/g2。
+    {
+        const double relWrong = std::fabs (s.g1 - s.g2) / s.g2;
+        const double absWrong = std::fabs (ir[(size_t) s.b2]) * std::fabs (s.g1 - s.g2);
+        const double tolAtB2  = 1.0e-9 * std::max (std::fabs (ir[(size_t) s.b2] * s.g2), 1.0e-12)
+                                + 1.0e-15;
+        const bool detectable = (relWrong > 1.0e-6) && (absWrong > tolAtB2);
+        report ("B12-G-detect", detectable,
+                fmt ("wrong gain at b2: rel=%.4f abs=%.3e tol=%.3e", relWrong, absWrong, tolAtB2));
+    }
+
+    // 1 秒 IR（H-7 の入力）: b2 は IR の外側なので、最後のサンプルは g1。
+    //   H-7 がこの入力を使う理由と、g2 の境界を固定できない理由を明示する。
+    {
+        const auto ir1 = makeIr (48000);
+        const int len1 = (int) ir1.size();
+        const auto s1 = specGainBoundaries (len1);
+        const bool outside = (s1.b2 > len1);
+
+        int lag = 0;
+        const auto out = captureImpulseResponse (ir1, 256, lag);
+        const int last = len1 - 1;
+        const double expected = ir1[(size_t) last] * s1.g1;
+        const double actual   = out.empty() ? 0.0 : out[(size_t) (lag + last)];
+        const double err      = std::fabs (actual - expected);
+        const double scale    = std::max (std::fabs (expected), 1.0e-12);
+        const bool ok = outside && (! out.empty()) && (err <= 1.0e-9 * scale + 1.0e-15);
+
+        report ("B12-G-short", ok,
+                fmt ("irLen=%d b2=%d outside=%d last=%d gain=%.4f exp=%.9g act=%.9g",
+                     len1, s1.b2, outside ? 1 : 0, last, s1.g1, expected, actual));
+    }
+}
+
 void checkGeometryAtMaxBlock()
 {
     using convo::MKLNonUniformConvolver;
@@ -537,6 +726,10 @@ int main()
         for (int b : { 64, 256, 4096, 32768 })
             checkH4 (ir, b, refDb, "H-6");
     }
+
+    // ── B-12: ゲイン適用境界（b1 / b2 の直前・境界・直後） ──
+    //   H-4 の下限側と H-7 の 1 秒 IR では固定できない g2 の境界をサンプル単位で確認する。
+    checkGainBoundaries();
 
     std::printf ("[SUMMARY] failures=%d\n", gFailures);
     return (gFailures == 0) ? 0 : 1;
