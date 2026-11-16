@@ -106,13 +106,14 @@ flowchart LR
 
 1. Layer モード下限を適用
 2. `layer1Gain > layer2Gain` となる輪郭プロファイルを導出
-3. `Get()` で層別ゲイン合成
+3. `SetImpulse()` で IR の各サンプルへゲインを掛ける（B-12）。`Get()` は層別ゲイン合成を
+   行わない（`m_tailLayerGain[]` は常に 1.0）
 
 ### 5.3 Bypass
 
 - `tailEnabled=false` と同等
-- `layer1Gain/layer2Gain=0`
-- L1/L2 合成寄与なし
+- `layer1Gain/layer2Gain=1.0`（Part 8 F 以降。層は残し等倍で加算する）
+- L0/L1/L2 で IR 全体を覆う
 
 ---
 
@@ -213,7 +214,8 @@ flowchart LR
 
 - `FilterSpec` に tail mode/start/strength/multiplier を保持
 - `SetImpulse()` 内でモード別 clamp/導出を実施
-- `m_tailLayerGain[]` を build 時に確定し、`Get()` で read-only 使用
+- `m_tailLayerGain[]` を build 時に確定する（B-12 後は常に 1.0。テール整形ゲインは IR へ
+  適用済み）
 - Air モードで L1/L2 の周波数領域IRへ HF damping を事前適用
 
 このため、以後の拡張は `BuildSnapshot -> FilterSpec -> SetImpulse` 境界に限定して実施できる。

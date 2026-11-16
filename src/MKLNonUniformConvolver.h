@@ -132,6 +132,32 @@ struct FilterSpec
     int tailL1L2Multiplier = 8; ///< L1/L2 の partition 倍率
 };
 
+// ★ B-12: テール整形ゲインの分布（実装契約）
+//
+//   tailMode 0/1 では、IR 上のサンプル位置 t に対して次のゲインを掛ける。
+//     t < b1    : 1.0
+//     t < b2    : layer1Gain
+//     b2 <= t   : layer2Gain
+//   tailMode 2（Bypass）はすべてのゲインが 1.0 なので、この分布は結果に影響しない。
+//
+//   b1 = jlimit(1, irLen, llround(tailStartSec * sampleRate))
+//        tailStartSec はモード内再クランプ後（mode 0 は 0.055 秒、mode 1 / Bypass は 0.12 秒の下限）。
+//   b2 = b1 + kL1MaxParts * kRefL0Part * refL1Mult
+//        kRefL0Part = 256、kL1MaxParts = 64。refL1Mult は 1 から 2 倍ずつ増やし、
+//        4 と tailL1L2Mult で頭打ちにした値。b2 の項だけが block 256 の L1 被覆長に対応する。
+//        SetImpulse の l1Mult とは別の計算値である。混同しないこと。
+//
+//   b1 は時間指定から直接求めるためパーティション格子に整列しない。旧実装は L0 長を
+//   l0Part へ切り上げていたので、block 256 でも旧実装の境界とは一致しない。この差は
+//   tailStartSeconds の時間指定を優先する判断として許容する。
+//
+//   ゲインを IR のサンプルへ先に掛けるため、実効 IR は分割に依存しない。これは tailMode 1
+//   （既定）と 2（Bypass）で確認済み。tailMode 0 は §3.2(C) の HF 減衰が別途 block 依存
+//   なので、この限りではない（別課題）。
+//
+//   測定条件・測定値・音響的な位置づけは
+//   doc/AirAbsorption_LayerTailContouring_Algorithm_Spec_2026-05-23.md §4.1〜§4.3 を参照。
+
 //==============================================================================
 // MKLNonUniformConvolver
 //
