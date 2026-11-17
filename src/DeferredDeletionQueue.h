@@ -482,6 +482,12 @@ public:
         referenceObserver_ = observer;
     }
 
+    // ★ WORK113 Queue Lifetime: 隔離（自己参照で寿命を保つ・移送時の追加確保なし）。
+    //   quarantineQueue() だけが書き、公開後は next を変更しない（append-only）。
+    std::shared_ptr<DeferredDeletionQueue> quarantineSelfRef_;
+    std::atomic<bool> quarantineEnqueued_ { false };
+    std::atomic<DeferredDeletionQueue*> quarantineNext_ { nullptr };
+
 private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {

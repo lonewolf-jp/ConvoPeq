@@ -54,6 +54,12 @@ AudioEngine::AudioEngine()
     {
         juce::Logger::writeToLog (juce::String::fromUTF8 (line));
     });
+
+    // ★ WORK113 Gate: RT から NonRT API を呼ぶ誤用を Debug で検出するための probe。
+    m_epochDomain.setRtThreadProbe ([]() noexcept
+    {
+        return convo::numeric_policy::isAudioThread();
+    });
 #endif
 
     // ★ A(D1): 測定器はエンジン 1 個につき 1 回リセットする（前インスタンスの観測を持ち越さない）

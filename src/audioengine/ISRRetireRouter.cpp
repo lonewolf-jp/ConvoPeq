@@ -544,7 +544,7 @@ bool ISRRetireRouter::retireRT(void* ptr, void (*deleter)(void*)) noexcept
     const auto requestId = convo::isr::RetireLatencyRecorder::instance().recordRequestRT (
         ptr, epoch, provider_->getMinReaderEpoch(), &requestCreated);
 
-    const bool ok = provider_->enqueueRetire(ptr, deleter, epoch);
+    const bool ok = provider_->enqueueRetireRt(ptr, deleter, epoch);   // ★ WORK113: RT 専用 API
 
     if (! ok && requestCreated && requestId != 0u)
         convo::isr::RetireLatencyRecorder::instance().cancelRequestRTById (ptr, requestId);

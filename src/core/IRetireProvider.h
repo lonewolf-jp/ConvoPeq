@@ -29,6 +29,14 @@ public:
     /** Enqueue a retire request. Returns true on success. */
     virtual bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept = 0;
 
+    // ★ WORK113: RT 専用 enqueue（生ポインタ経路・mutex も shared_ptr も触らない）。
+    //   既定は false: 未対応の provider は RT 経路で明示的に失敗する（NonRT への誤降格を防ぐ）。
+    virtual bool enqueueRetireRt(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
+    {
+        (void) ptr; (void) deleter; (void) epoch;
+        return false;
+    }
+
     // ★ T1 (D86): telemetry type tag 付き enqueue（type==World で world retirement を識別）。
     //   デフォルト実装は type を無視して既存 3 引数版を呼ぶ（既存実装クラスは変更不要）。
     //   EpochDomain がオーバーライドして DeferredDeletionQueue に type を伝搬する。
