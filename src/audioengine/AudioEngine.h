@@ -4086,6 +4086,15 @@ public:
             if (world == nullptr)
                 return;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ WORK113 変更1: world 退役は識別子だけを残す（サイズ帰属は DSPCore 側で行う）。
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[WORLD_RETIRE] gen=%llu runtimeUuid=%llu type=World ptr=%p",
+                (unsigned long long) world->generation,
+                (unsigned long long) world->topology.runtimeUuid,
+                (void*) world));
+#endif
+
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);

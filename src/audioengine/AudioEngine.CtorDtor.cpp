@@ -400,6 +400,45 @@ AudioEngine::~AudioEngine()
         jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
     }
 #endif
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        // ★ WORK113 変更1: 帰属の最終スナップショットを evidence/ に書く（失敗しても shutdown は続行）。
+        const auto totals = convo::diag::registry().totals();
+        const auto metaCounters = (m_retireRouter != nullptr)
+            ? m_retireRouter->metaCounters()
+            : convo::isr::ISRRetireRouter::MetaCounters {};
+
+        juce::String json;
+        json << "{\n  \"schema\": \"memory_attribution_v1\",\n";
+        json << "  \"totals\": {\"liveCores\": " << static_cast<int>(totals.liveCores)
+             << ", \"liveOnlyCores\": " << static_cast<int>(totals.liveOnlyCores)
+             << ", \"deferredCores\": " << static_cast<int>(totals.deferredCores)
+             << ", \"destroyedCores\": " << static_cast<int>(totals.destroyedCores)
+             << ", \"measuredCoreBytes\": " << static_cast<juce::int64>(totals.measuredCoreBytes)
+             << ", \"liveConvolvers\": " << static_cast<int>(totals.liveConvolvers)
+             << ", \"measuredConvolverBytes\": " << static_cast<juce::int64>(totals.measuredConvolverBytes)
+             << ", \"createdTotal\": " << static_cast<int>(totals.createdTotal)
+             << ", \"destroyedTotal\": " << static_cast<int>(totals.destroyedTotal)
+             << ", \"unregisteredCreated\": " << static_cast<int>(totals.unregisteredCreated)
+             << ", \"unregisteredDestroyed\": " << static_cast<int>(totals.unregisteredDestroyed)
+             << ", \"overflow\": " << static_cast<int>(totals.overflowCount)
+             << ", \"uuidZero\": " << static_cast<int>(totals.uuidZeroCount)
+             << ", \"consistent\": " << (totals.consistent() ? "true" : "false") << "},\n";
+        json << "  \"meta\": {\"sized\": " << static_cast<juce::int64>(metaCounters.sized)
+             << ", \"stored\": " << static_cast<juce::int64>(metaCounters.stored)
+             << ", \"lostQuarantine\": " << static_cast<juce::int64>(metaCounters.lostQuarantine)
+             << ", \"lostEmergency\": " << static_cast<juce::int64>(metaCounters.lostEmergency)
+             << ", \"lostTerminal\": " << static_cast<juce::int64>(metaCounters.lostTerminal)
+             << ", \"unsupportedProvider\": " << static_cast<juce::int64>(metaCounters.unsupportedProvider)
+             << "},\n";
+        json << "  " << juce::String(convo::diag::registry().recordsJson().c_str()) << "\n}\n";
+
+        auto evidenceFile = juce::File::getCurrentWorkingDirectory()
+                                .getChildFile("evidence/memory_attribution.json");
+        evidenceFile.getParentDirectory().createDirectory();
+        evidenceFile.replaceWithText(json);
+    }
+#endif
     runtimePublicationBridge_.markShutdownComplete();
 
     // ★ 15-P-5: Post-shutdown Faulted state diagnostic
