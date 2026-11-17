@@ -48,6 +48,14 @@ AudioEngine::AudioEngine()
     , worldAuthority_(runtimePublicationBridge_)
     , shutdownRuntime_(runtimePublicationBridge_)  // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): constructor 固定注入（setReclaimAuthority 廃止 — immutable association）
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 識別レジストリのログ出力先を 1 回だけ設定する（以後は読み取り専用）。
+    convo::diag::registry().setLogSink ([] (const char* line)
+    {
+        juce::Logger::writeToLog (juce::String::fromUTF8 (line));
+    });
+#endif
+
     // ★ A(D1): 測定器はエンジン 1 個につき 1 回リセットする（前インスタンスの観測を持ち越さない）
     convo::isr::RetireLatencyRecorder::instance().reset();
     convo::isr::WorldLifetimeRecorder::instance().reset();   // ★ Item2: World 寿命の記録

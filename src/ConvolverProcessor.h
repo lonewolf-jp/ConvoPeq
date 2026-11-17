@@ -265,6 +265,16 @@ public:
                   "DELAY_BUFFER_SIZE must be a power of 2 for bitmask optimization");
     static constexpr double CONVOLUTION_HEADROOM_GAIN = 1.0; // 0.0 dB (Unity Gain - Headroom is baked into IR)
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 識別レジストリのインスタンス ID（DIAG 専用）。
+    std::uint64_t diagInstanceId_ { 0 };
+#endif
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 識別レジストリ上のインスタンス ID（DIAG 専用・0 は未登録）。
+    [[nodiscard]] std::uint64_t diagInstanceId() const noexcept { return diagInstanceId_; }
+#endif
+
     ConvolverProcessor();
     ~ConvolverProcessor();
 

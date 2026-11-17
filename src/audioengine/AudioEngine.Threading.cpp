@@ -79,6 +79,10 @@ void AudioEngine::deferDestroyRetry(DSPCore* core) noexcept
     }
     deferredDestroy_.push_back(core);
     convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 遅延破棄への遷移を識別レジストリへ記録。
+    convo::diag::registry().coreDeferred(core->runtimeUuid);
+#endif
     // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
     convo::publishAtomic(deferredDestroyResidentAtomic_,
                          static_cast<std::uint32_t>(deferredDestroy_.size()),

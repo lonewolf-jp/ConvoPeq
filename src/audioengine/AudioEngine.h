@@ -79,6 +79,7 @@ struct CoeffSet {
 #include "RuntimeBuildTypes.h"
 #include "RuntimeTransition.h"
 #include "AtomicAccess.h"
+#include "DiagObjectRegistry.h"   // ★ WORK113 変更1: DIAG 専用オブジェクト識別レジストリ
 #include "CrossfadeRuntime.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
@@ -663,6 +664,8 @@ public:
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         static std::atomic<uint32_t> liveCount;
+        // ★ WORK113 変更1: UUID 枯渇フラグ（DIAG 専用・プロセス寿命）。
+        [[nodiscard]] static bool uuidExhausted() noexcept;
 #endif
 
         struct DCBlockerRuntimeState
@@ -891,6 +894,8 @@ public:
         const uint32_t oldLive = liveCount.fetch_sub(1, std::memory_order_relaxed);
         (void)oldLive;
         jassert(oldLive > 0);
+        // ★ WORK113 変更1: 識別レジストリへ物理破棄を通知（NonRT・全破棄経路を覆う）。
+        convo::diag::registry().coreDestroyed(runtimeUuid);
 #endif
         // Explicitly clean up convolver resources to ensure no WDL memory is leaked,
         // especially for instances that are destroyed from the trash bin.
@@ -1139,6 +1144,10 @@ public:
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
         static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ WORK113 変更1: 採番の枯渇を示すフラグ（カウンタと同じ static storage）。
+        static std::atomic<bool> uuidExhaustedStorage_;
+#endif
         [[nodiscard]] static std::uint64_t reserveNextRuntimeUuid() noexcept;
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };

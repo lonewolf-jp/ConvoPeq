@@ -1802,6 +1802,7 @@ set(CONVOPEQ_ALL_SOURCES
     src/NoiseShaperLearnerTypes.h
     src/audioengine/RuntimeBuildTypes.h
     src/audioengine/RuntimeBuilder.h
+    src/audioengine/DiagObjectRegistry.h
     src/audioengine/RuntimeBuilder.cpp
     src/audioengine/AutoGainPlanner.cpp  # ★ v14.0
     src/audioengine/AudioEngineProcessor.cpp
