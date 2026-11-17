@@ -427,6 +427,47 @@ std::optional<ReclaimPermit> ShutdownRuntime::tryMakeReclaimPermit(
     return permit;
 }
 
+// ★ WORK113: quiescence proof から drain 権限を発行する（v4.13 §3）。
+//   proof（Q0〜Q7）と最終 retire の計数を確認した場合だけ発行する。
+//   drain 側は、この capability に加えて自分の reader 静止（fence・active 0・epoch 一致）を再確認する。
+std::optional<convo::DrainCapability> ShutdownRuntime::tryMakeDrainCapability(
+    const ShutdownQuiescenceProof& proof,
+    std::uint64_t finalizeCalls,
+    std::uint64_t finalizeRequests,
+    std::uint64_t finalizeTransfers) noexcept
+{
+    if (! proof.valid())
+        return std::nullopt;
+
+    // 最終 retire は 1 回だけ。所有権が残っていない（requests == 移送数）ことを要求する。
+    if (finalizeCalls != 1)
+        return std::nullopt;
+    if (finalizeRequests != finalizeTransfers)
+        return std::nullopt;
+
+    if (! proof.allProducersJoined()
+        || ! proof.readerRegistrationClosed()
+        || ! proof.activeReadersZero()
+        || ! proof.postStopEnqueueZero()
+        || ! proof.epochSettled())
+    {
+        return std::nullopt;
+    }
+
+    const auto& evidence = proof.epochEvidence();
+    if (! evidence.captured)
+        return std::nullopt;
+
+    return convo::DrainCapability(true,
+                                  proof.allProducersJoined(),
+                                  proof.readerRegistrationClosed() && proof.activeReadersZero(),
+                                  proof.postStopEnqueueZero(),
+                                  proof.epochSettled(),
+                                  evidence.epoch,
+                                  finalizeCalls,
+                                  finalizeRequests);
+}
+
 // ── ★ D101-31-B: AdmissionPackedState constants ──
 //   Layout (D101-30 locked):
 //     bits [0:1]   AdmissionState (Open=0, Closing=1, Closed=2, Faulted=3)

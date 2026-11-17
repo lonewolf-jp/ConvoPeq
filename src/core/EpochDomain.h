@@ -78,6 +78,8 @@ public:
         }
         void exit() noexcept { active_.fetch_sub(1, std::memory_order_seq_cst); }
         void close() noexcept { closed_.store(true, std::memory_order_seq_cst); }
+        // ★ drain 窓の外では再開する（releaseResources 後に通常運転へ戻る既存契約を保つ）。
+        void reopen() noexcept { closed_.store(false, std::memory_order_seq_cst); }
 
         // 期限内の idle だけを成功として扱う（期限到達後は idle でも false）。
         bool waitForIdle(std::chrono::milliseconds timeout) noexcept
@@ -150,6 +152,15 @@ public:
     {
         return shutdownReaderFence_.load(std::memory_order_acquire);
     }
+
+    // ★ drain 窓の終了後に閉じる（登録遮断そのものは closeReaderRegistration が担う）。
+    void disengageShutdownReaderFence() noexcept
+    {
+        shutdownReaderFence_.store(false, std::memory_order_release);
+    }
+
+    // ★ epoch の門も drain 窓の終了後に再開する。
+    void reopenPublishers() noexcept { publishGate_.reopen(); }
     [[nodiscard]] std::uint32_t reacquireAfterFence() const noexcept { return reacquireAfterFence_.load(std::memory_order_acquire); }
     [[nodiscard]] std::uint32_t enterAfterFence() const noexcept { return enterAfterFence_.load(std::memory_order_acquire); }
 

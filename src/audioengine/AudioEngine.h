@@ -5109,6 +5109,123 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
         handle, dspHandleRuntime_, *m_retireRouter, std::move(*permit));
 }
 
+// ★ WORK113 Queue/Gate/Drain（v4.13 §3/§4）: shutdown の最終 drain。
+//   順序: reader fence → publish gate 閉鎖 + 5 秒待ち → 最終 retire → proof → capability
+//         → queue 取り出し → checked drain → 結果（非成功は隔離して deleter を実行しない）。
+//   NonRT（Message Thread）専用。
+inline bool finalizeAndDrainRetireQueueNonRt() noexcept
+{
+    m_epochDomain.engageShutdownReaderFence();
+
+    // drain 窓の終了時に fence と gate を戻す（releaseResources 後の通常運転を保つ）。
+    struct FenceWindowGuard
+    {
+        convo::EpochDomain& domain;
+        ~FenceWindowGuard()
+        {
+            domain.disengageShutdownReaderFence();
+            domain.reopenPublishers();
+        }
+    } fenceWindow { m_epochDomain };
+
+    const bool idle = m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(5000));
+    if (! idle)
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[FAULT] epoch_publishers_not_idle timeouts=%u",
+            static_cast<unsigned>(m_epochDomain.epochIdleTimeouts())));
+#endif
+        return false;   // 停止性が成立しないので drain しない
+    }
+
+    // 最終 retire は 1 回だけ（drain より前に済んでいること）。未実行ならここで 1 回だけ実行する。
+    auto counts = m_coordinator.finalizeRetireCounts();
+    if (counts.calls == 0)
+        counts = m_coordinator.finalizeRetireOnce();
+
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
+    obs.admissionReservationsZero = (shutdownRuntime_.outstanding() == 0);
+    obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
+                          && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
+    obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
+    obs.activeReadersZero = (m_retireRouter != nullptr)
+        ? (m_retireRouter->activeReaderCount() == 0) : true;
+    obs.epochEvidence = captureEpochQuiescenceEvidence();
+    obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();
+    obs.epochGeneration = obs.epochEvidence.epochGeneration;
+    obs.readerRegistrationGeneration = obs.epochEvidence.readerRegistrationGeneration;
+
+    auto proof = shutdownRuntime_.tryMakeQuiescenceProof(obs);
+    if (! proof.has_value() || ! proof->valid())
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog("[FAULT] shutdown_proof_unavailable (checked drain skipped)");
+#endif
+        return false;
+    }
+
+    auto cap = shutdownRuntime_.tryMakeDrainCapability(
+        *proof, counts.calls, counts.requests, counts.denqueues + counts.fallbackTransfers);
+    if (! cap.has_value())
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[FAULT] drain_capability_unavailable calls=%llu requests=%llu transfers=%llu",
+            static_cast<unsigned long long>(counts.calls),
+            static_cast<unsigned long long>(counts.requests),
+            static_cast<unsigned long long>(counts.denqueues + counts.fallbackTransfers)));
+#endif
+        return false;
+    }
+
+    auto local = m_epochDomain.takeForShutdown();
+    if (! local)
+        return true;   // 既に取り出し済み（二重 shutdown 防御）
+
+    const auto result = m_epochDomain.drainQueue(*local, std::move(*cap));
+    const bool completed = (result == convo::EpochDomain::DrainResult::Completed);
+
+    if (! completed)
+    {
+        // deleter を実行せず、プロセス寿命の隔離リストへ移す（UAF を選ばない）。
+        (void) m_epochDomain.quarantineQueue(local);
+    }
+    local.reset();
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[DRAIN_DIAG] checkedDrain=%d completed=%d finalizeCalls=%llu requests=%llu "
+        "denqueues=%llu fallback=%llu remaining=%llu readerFailures=%llu "
+        "quarantineCount=%llu quarantinePending=%llu",
+        static_cast<int>(result), completed ? 1 : 0,
+        static_cast<unsigned long long>(counts.calls),
+        static_cast<unsigned long long>(counts.requests),
+        static_cast<unsigned long long>(counts.denqueues),
+        static_cast<unsigned long long>(counts.fallbackTransfers),
+        static_cast<unsigned long long>(m_epochDomain.drainRemainingAfter()),
+        static_cast<unsigned long long>(m_epochDomain.drainReaderFailures()),
+        static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
+        static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries())));
+
+    if (! completed)
+    {
+        auto evidence = juce::File::getCurrentWorkingDirectory()
+                            .getChildFile("evidence/queue_quarantine.json");
+        evidence.getParentDirectory().createDirectory();
+        juce::String js;
+        js << "{\n  \"schema\": \"queue_quarantine_v1\",\n"
+           << "  \"drainResult\": " << static_cast<int>(result) << ",\n"
+           << "  \"quarantineCount\": " << static_cast<juce::int64>(convo::EpochDomain::quarantineCount()) << ",\n"
+           << "  \"pendingEntries\": " << static_cast<juce::int64>(convo::EpochDomain::quarantinePendingEntries()) << ",\n"
+           << "  \"retainedBytes\": " << static_cast<juce::int64>(convo::EpochDomain::quarantineRetainedBytes()) << "\n}\n";
+        evidence.replaceWithText(js);
+    }
+#endif
+
+    return completed;
+}
+
 // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
 //   quarantine 検出時に Recovery buildSource として使う「現在の publish 構成 snapshot」を返す。//   QuarantineIntentHandler がこの値を submitRecoveryIntent へ渡す（Recovery = 現在の構成の再 build）。
 [[nodiscard]] inline convo::RuntimeBuildSnapshot getCurrentBuildSnapshotForRecovery() const noexcept

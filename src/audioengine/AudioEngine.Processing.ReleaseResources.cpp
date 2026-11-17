@@ -370,9 +370,15 @@ void AudioEngine::releaseResources()
     juce::ignoreUnused(activeToRelease);
     juce::ignoreUnused(fadingToRelease);
 
+    // ★ WORK113 Queue/Gate/Drain: 最終 retire は drain より前に 1 回だけ実行する（v4.13 の順序）。
+    const auto finalizeCounts = m_coordinator.finalizeRetireOnce();
+
     // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
     // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。
     drainDeferredRetireQueues(true);
+
+    // ★ WORK113: 最終 retire は 1 回だけ実行し、計数は ~AudioEngine の checked drain で使う。
+    juce::ignoreUnused(finalizeCounts);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
     // ★ C-2: EmergencyDrain -- Optional 最終手段（デフォルトはスキップ）

@@ -8,6 +8,7 @@
 #include "AtomicAccess.h"  // ★ A-2/A-3: convo::consumeAtomic / publishAtomic
 #include "RuntimeDrainAudit.h"  // ★ P2-B: ShutdownBlockingReason
 #include "ISRLifetimeProof.h"   // ★ dash2 §2.2 (Phase A1): ShutdownQuiescenceProof / ReclaimPermit / ShutdownRuntimeIdentity
+#include "core/DrainCapability.h"   // ★ WORK113: drain 権限（proof から発行）
 
 namespace convo {
 
@@ -298,6 +299,15 @@ public:
     // Step 3/5: ReclaimPermit 生成（Proof.identity と同一 identity で発行 — INV-LIFE-5/6）。
     //   Proof が valid でない場合は nullopt（簡易生成防止）。type only では未使用。
     [[nodiscard]] std::optional<ReclaimPermit> tryMakeReclaimPermit(const ShutdownQuiescenceProof&) noexcept;
+
+    // ★ WORK113: quiescence proof から drain 権限を発行する（v4.13 §3）。
+    //   条件: proof.valid()、最終 retire が 1 回、requests == DEnqueues + FallbackTransfers。
+    //   単一使用・move-only。発行後は proof と独立に、drain 側が reader 静止と epoch 一致を再確認する。
+    [[nodiscard]] std::optional<convo::DrainCapability> tryMakeDrainCapability(
+        const ShutdownQuiescenceProof& proof,
+        std::uint64_t finalizeCalls,
+        std::uint64_t finalizeRequests,
+        std::uint64_t finalizeTransfers) noexcept;
 
     // ── ★ dash2 §2.5 (Phase B3 — H.11.4): AdmissionState FSM ──
     //   4 経路（Publication/Recovery/Build/Retire）の admission gate を本 FSM で統一する。

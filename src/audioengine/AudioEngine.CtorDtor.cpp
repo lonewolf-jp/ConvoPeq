@@ -331,6 +331,10 @@ AudioEngine::~AudioEngine()
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
+    // ★ WORK113 Queue/Gate/Drain: 最終 retire → gate → capability → take → checked drain。
+    //   dtor は終端なので、ここで D queue を取り出して drain 結果を確定する。
+    { const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt(); juce::ignoreUnused(checkedDrainCompleted); }
+
     drainDeferredRetireQueues(true);
 
     // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) before pointer-lifetime
