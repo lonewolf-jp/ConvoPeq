@@ -5115,28 +5115,14 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 //   NonRT（Message Thread）専用。
 inline bool finalizeAndDrainRetireQueueNonRt() noexcept
 {
-    m_epochDomain.engageShutdownReaderFence();
-
-    // drain 窓の終了時に fence と gate を戻す（releaseResources 後の通常運転を保つ）。
-    struct FenceWindowGuard
-    {
-        convo::EpochDomain& domain;
-        ~FenceWindowGuard()
-        {
-            domain.disengageShutdownReaderFence();
-            domain.reopenPublishers();
-        }
-    } fenceWindow { m_epochDomain };
-
-    const bool idle = m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(5000));
-    if (! idle)
+    // 前提: 呼び出し側が reader fence と publish gate を閉じ、最終 retire と
+    //       D / Q / E / T の drain を済ませていること（terminal shutdown の停止状態は解除しない）。
+    if (m_epochDomain.activeReaderCount() != 0)
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        juce::Logger::writeToLog(juce::String::formatted(
-            "[FAULT] epoch_publishers_not_idle timeouts=%u",
-            static_cast<unsigned>(m_epochDomain.epochIdleTimeouts())));
+        juce::Logger::writeToLog("[DRAIN_DIAG] checkedDrain skipped=readers_not_quiescent");
 #endif
-        return false;   // 停止性が成立しないので drain しない
+        return false;
     }
 
     // 最終 retire は 1 回だけ（drain より前に済んでいること）。未実行ならここで 1 回だけ実行する。
@@ -5197,7 +5183,8 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     juce::Logger::writeToLog(juce::String::formatted(
         "[DRAIN_DIAG] checkedDrain=%d completed=%d finalizeCalls=%llu requests=%llu "
         "denqueues=%llu fallback=%llu remaining=%llu readerFailures=%llu "
-        "quarantineCount=%llu quarantinePending=%llu",
+        "quarantineCount=%llu quarantinePending=%llu "
+        "pendingAfter=%u qResident=%zu eResident=%zu tResident=%zu",
         static_cast<int>(result), completed ? 1 : 0,
         static_cast<unsigned long long>(counts.calls),
         static_cast<unsigned long long>(counts.requests),
@@ -5206,7 +5193,11 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
         static_cast<unsigned long long>(m_epochDomain.drainRemainingAfter()),
         static_cast<unsigned long long>(m_epochDomain.drainReaderFailures()),
         static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
-        static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries())));
+        static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries()),
+        static_cast<unsigned>((m_retireRouter != nullptr) ? m_retireRouter->pendingRetireCount() : 0u),
+        static_cast<std::size_t>((m_retireRouter != nullptr) ? m_retireRouter->quarantineResidentCount() : 0u),
+        static_cast<std::size_t>((m_retireRouter != nullptr) ? m_retireRouter->emergencyQuarantineResidentCount() : 0u),
+        static_cast<std::size_t>((m_retireRouter != nullptr) ? m_retireRouter->terminalReclaimResidentCount() : 0u)));
 
     if (! completed)
     {

@@ -322,6 +322,19 @@ AudioEngine::~AudioEngine()
         }
     }
 
+    // ★ WORK113: terminal shutdown の停止状態を確定する（fence / gate は以後解除しない）。
+    m_epochDomain.engageShutdownReaderFence();
+    const bool terminalPublishersIdle =
+        m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(5000));
+    if (! terminalPublishersIdle)
+    {
+        diagLog("[FAULT] epoch_publishers_not_idle timeouts="
+                + juce::String(static_cast<int>(m_epochDomain.epochIdleTimeouts())));
+    }
+
+    // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
+    (void) m_coordinator.finalizeRetireOnce();
+
     // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
     //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。詳細は ReleaseResources 側に同様。
     worldAuthority_.requestShutdownClearNonRt();
@@ -331,10 +344,6 @@ AudioEngine::~AudioEngine()
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
-    // ★ WORK113 Queue/Gate/Drain: 最終 retire → gate → capability → take → checked drain。
-    //   dtor は終端なので、ここで D queue を取り出して drain 結果を確定する。
-    { const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt(); juce::ignoreUnused(checkedDrainCompleted); }
-
     drainDeferredRetireQueues(true);
 
     // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) before pointer-lifetime
@@ -468,6 +477,20 @@ AudioEngine::~AudioEngine()
     //   dspHandleRuntime_.retire + resolve + delete が安全に実行できる。
     //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
     eqCacheManager.drainForShutdown();
+
+    // ★ WORK113 Queue/Gate/Drain: 全 retire source の処理後、最後に checked drain（終端）。
+    //   fence / gate は閉じたまま（解除しない）。idle 不成立なら drain しない。
+    if (terminalPublishersIdle)
+    {
+        const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt();
+        juce::ignoreUnused(checkedDrainCompleted);
+    }
+    else
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[DRAIN_DIAG] checkedDrain skipped=epoch_publishers_not_idle");
+#endif
+    }
 
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB
