@@ -214,6 +214,12 @@ void AudioEngine::requestConvolverPreset(const juce::File& irFile)
     uiConvolverProcessor.loadIR(irFile);
 }
 
+// ★ WORK113 変更 2 (DIAG): 診断 step の ID を付けて IR を読み込む。
+void AudioEngine::requestConvolverPreset(const juce::File& irFile, std::uint64_t diagRequestId)
+{
+    uiConvolverProcessor.loadIR(irFile, diagRequestId);
+}
+
 void AudioEngine::beginBulkParameterRestore() noexcept
 {
     m_isRestoringState = true;

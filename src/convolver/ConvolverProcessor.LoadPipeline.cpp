@@ -233,7 +233,21 @@ void ConvolverProcessor::clearCache()
 
 void ConvolverProcessor::loadIR(const juce::File& irFile)
 {
+    loadIRImpl(irFile, 0);
+}
+
+// ★ WORK113 変更 2 (DIAG): 診断 step の ID を保留要求に紐付ける。
+void ConvolverProcessor::loadIR(const juce::File& irFile, std::uint64_t diagRequestId)
+{
+    loadIRImpl(irFile, diagRequestId);
+}
+
+void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diagRequestId)
+{
     JUCE_ASSERT_MESSAGE_THREAD;
+
+    diagPendingLoad_ = DiagPendingLoad{};
+    diagCommitRecord_ = DiagCommitRecord{};
 
     if (!irFile.existsAsFile())
     {
@@ -251,6 +265,10 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
     stopUpgradeThread();
 
     const uint64_t generation = convolverStateGeneration.bumpGeneration();
+
+    if (diagRequestId != 0)
+        diagPendingLoad_ = DiagPendingLoad{ generation, diagRequestId, true };
+
     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire); // acquire: prepareToPlay/applyNewState の publishAtomic release と HB
     const int targetFFT = getTargetUpgradeFFTSize();
     const int lowResFFT = 512;
@@ -393,6 +411,9 @@ int ConvolverProcessor::measureIrPeakLatencySamples(const juce::AudioBuffer<doub
 
 void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> prepared)
 {
+    // ★ WORK113 変更 2 (DIAG): Message Thread 専用。判定より前に置く。
+    JUCE_ASSERT_MESSAGE_THREAD;
+
     if (!prepared)
     {
         juce::Logger::writeToLog("[DIAG_IR] applyComputedIR: null payload");
@@ -591,7 +612,26 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
     convo::publishAtomic(activeCacheKey, prepared->cacheKey, std::memory_order_release); // release: cache 判定側 acquire と HB
     convo::publishAtomic(activeCacheFFTSize, newState->fftSize, std::memory_order_release); // release: cache 判定側 acquire と HB
 
-    updateConvolverState(std::move(newState));
+    const StateSwapOutcome swapOutcome = updateConvolverState(std::move(newState));
+
+    // ★ WORK113 変更 2 (DIAG): RCU commit が成立し、かつ目標 FFT の適用のときだけ記録する。
+    //   Progressive Upgrade の中間適用は記録しない。
+    if (swapOutcome == StateSwapOutcome::Swapped
+        && diagPendingLoad_.valid
+        && diagPendingLoad_.requestGenId == prepared->generationId
+        && prepared->fftSize >= getTargetUpgradeFFTSize())
+    {
+        DiagCommitRecord rec {};
+        rec.requestGenId = prepared->generationId;
+        rec.diagRequestId = diagPendingLoad_.diagRequestId;
+        rec.irLength = prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0;
+        rec.fftSize = prepared->fftSize;
+        rec.structuralHash = getStructuralHash();
+        rec.convolverFingerprint = captureBuildSnapshot().fingerprint;
+        rec.valid = true;
+        diagCommitRecord_ = rec;
+        diagPendingLoad_ = DiagPendingLoad{};
+    }
 
     // 4. FINAL COMMIT: 確定フラグを立ててからレイテンシを1回だけ反映する。
     convo::publishAtomic(irFinalized, true, std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
@@ -607,6 +647,9 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
 
 void ConvolverProcessor::handleLoadError(const juce::String& error)
 {
+    // ★ WORK113 変更 2 (DIAG): 失敗した要求の ID を残さない。
+    diagPendingLoad_ = DiagPendingLoad{};
+
     setLastError(error);
     convo::publishAtomic(irFinalized, isIRLoaded(), std::memory_order_release); // release: Runtime 側 irFinalized acquire と HB
     convo::publishAtomic(isLoading, false, std::memory_order_release);           // release: timer/UI 側 acquire と HB
@@ -930,6 +973,46 @@ void ConvolverProcessor::setLoadingProgress(float p)
     // スレッドから呼ばれるため、既存の postCoalescedChangeNotification() を使う。
     // 進捗通知は合体（coalesce）して問題ない（最新値が loadProgress に保持される）。
     postCoalescedChangeNotification();
+}
+
+// ★ WORK113 変更 2 (DIAG): 生きた RCU state の世代を index 3 の guard で読む。
+std::uint64_t ConvolverProcessor::getActiveStateGenerationForDiag() const noexcept
+{
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    ConvolverStateReaderGuard guard(*this);
+
+    if (auto* state = rcuSwapper.getState())
+        return state->generationId;
+
+    return 0;
+}
+
+// ★ WORK113 変更 2 (DIAG): 記録の参照（消費しない）。
+bool ConvolverProcessor::peekCommitRecord(std::uint64_t diagRequestId,
+                                           DiagCommitRecord& out) const noexcept
+{
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    if (!diagCommitRecord_.valid || diagCommitRecord_.diagRequestId != diagRequestId)
+        return false;
+
+    out = diagCommitRecord_;
+    return true;
+}
+
+// ★ WORK113 変更 2 (DIAG): 記録の消費（1 回限り）。
+bool ConvolverProcessor::consumeCommitRecord(std::uint64_t diagRequestId,
+                                              DiagCommitRecord& out) noexcept
+{
+    JUCE_ASSERT_MESSAGE_THREAD;
+
+    if (!diagCommitRecord_.valid || diagCommitRecord_.diagRequestId != diagRequestId)
+        return false;
+
+    out = diagCommitRecord_;
+    diagCommitRecord_ = DiagCommitRecord{};
+    return true;
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE

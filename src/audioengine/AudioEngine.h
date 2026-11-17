@@ -234,6 +234,13 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         int oversamplingFactor = 1;
         double sampleRate = 48000.0;
         int baseLatencySamples = 0;
+
+        // ★ WORK113 変更2 (DIAG): 公開 world へ運ぶ診断値（provenance 専用）。
+        //   実行時の DSP 判断・互換性判定・hash・buildInputHash には使わない。
+        int irLength = 0;
+        uint64_t convolverFingerprint = 0;
+        uint64_t diagRequestId = 0;
+        bool diagProjectionSealed = false;
     } dspProjection;
 
     // AuthorityClass::Diagnostic (projection freshness metadata)
@@ -1425,6 +1432,8 @@ public:
     void requestEqPreset (int presetIndex);
     void requestEqPresetFromText(const juce::File& file);
     void requestConvolverPreset (const juce::File& irFile);
+    // ★ WORK113 変更2 (DIAG): 診断 step の ID を付けて IR を読み込む。
+    void requestConvolverPreset (const juce::File& irFile, std::uint64_t diagRequestId);
 
     void requestLoadState (const juce::ValueTree& state);
     [[nodiscard]] juce::ValueTree getCurrentState() const;
@@ -1529,6 +1538,48 @@ public:
     void setNoiseShaperType(NoiseShaperType type);
     [[nodiscard]] NoiseShaperType getNoiseShaperType() const;
     void requestRebuild(convo::RebuildKind kind) noexcept;
+
+    // ★ WORK113 変更2 (DIAG): 診断 rebuild の受理結果。
+    enum class RebuildDispatchOutcome : std::uint8_t
+    {
+        Accepted = 0,
+        SuppressedWrongThread,
+        ShutdownInProgress,
+        PressureRejected,
+        AdmissionClosed,
+        InvalidSrBs,
+        DuplicateSuppressed,
+        DiagSlotBusy,
+        StaleAdmission,
+        DiagWindow,
+        NotQuiescent,
+        NoCommitRecord,
+        UpgradeIncomplete
+    };
+
+    // ★ WORK113 変更2 (DIAG): 静止確認のスナップショット（A/B 比較用）。
+    struct DiagConditionsSnapshot
+    {
+        bool hasPendingTask = true;
+        bool workerBusy = true;
+        bool swapPending = true;
+        std::uint64_t publicationResidency = 1;
+        bool deferredAdmission = true;
+        bool recoveryPending = true;
+        std::uint64_t liveRecoveryObligations = 1;
+        bool recoveryAdmissionPending = true;
+        bool publishRetryReady = true;
+        bool pendingDiagTask = true;
+        std::uint64_t phaseTick = 0;
+        std::uint64_t workerActivitySeq = 0;
+    };
+
+    void diagSnapshotConditions(DiagConditionsSnapshot& out) noexcept;
+    [[nodiscard]] static bool diagConditionsMet(const DiagConditionsSnapshot& s) noexcept;
+    [[nodiscard]] RebuildDispatchOutcome beginDiagWindow() noexcept;
+    void endDiagWindow() noexcept;
+    [[nodiscard]] RebuildDispatchOutcome requestRebuildForDiag(std::uint64_t diagRequestId) noexcept;
+    [[nodiscard]] std::timed_mutex& diagPhaseMutex() noexcept { return diagPhaseMutex_; }
     void requestStructuredRebuildIntent(convo::RebuildKind kind) noexcept
     {
         submitRebuildIntent(kind,
@@ -2474,6 +2525,12 @@ public:
         bool irFinalized = false;
         std::uint64_t structuralHash = 0;
         double fadeTimeSec = 0.0;
+
+        // ★ WORK113 変更2 (DIAG): 公開 world から値コピーする診断値。
+        int irLength = 0;
+        std::uint64_t convolverFingerprint = 0;
+        std::uint64_t diagRequestId = 0;
+        bool diagProjectionSealed = false;
     };
 
     [[nodiscard]] inline RuntimeActiveSnapshot getActiveRuntimeSnapshot() const noexcept
@@ -2498,6 +2555,12 @@ public:
         out.irLoaded = world->dspProjection.irLoaded;
         out.irFinalized = world->dspProjection.irFinalized;
         out.structuralHash = world->dspProjection.structuralHash;
+
+        // ★ WORK113 変更2 (DIAG)
+        out.irLength = world->dspProjection.irLength;
+        out.convolverFingerprint = world->dspProjection.convolverFingerprint;
+        out.diagRequestId = world->dspProjection.diagRequestId;
+        out.diagProjectionSealed = world->dspProjection.diagProjectionSealed;
         out.fadeTimeSec = world->overlap.fadeTimeSec;
         return out;
     }
@@ -2885,6 +2948,11 @@ public:
     // such as IR resampling. It MUST only be called from the message thread.
     // prepareToPlay() routes to the message thread before invoking this helper.
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
+    // ★ WORK113 変更2 (DIAG): 受理点を 1 箇所に集約した実装。diagRequestId != 0 は診断専用スロットへ積む。
+    [[nodiscard]] RebuildDispatchOutcome requestRebuildImpl(double sampleRate, int samplesPerBlock,
+                                                            bool forceMustExecute,
+                                                            std::uint64_t admissionEpoch,
+                                                            std::uint64_t diagRequestId) noexcept;
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
     void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {}, std::uint64_t recoveryObligationId = 0);
@@ -3014,6 +3082,19 @@ public:
     void releaseResourcesForReconfigure() noexcept;
     std::thread rebuildThread;
     std::mutex rebuildMutex;
+
+    // ★ WORK113 変更2 (DIAG): 診断 rebuild の同期と状態（Message Thread / CoordinatorLoop 専用）。
+    std::timed_mutex diagPhaseMutex_;
+    std::atomic<std::uint64_t> coordinatorPhaseTick_ { 0 };
+    std::atomic<std::uint64_t> rebuildWorkerActivitySeq_ { 0 };
+    std::atomic<bool> rebuildWorkerBusy_ { false };
+    std::atomic<std::uint64_t> pendingStructuralAdmission_ { 0 };
+    std::atomic<std::uint32_t> nextAdmissionSeq_ { 1 };
+    std::atomic<bool> ticketSeqExhausted_ { false };
+    std::atomic<std::uint64_t> diagWindowEpoch_ { 0 };
+    std::atomic<bool> diagWindowEpochExhausted_ { false };
+    std::atomic<bool> diagWindowActive_ { false };
+    std::atomic<std::uint32_t> diagBudgetLogCount_ { 0 };
     // ★ STG-11-D15-1: OwnerChannel producer serialization (NonRT only).
     //   OwnerChannel is SPSC by design ("Single Producer"), but three NonRT threads
     //   reach worldAuthority_.ownerChannel().enqueue through the single facade
@@ -3083,6 +3164,10 @@ public:
     };
     RebuildTask pendingTask;
     RebuildTask lastQueuedTaskSignature;
+
+    // ★ WORK113 変更2 (DIAG): 診断専用スロット（rebuildMutex 下）。通常要求は触れない。
+    RebuildTask pendingDiagTask;
+    bool hasPendingDiagTask = false;
 
     // --- Adaptiveノイズシェイパー学習用メンバー ---
     struct AdaptiveCoeffBankSlot

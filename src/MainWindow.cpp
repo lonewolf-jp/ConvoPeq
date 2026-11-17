@@ -396,6 +396,8 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-f2-hz").isEmpty()
         || !findValue("--cli-learning-action").isEmpty()
         || !findValue("--cli-learning-mode").isEmpty()
+        || !findValue("--cli-ir-alt-a").isEmpty()
+        || !findValue("--cli-ir-alt-b").isEmpty()
         || !findValue("--cli-exit-ms").isEmpty()
         || !findValue("--cli-log-file").isEmpty();
 
@@ -845,6 +847,416 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         else
         {
             juce::Logger::writeToLog("[CLI] IR file not found: " + irFile.getFullPathName());
+        }
+    }
+
+
+    // ========================================================================
+    // \u2605 WORK113 \u5909\u66f4 2 (DIAG): \u7570\u306a\u308b IR \u3078\u306e\u5b9f\u4ea4\u63db\u3092\u6e2c\u308b\u4ea4\u4e92\u8a66\u9a13\u3002
+    //   A \u2192 B \u2192 A \u2192 ... \u3092\u5b8c\u4e86\u99c6\u52d5\u3067\u9032\u3081\u3001\u5404 step \u3067 5 \u6761\u4ef6\u3068 publish \u5897\u5206\u3092\u78ba\u8a8d\u3059\u308b\u3002
+    // ========================================================================
+    {
+        const auto altAValue = findValue("--cli-ir-alt-a");
+        const auto altBValue = findValue("--cli-ir-alt-b");
+
+        if (!altAValue.isEmpty() || !altBValue.isEmpty())
+        {
+            auto toFile = [](const juce::String& v)
+            {
+                return juce::File::isAbsolutePath(v)
+                    ? juce::File(v)
+                    : juce::File::getCurrentWorkingDirectory().getChildFile(v);
+            };
+
+            const juce::File altA = toFile(altAValue);
+            const juce::File altB = toFile(altBValue);
+
+            int altSteps = 6;
+            if (const auto v = findValue("--cli-ir-alt-steps"); !v.isEmpty())
+            {
+                int parsed = 0;
+                if (tryParseIntOption(v, parsed))
+                    altSteps = juce::jmax(2, parsed);
+            }
+
+            int altSettleMs = 2000;
+            if (const auto v = findValue("--cli-ir-alt-settle-ms"); !v.isEmpty())
+            {
+                int parsed = 0;
+                if (tryParseIntOption(v, parsed))
+                    altSettleMs = juce::jmax(100, parsed);
+            }
+
+            auto readIrLength = [](const juce::File& f, double& srOut, juce::int64& framesOut) -> bool
+            {
+                juce::AudioFormatManager fm;
+                fm.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(f));
+                if (reader == nullptr)
+                    return false;
+                srOut = reader->sampleRate;
+                framesOut = reader->lengthInSamples;
+                return true;
+            };
+
+            bool preflightOk = true;
+            juce::String preflightReason;
+
+            if (!altA.existsAsFile() || !altB.existsAsFile())
+            {
+                preflightOk = false;
+                preflightReason = "ir_alt_file_missing";
+            }
+
+            double srA = 0.0, srB = 0.0;
+            juce::int64 framesA = 0, framesB = 0;
+            if (preflightOk && (!readIrLength(altA, srA, framesA) || !readIrLength(altB, srB, framesB)))
+            {
+                preflightOk = false;
+                preflightReason = "ir_alt_header_unreadable";
+            }
+
+            if (preflightOk)
+            {
+                juce::MemoryBlock dataA, dataB;
+                const bool readA = altA.loadFileAsData(dataA);
+                const bool readB = altB.loadFileAsData(dataB);
+                if (!readA || !readB || dataA.getSize() == 0 || dataB.getSize() == 0)
+                {
+                    // ★ 比較できない入力を許可しない（fail-closed）。
+                    preflightOk = false;
+                    preflightReason = "ir_alt_content_unreadable";
+                }
+                else if (dataA == dataB)
+                {
+                    preflightOk = false;
+                    preflightReason = "ir_alt_identical";
+                }
+            }
+
+            if (!preflightOk)
+            {
+                juce::Logger::writeToLog("[CLI_IR_ALT] preflight failed reason=" + preflightReason);
+            }
+            else
+            {
+                struct AltState
+                {
+                    juce::File fileA, fileB;
+                    int expectedLenA = 0;
+                    int expectedLenB = 0;
+                    double fileSrA = 0.0;
+                    double fileSrB = 0.0;
+                    int totalSteps = 6;
+                    int settleMs = 2000;
+                    int stepIndex = 0;
+                    int phase = 0;                 // 0=request,1=waitLoad,2=beginWindow,3=baseline,4=requestRebuild,5=waitPublish,6=verify,7=settle,8=done
+                    int baselineRetries = 0;
+                    std::uint64_t requestId = 0;
+                    std::uint64_t genBefore = 0;
+                    std::uint64_t pubBefore = 0;
+                    std::uint64_t deadlineMs = 0;
+                    std::uint64_t settleDeadlineMs = 0;
+                    bool windowOpen = false;
+                    bool allValid = true;
+                    juce::String failReason;
+                    std::shared_ptr<std::function<void()>> self;
+                };
+
+                auto st = std::make_shared<AltState>();
+                st->fileA = altA;
+                st->fileB = altB;
+                st->expectedLenA = (int) framesA;
+                st->expectedLenB = (int) framesB;
+                st->fileSrA = srA;
+                st->fileSrB = srB;
+                st->totalSteps = altSteps;
+                st->settleMs = altSettleMs;
+
+                juce::Logger::writeToLog("[CLI_IR_ALT] preflight ok A=" + altA.getFullPathName()
+                                         + " lenA=" + juce::String(st->expectedLenA)
+                                         + " B=" + altB.getFullPathName()
+                                         + " lenB=" + juce::String(st->expectedLenB)
+                                         + " steps=" + juce::String(altSteps)
+                                         + " settleMs=" + juce::String(altSettleMs));
+
+                auto selfFn = std::make_shared<std::function<void()>>();
+                st->self = selfFn;
+
+                auto failStep = [st](const juce::String& reason)
+                {
+                    st->allValid = false;
+                    st->failReason = reason;
+                    st->phase = 8;
+                    juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                             + " phase=fail reason=" + reason);
+                };
+
+                *selfFn = [safeThis = juce::Component::SafePointer<MainWindow>(this), st, failStep]()
+                {
+                    if (safeThis == nullptr)
+                        return;
+                    if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
+                        return;
+
+                    auto& engine = safeThis->audioEngine;
+                    auto& conv = engine.getConvolverProcessor();
+                    const auto nowMs = juce::Time::getMillisecondCounter();
+
+                    switch (st->phase)
+                    {
+                    case 0: // request
+                    {
+                        if (st->stepIndex >= st->totalSteps)
+                        {
+                            st->phase = 8;
+                            break;
+                        }
+
+                        const bool useA = ((st->stepIndex % 2) == 0);
+                        const juce::File& f = useA ? st->fileA : st->fileB;
+                        const int expected = useA ? st->expectedLenA : st->expectedLenB;
+
+                        // ★ デバイスの内部 SR は CLI 解析時には未確定。
+                        //   step 開始時に確認し、一致しなければ不成立にする。
+                        // ★ 期限は SR の取得結果に依存せず判定する（期限超過後に SR が確定しても不成立）。
+                        if (st->deadlineMs == 0)
+                            st->deadlineMs = nowMs + 60000;
+                        if (nowMs >= st->deadlineMs)
+                        {
+                            failStep("device_sr_unavailable");
+                            break;
+                        }
+
+                        const double deviceSr = engine.getSampleRate();
+                        if (deviceSr <= 0.0)
+                            break;
+                        if (std::abs((useA ? st->fileSrA : st->fileSrB) - deviceSr) > 1.0e-6)
+                        {
+                            failStep("irlen_not_verifiable");
+                            break;
+                        }
+
+                        st->requestId = 1000 + (std::uint64_t) st->stepIndex;
+                        st->genBefore = engine.getActiveRuntimeSnapshot().generation;
+                        st->pubBefore = engine.worldRetirementTelemetry().acquireObserved();
+                        st->baselineRetries = 0;
+                        st->windowOpen = false;
+
+                        juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                 + " phase=request requestId=" + juce::String((juce::int64) st->requestId)
+                                                 + " file=" + f.getFileName()
+                                                 + " irLenExpected=" + juce::String(expected)
+                                                 + " genBefore=" + juce::String((juce::int64) st->genBefore)
+                                                 + " publishBefore=" + juce::String((juce::int64) st->pubBefore));
+
+                        engine.requestConvolverPreset(f, st->requestId);
+                        st->deadlineMs = nowMs + 60000;
+                        st->phase = 1;
+                        break;
+                    }
+                    case 1: // wait load (commit record + IR length + target FFT)
+                    {
+                        ConvolverProcessor::DiagCommitRecord rec {};
+                        const bool haveRecord = conv.peekCommitRecord(st->requestId, rec);
+                        const bool lenOk = conv.getIRLength() == (st->stepIndex % 2 == 0 ? st->expectedLenA : st->expectedLenB);
+                        const bool fftOk = haveRecord && rec.fftSize >= conv.getTargetUpgradeFFTSize();
+
+                        if (haveRecord && lenOk && fftOk)
+                        {
+                            juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                     + " phase=loaded irLen=" + juce::String(rec.irLength)
+                                                     + " fft=" + juce::String(rec.fftSize)
+                                                     + " requestGen=" + juce::String((juce::int64) rec.requestGenId));
+                            st->phase = 2;
+                            break;
+                        }
+                        if (nowMs >= st->deadlineMs)
+                        {
+                            failStep(haveRecord ? "upgrade_incomplete" : "load_timeout");
+                            break;
+                        }
+                        break;
+                    }
+                    case 2: // begin window (open + quiescence + 2 phases)
+                    {
+                        const auto out = engine.beginDiagWindow();
+                        if (out != AudioEngine::RebuildDispatchOutcome::Accepted)
+                        {
+                            failStep("begin_window_" + juce::String((int) out));
+                            break;
+                        }
+                        st->windowOpen = true;
+                        st->deadlineMs = nowMs + 2000;
+                        st->phase = 3;
+                        break;
+                    }
+                    case 3: // A -> baseline -> B under diagPhaseMutex
+                    {
+                        const auto remaining = (st->deadlineMs > nowMs)
+                            ? std::chrono::milliseconds((int) (st->deadlineMs - nowMs))
+                            : std::chrono::milliseconds(0);
+                        if (remaining.count() <= 0)
+                        {
+                            failStep("not_quiescent");
+                            break;
+                        }
+
+                        std::unique_lock<std::timed_mutex> lock(engine.diagPhaseMutex(), std::defer_lock);
+                        if (!lock.try_lock_for(remaining))
+                        {
+                            failStep("not_quiescent");
+                            break;
+                        }
+                        if (juce::Time::getMillisecondCounter() >= st->deadlineMs)
+                        {
+                            lock.unlock();
+                            failStep("not_quiescent");
+                            break;
+                        }
+
+                        AudioEngine::DiagConditionsSnapshot a {};
+                        engine.diagSnapshotConditions(a);
+                        if (!AudioEngine::diagConditionsMet(a))
+                        {
+                            lock.unlock();
+                            if (++st->baselineRetries > 3) { failStep("not_quiescent"); break; }
+                            break;
+                        }
+
+                        st->genBefore = engine.getActiveRuntimeSnapshot().generation;
+                        st->pubBefore = engine.worldRetirementTelemetry().acquireObserved();
+                        // ★ Private の計測は変更 3 の範囲。ここではベースラインの位置だけを残す。
+                        const std::uint64_t privProxy = 0;
+
+                        AudioEngine::DiagConditionsSnapshot b {};
+                        engine.diagSnapshotConditions(b);
+                        lock.unlock();
+
+                        const bool same =
+                            a.hasPendingTask == b.hasPendingTask
+                            && a.workerBusy == b.workerBusy
+                            && a.swapPending == b.swapPending
+                            && a.publicationResidency == b.publicationResidency
+                            && a.deferredAdmission == b.deferredAdmission
+                            && a.recoveryPending == b.recoveryPending
+                            && a.liveRecoveryObligations == b.liveRecoveryObligations
+                            && a.recoveryAdmissionPending == b.recoveryAdmissionPending
+                            && a.publishRetryReady == b.publishRetryReady
+                            && a.pendingDiagTask == b.pendingDiagTask
+                            && a.phaseTick == b.phaseTick
+                            && a.workerActivitySeq == b.workerActivitySeq
+                            && AudioEngine::diagConditionsMet(b);
+
+                        if (!same)
+                        {
+                            if (++st->baselineRetries > 3) { failStep("baseline_changed"); break; }
+                            break;
+                        }
+
+                        juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                 + " phase=baseline ok tick=" + juce::String((juce::int64) b.phaseTick)
+                                                 + " activity=" + juce::String((juce::int64) b.workerActivitySeq)
+                                                 + " genBefore=" + juce::String((juce::int64) st->genBefore)
+                                                 + " publishBefore=" + juce::String((juce::int64) st->pubBefore)
+                                                 + " wsProxy=" + juce::String((juce::int64) privProxy));
+                        st->phase = 4;
+                        break;
+                    }
+                    case 4: // request the diagnostic rebuild
+                    {
+                        const auto out = engine.requestRebuildForDiag(st->requestId);
+                        if (out != AudioEngine::RebuildDispatchOutcome::Accepted)
+                        {
+                            failStep("request_rebuild_" + juce::String((int) out));
+                            break;
+                        }
+                        juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                 + " phase=requestRebuild requestId=" + juce::String((juce::int64) st->requestId));
+                        st->deadlineMs = nowMs + 30000;
+                        st->phase = 5;
+                        break;
+                    }
+                    case 5: // wait publish with our requestId
+                    {
+                        const auto snap = engine.getActiveRuntimeSnapshot();
+                        if (snap.diagRequestId == st->requestId && snap.generation > st->genBefore)
+                        {
+                            juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                     + " phase=published genAfter=" + juce::String((juce::int64) snap.generation)
+                                                     + " irLoaded=" + juce::String((int) snap.irLoaded)
+                                                     + " irLen=" + juce::String(snap.irLength)
+                                                     + " requestId=" + juce::String((juce::int64) snap.diagRequestId)
+                                                     + " sealed=" + juce::String((int) snap.diagProjectionSealed));
+                            st->phase = 6;
+                            break;
+                        }
+                        if (nowMs >= st->deadlineMs)
+                        {
+                            failStep("publish_timeout");
+                            break;
+                        }
+                        break;
+                    }
+                    case 6: // publish increment must be exactly 1
+                    {
+                        const auto delta = engine.worldRetirementTelemetry().acquireObserved() - st->pubBefore;
+                        const bool ok = (delta == 1);
+                        juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                 + " phase=settled publishDelta=" + juce::String((juce::int64) delta)
+                                                 + " ok=" + juce::String((int) ok));
+                        if (!ok)
+                        {
+                            failStep(delta == 0 ? "no_publish" : "external_publish");
+                            break;
+                        }
+                        st->settleDeadlineMs = nowMs + (std::uint64_t) st->settleMs;
+                        st->phase = 7;
+                        break;
+                    }
+                    case 7: // settle
+                    {
+                        if (nowMs >= st->settleDeadlineMs)
+                        {
+                            // ★ step の終わりにウィンドウを閉じる（次の step が開けるようにする）。
+                            if (st->windowOpen)
+                            {
+                                engine.endDiagWindow();
+                                st->windowOpen = false;
+                            }
+
+                            juce::Logger::writeToLog("[CLI_IR_ALT] step=" + juce::String(st->stepIndex)
+                                                     + " phase=result valid=1");
+                            ++st->stepIndex;
+                            st->deadlineMs = 0; // 次の step の期限を初期化する
+                            st->phase = 0;
+                        }
+                        break;
+                    }
+                    default: // 8 = done
+                        break;
+                    }
+
+                    if (st->phase == 8)
+                    {
+                        if (st->windowOpen)
+                        {
+                            engine.endDiagWindow();
+                            st->windowOpen = false;
+                        }
+                        juce::Logger::writeToLog("[CLI_IR_ALT] result valid=" + juce::String((int) st->allValid)
+                                                 + " steps=" + juce::String(st->stepIndex)
+                                                 + " reason=" + st->failReason);
+                        st->self.reset();
+                        return;
+                    }
+
+                    if (st->phase != 0 || st->stepIndex < st->totalSteps)
+                        juce::Timer::callAfterDelay(10, *st->self);
+                };
+
+                juce::Timer::callAfterDelay(300, *selfFn);
+            }
         }
     }
 

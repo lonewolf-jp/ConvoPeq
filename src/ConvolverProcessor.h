@@ -291,6 +291,9 @@ public:
     //----------------------------------------------------------
     bool loadImpulseResponse(const juce::File& irFile, bool optimizeForRealTime = false);
     void loadIR(const juce::File& irFile);
+    // ★ WORK113 変更2 (DIAG): 診断 step の ID を保留要求に紐付ける。
+    void loadIR(const juce::File& irFile, std::uint64_t diagRequestId);
+    void loadIRImpl(const juce::File& irFile, std::uint64_t diagRequestId);
     void applyComputedIR(std::unique_ptr<ConvolverIRPayload> payload);
     // acquire: applyComputedIR の release と HB し、IR 適用時刻を取得。
     [[nodiscard]] int64_t getLastPreparedIRApplyTicks() const noexcept { return convo::consumeAtomic(lastPreparedIRApplyTicks, std::memory_order_acquire); } // acquire: applyComputedIR の release と HB
@@ -331,6 +334,26 @@ public:
     {
         rcuSwapper.exitReader(readerIndex);
     }
+
+    // ★ WORK113 変更2 (DIAG): 診断専用の RCU Reader index（3）。
+    //   index 1（UI スナップショット）と index 2（cache 安全判定）とは共有しない。
+    static constexpr int kDiagStateReaderIndex = 3;
+
+    class ConvolverStateReaderGuard
+    {
+    public:
+        explicit ConvolverStateReaderGuard(const ConvolverProcessor& cp) noexcept
+            : cp_(cp)
+        {
+            cp_.enterStateReader(kDiagStateReaderIndex);
+        }
+        ~ConvolverStateReaderGuard() noexcept
+        {
+            cp_.exitStateReader(kDiagStateReaderIndex);
+        }
+    private:
+        const ConvolverProcessor& cp_;
+    };
 
     void enterGlobalReader(int /*readerIndex*/) const noexcept;
     void exitGlobalReader(int /*readerIndex*/) const noexcept;
@@ -637,9 +660,44 @@ public:
     // 旧状態を DeferredFreeThread に委ねる。
     // GenerationManager で陳腐化チェックを行い、古いタスク結果は破棄する。
     //
+    // ★ WORK113 変更2 (DIAG): RCU swap の結果。Swapped のときだけ commit 記録を書く。
+    enum class StateSwapOutcome : std::uint8_t
+    {
+        Swapped = 0,
+        WriterBusy,
+        StaleGeneration
+    };
+
     // @param newState  新しい状態（所有権を移譲）。世代チェックに失敗した場合は即削除。
-    void updateConvolverState(convo::ConvolverState* newState);
-    void updateConvolverState(std::unique_ptr<convo::ConvolverState> newState);
+    StateSwapOutcome updateConvolverState(convo::ConvolverState* newState);
+    StateSwapOutcome updateConvolverState(std::unique_ptr<convo::ConvolverState> newState);
+
+    // ★ WORK113 変更2 (DIAG): 保留ロード要求（Message Thread 専用）。
+    struct DiagPendingLoad
+    {
+        std::uint64_t requestGenId = 0;
+        std::uint64_t diagRequestId = 0;
+        bool valid = false;
+    };
+
+    // ★ WORK113 変更2 (DIAG): RCU commit 記録（Message Thread 専用・1 件）。
+    struct DiagCommitRecord
+    {
+        std::uint64_t requestGenId = 0;
+        std::uint64_t diagRequestId = 0;
+        int irLength = 0;
+        int fftSize = 0;
+        std::uint64_t structuralHash = 0;
+        std::uint64_t convolverFingerprint = 0;
+        bool valid = false;
+    };
+
+    // ★ WORK113 変更2 (DIAG): 生きた RCU state の世代（index 3 の guard で読む）。
+    [[nodiscard]] std::uint64_t getActiveStateGenerationForDiag() const noexcept;
+    // ★ WORK113 変更2 (DIAG): 記録の参照（消費しない）。
+    [[nodiscard]] bool peekCommitRecord(std::uint64_t diagRequestId, DiagCommitRecord& out) const noexcept;
+    // ★ WORK113 変更2 (DIAG): 記録の消費（要求 ID が一致したときだけ、1 回限り）。
+    bool consumeCommitRecord(std::uint64_t diagRequestId, DiagCommitRecord& out) noexcept;
 
     [[nodiscard]] bool isConvolverGenerationCurrent(uint64_t generation) const
     {
@@ -1223,6 +1281,10 @@ private:
     //----------------------------------------------------------
     juce::String irName;
     std::atomic<int> irLength { 0 };  // rebuildThread(read) と Message Thread(write) 間のデータレース防止
+
+    // ★ WORK113 変更2 (DIAG): 診断 step の保留要求と commit 記録（Message Thread 専用）。
+    DiagPendingLoad diagPendingLoad_ {};
+    DiagCommitRecord diagCommitRecord_ {};
     // --- Visualization Data (accessed by worker and message threads) ---
     std::vector<float> irWaveform;
     std::vector<float> irMagnitudeSpectrum;

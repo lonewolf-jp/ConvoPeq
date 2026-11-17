@@ -36,6 +36,10 @@ struct BuildInput final {
     double convolverInputTrimGain = 1.0;
     bool autoGainStagingEnabled = false;  // ★ v14.0: Auto Gain Staging フラグ
     convo::EQParameters eqParams {};      // [WORK113-16 Phase 1] Message Thread で値 capture された EQ 状態
+
+    // ★ WORK113 変更2 (DIAG): 診断 step の識別子。0 は診断外。
+    //   比較・fingerprint・buildInputHash には含めない（診断 provenance 専用）。
+    std::uint64_t diagRequestId = 0;
 };
 
 struct RuntimeBuildFingerprint
@@ -66,6 +70,10 @@ struct RuntimeBuildSnapshot
     int oversamplingFactor = 1;
     double sampleRate = 48000.0;
     int baseLatencySamples = 0;
+
+    // ★ WORK113 変更2 (DIAG): 公開 world へ運ぶ診断値。比較・hash には含めない。
+    std::uint64_t diagRequestId = 0;
+    int irLength = 0;
 };
 
 //==============================================================================
