@@ -571,6 +571,10 @@ public:
         uint64_t firstScanAgeMs{0};               // 0 = 未走査（firstScanTsNs==0）
         bool     scanned{false};                  // reclaim 走査で一度でも評価されたか
         bool     epochOlderThanMinReader{false};  // isOlder(headEpoch, minReaderEpoch)
+        // ★ WORK113 変更1: サイドテーブルの帰属メタ（DIAG ON のみ意味を持つ）。
+        std::uint64_t ownerId{0};                 // DSPCore の runtimeUuid（0 = 未取得）
+        std::uint64_t measuredBytes{0};           // 計測済み帰属分（0 = 未計測）
+        bool     metaAvailable{false};            // メタが供給され採用されたか
     };
 
     [[nodiscard]] RetireHeadSnapshot inspectRetireHead() const noexcept
@@ -603,6 +607,17 @@ public:
             if (nowNs > e.firstScanTsNs)
                 s.firstScanAgeMs = (nowNs - e.firstScanTsNs) / 1'000'000ull;
         }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ WORK113 変更1: 先頭エントリの帰属メタを照合して載せる（seq 不一致なら載せない）。
+        DiagRetireMetaView view {};
+        if (deferredDeletionQueue.readMeta(slot, seq, view) && view.available)
+        {
+            s.ownerId = view.ownerId;
+            s.measuredBytes = view.measuredBytes;
+            s.metaAvailable = true;
+        }
+#endif
         return s;
     }
 
@@ -619,6 +634,18 @@ public:
     {
         return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type, domainId_);
     }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 帰属メタ付き enqueue（NonRT のみ）。サイドテーブルへ記録する。
+    bool enqueueRetireSized(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                            DeletionEntryType type, const RetireMeta& meta) noexcept override
+    {
+        return deferredDeletionQueue.enqueueSized(ptr, deleter, epoch, type,
+                                                  0, 0, domainId_, meta);
+    }
+
+    [[nodiscard]] bool supportsRetireMeta() const noexcept override { return true; }
+#endif
 
     // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・primary 経路）。
     [[nodiscard]] uint64_t worldReclaimCount() const noexcept override

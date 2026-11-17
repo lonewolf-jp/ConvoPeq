@@ -39,6 +39,29 @@ public:
         return enqueueRetire(ptr, deleter, epoch);
     }
 
+    // ★ WORK113 変更1: 帰属メタ付き enqueue（NonRT 専用）。
+    //   既定実装は typed へ委譲し、メタを落としたことを計数する（黙って消さない）。
+    //   メタに対応する provider は supportsRetireMeta() を true にし、この関数を override する。
+    virtual bool enqueueRetireSized(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                                   DeletionEntryType type, const RetireMeta& /*meta*/) noexcept
+    {
+        metaDroppedCount_.fetch_add(1, std::memory_order_relaxed);
+        return enqueueRetireTyped(ptr, deleter, epoch, type);
+    }
+
+    [[nodiscard]] virtual bool supportsRetireMeta() const noexcept { return false; }
+
+    [[nodiscard]] uint64_t metaDroppedCount() const noexcept
+    {
+        return metaDroppedCount_.load(std::memory_order_acquire);
+    }
+
+private:
+    // ★ WORK113 変更1: メタ非対応 provider が落とした件数（既定実装だけが増やす）。
+    std::atomic<std::uint64_t> metaDroppedCount_ { 0 };
+
+public:
+
     /** Try to reclaim retired objects. */
     virtual void tryReclaim() noexcept = 0;
 

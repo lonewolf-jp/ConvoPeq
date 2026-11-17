@@ -435,6 +435,15 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
                                                     uint64_t epoch,
                                                     DeletionEntryType type) noexcept
 {
+    return enqueueRetireImpl(ptr, deleter, epoch, type, nullptr);
+}
+
+RetireEnqueueResult ISRRetireRouter::enqueueRetireImpl(void* ptr,
+                                                        void (*deleter)(void*),
+                                                        uint64_t epoch,
+                                                        DeletionEntryType type,
+                                                        const RetireMeta* meta) noexcept
+{
     assert(provider_ != nullptr);
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
@@ -476,7 +485,19 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
     }
 
     // Route through IEpochProvider interface（★ T1: telemetry type tag を伝搬・D86）。
-    if (provider_->enqueueRetireTyped(ptr, deleter, epoch, type))
+    // ★ WORK113 変更1: meta がある場合だけ sized API を使う（meta=nullptr は従来どおり）。
+    const auto callProvider = [&]() noexcept -> bool
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        if (meta != nullptr && provider_->supportsRetireMeta())
+            return provider_->enqueueRetireSized(ptr, deleter, epoch, type, *meta);
+#else
+        (void) meta;
+#endif
+        return provider_->enqueueRetireTyped(ptr, deleter, epoch, type);
+    };
+
+    if (callProvider())
     {
         // ★ work70: サイズ追跡は enqueue 時に objectBytes が設定されている場合のみ。
         //   現在の呼び出し元は objectBytes=0 のため trackedRatio=0% となる。
@@ -493,7 +514,7 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
         provider_->tryReclaim();
 
         // 再試行: reclaim 後に空きができたか確認（★ T1: type を伝搬・D86）
-        if (provider_->enqueueRetireTyped(ptr, deleter, epoch, type))
+        if (callProvider())
             return RetireEnqueueResult::Success;
     }
 
@@ -626,6 +647,85 @@ RetireEnqueueResult ISRRetireRouter::enqueueWithRetry(void* ptr,
     // ★ P-4: Shutdown — caller retains ownership (enqueueDeferredDeleteNonRtWithResult handles)
     return result;
 }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// ★ WORK113 変更1: 帰属メタ付きのリトライ込み enqueue（NonRT 専用）。
+//   D が受け取れば metaStored、Q/E/T へ移送した場合は受け取り先で 1 回だけ計数する。
+//   Shutdown 等で所有権が呼び出し側に残る場合は、どの disposition にも数えない。
+RetireEnqueueResult ISRRetireRouter::enqueueWithRetrySized(void* ptr,
+                                                           void (*deleter)(void*),
+                                                           uint64_t epoch,
+                                                           DeletionEntryType type,
+                                                           const RetireMeta& meta) noexcept
+{
+    jassert(!convo::numeric_policy::isAudioThread());
+    convo::fetchAddAtomic(metaSizedCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+
+    if (! provider_->supportsRetireMeta())
+    {
+        // 未対応 provider: 従来経路へ委譲し、落としたことを 1 回だけ数える。
+        convo::fetchAddAtomic(metaUnsupportedProviderCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        return enqueueWithRetry(ptr, deleter, epoch, type);
+    }
+
+    auto result = enqueueRetireImpl(ptr, deleter, epoch, type, &meta);
+    if (result == RetireEnqueueResult::Success)
+    {
+        convo::fetchAddAtomic(metaStoredCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        return result;
+    }
+
+    constexpr int kMaxRetry = 2;
+    for (int attempt = 0; attempt < kMaxRetry; ++attempt)
+    {
+        provider_->tryReclaim();
+        drainEmergencyAndTerminal();
+        result = enqueueRetireImpl(ptr, deleter, epoch, type, &meta);
+        if (result == RetireEnqueueResult::Success)
+        {
+            convo::fetchAddAtomic(metaStoredCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+            return result;
+        }
+        if (result != RetireEnqueueResult::QueuePressure)
+            break;
+    }
+
+    if (result == RetireEnqueueResult::QueuePressure || result == RetireEnqueueResult::QueueFull)
+    {
+        const bool stored = m_retireQuarantine.quarantine(
+            ptr, deleter, epoch, type, "enqueueWithRetrySized:QueuePressure",
+            /*publicationSequenceId=*/0, /*generation=*/0);
+        if (stored)
+        {
+            convo::fetchAddAtomic(metaLostQuarantineCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        }
+        else
+        {
+            const bool estored = m_emergencyQuarantine.quarantine(
+                ptr, deleter, epoch, type, "enqueueWithRetrySized:EmergencyQuarantine",
+                /*publicationSequenceId=*/0, /*generation=*/0);
+            if (estored)
+            {
+                convo::fetchAddAtomic(metaLostEmergencyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+            }
+            else
+            {
+                const bool tstored = terminalReclaim(ptr, deleter, epoch, type,
+                                                     "enqueueWithRetrySized:TerminalReclaim");
+                (void) tstored;
+                convo::fetchAddAtomic(metaLostTerminalCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+                result = RetireEnqueueResult::TerminalReclaim;
+            }
+        }
+
+        signalDrainWakeup();
+        return result;
+    }
+
+    // Shutdown 等: 所有権は呼び出し側に残る（disposition なし）。
+    return result;
+}
+#endif
 
 void ISRRetireRouter::tryReclaim() noexcept
 {

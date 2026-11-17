@@ -1,11 +1,34 @@
 #include "DSPLifetimeManager.h"
 #include "AudioEngine.h"
+#include "DiagObjectRegistry.h"   // ★ WORK113 変更1: 帰属メタ（DSPCore の実測 footprint）
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 // ★ D117 root-cause audit: observation-only lifetime trace (no semantic change).
 #define D117_LIFETIME_LOG(msg) juce::Logger::writeToLog(msg)
 #else
 #define D117_LIFETIME_LOG(msg) ((void) 0)
+#endif
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+namespace
+{
+// ★ WORK113 変更1: 破棄前の DSPCore から帰属メタを作る（ポインタは生存中のみ参照）。
+RetireMeta makeCoreRetireMeta (const AudioEngine::DSPCore* core) noexcept
+{
+    RetireMeta meta {};
+    if (core == nullptr || core->runtimeUuid == 0)
+        return meta;
+
+    std::uint64_t bytes = 0;
+    if (convo::diag::registry().lookupCoreBytes (core->runtimeUuid, bytes))
+    {
+        meta.ownerId = core->runtimeUuid;
+        meta.measuredBytes = bytes;
+        meta.available = true;
+    }
+    return meta;
+}
+} // namespace
 #endif
 
 DSPLifetimeManager::DSPLifetimeManager(AudioEngine& engine) noexcept
@@ -55,10 +78,18 @@ void DSPLifetimeManager::retire(void* dsp, uint64_t publicationEpoch) noexcept
         ? publicationEpoch
         : router_->currentEpoch();
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const auto result = router_->enqueueWithRetrySized(
+        dsp, &AudioEngine::destroyDSPCoreNode,
+        epoch,
+        DeletionEntryType::Generic,
+        makeCoreRetireMeta(static_cast<AudioEngine::DSPCore*>(dsp)));
+#else
     const auto result = router_->enqueueWithRetry(
         dsp, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+#endif
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE] dsp=%p enqueue=%d epoch=%llu",
                                               dsp, static_cast<int>(result),
@@ -118,10 +149,18 @@ void DSPLifetimeManager::retireByHandle(convo::isr::DSPHandle handle) noexcept
         return;
 
     const auto epoch = router_->currentEpoch();
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const auto result = router_->enqueueWithRetrySized(
+        toDelete, &AudioEngine::destroyDSPCoreNode,
+        epoch,
+        DeletionEntryType::Generic,
+        makeCoreRetireMeta(toDelete));
+#else
     const auto result = router_->enqueueWithRetry(
         toDelete, &AudioEngine::destroyDSPCoreNode,
         epoch,
         DeletionEntryType::Generic);
+#endif
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     D117_LIFETIME_LOG(juce::String::formatted("[D117_RETIRE_BY_HANDLE] dsp=%p enqueue=%d epoch=%llu",
                                               toDelete, static_cast<int>(result),
@@ -152,8 +191,14 @@ bool DSPLifetimeManager::retireDetachedCoreForShutdown(convo::isr::DSPHandle han
 
     auto* core = static_cast<AudioEngine::DSPCore*>(rawKey);
     const auto epoch = router_->currentEpoch();
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const auto result = router_->enqueueWithRetrySized(
+        core, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic,
+        makeCoreRetireMeta(core));
+#else
     const auto result = router_->enqueueWithRetry(
         core, &AudioEngine::destroyDSPCoreNode, epoch, DeletionEntryType::Generic);
+#endif
     juce::ignoreUnused(result);
 
     D117_LIFETIME_LOG(juce::String::formatted(
