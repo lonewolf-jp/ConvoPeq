@@ -332,6 +332,19 @@ AudioEngine::~AudioEngine()
                 + juce::String(static_cast<int>(m_epochDomain.epochIdleTimeouts())));
     }
 
+    // ★ WORK113: reader admission（予約〜enter）の完了を待つ。fence と admission gate は
+    //   閉じているため新規の入場は開始されず、待機後は「入場中の reader が存在しない」
+    //   ことが確定する（proof と checked drain の前提）。
+    const bool terminalReaderAdmissionsIdle =
+        m_epochDomain.waitForReaderAdmissions(std::chrono::milliseconds(5000));
+    if (! terminalReaderAdmissionsIdle)
+    {
+        diagLog("[FAULT] reader_admissions_not_idle active="
+                + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
+                + " pendingSlots="
+                + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())));
+    }
+
     // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
     (void) m_coordinator.finalizeRetireOnce();
 
@@ -480,7 +493,7 @@ AudioEngine::~AudioEngine()
 
     // ★ WORK113 Queue/Gate/Drain: 全 retire source の処理後、最後に checked drain（終端）。
     //   fence / gate は閉じたまま（解除しない）。idle 不成立なら drain しない。
-    if (terminalPublishersIdle)
+    if (terminalPublishersIdle && terminalReaderAdmissionsIdle)
     {
         const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt();
         juce::ignoreUnused(checkedDrainCompleted);
@@ -488,7 +501,9 @@ AudioEngine::~AudioEngine()
     else
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        diagLog("[DRAIN_DIAG] checkedDrain skipped=epoch_publishers_not_idle");
+        diagLog(terminalPublishersIdle
+                    ? "[DRAIN_DIAG] checkedDrain skipped=reader_admissions_not_idle"
+                    : "[DRAIN_DIAG] checkedDrain skipped=epoch_publishers_not_idle");
 #endif
     }
 

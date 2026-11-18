@@ -1019,6 +1019,74 @@ makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
     return result.reclaimProofFailureCount == 2;
 }
 
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): DrainCapability の発行条件と proof の対応。
+//   Proof の生成を ShutdownRuntime に限定したまま、正規 API だけで検証する
+//   （Proof を偽造するテスト用 factory は追加しない）。
+//==============================================================================
+[[nodiscard]] bool testDrainCapabilityIssuance()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+    shutdown.closeAdmission();
+    shutdown.joinProducers();
+
+    // (1) 不成立の観測は Proof にならない（Q5 不成立を 2 通りで確認）。
+    {
+        auto bad = makeQuiescentObservation(7, 3);
+        bad.epochEvidence.captured = false;
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
+    {
+        auto bad = makeQuiescentObservation(7, 3, /*activeReaders=*/1);
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
+
+    auto proof = shutdown.tryMakeQuiescenceProof(makeQuiescentObservation(7, 3));
+    if (!proof.has_value() || !proof->valid())
+        return false;
+
+    // (2) 最終 retire の呼び出し回数が 1 でない → 発行拒否。
+    if (shutdown.tryMakeDrainCapability(*proof, 0, 4, 4).has_value())
+        return false;
+    if (shutdown.tryMakeDrainCapability(*proof, 2, 4, 4).has_value())
+        return false;
+
+    // (3) requests != transfers（移送されていない要求が残る）→ 発行拒否。
+    if (shutdown.tryMakeDrainCapability(*proof, 1, 5, 4).has_value())
+        return false;
+    if (shutdown.tryMakeDrainCapability(*proof, 1, 3, 4).has_value())
+        return false;
+
+    // (4) 正常な計数 → 発行され、proof の内容と計数・epoch が引き継がれる。
+    auto cap = shutdown.tryMakeDrainCapability(*proof, 1, 4, 4);
+    if (!cap.has_value())
+        return false;
+    if (!cap->valid())
+        return false;
+    if (cap->finalizeCalls() != 1)
+        return false;
+    if (cap->finalizeRequests() != 4)
+        return false;
+    if (cap->epochAtIssue() != proof->epochEvidence().epoch)
+        return false;
+    if (!cap->producersJoined() || !cap->readersQuiescent()
+        || !cap->postStopEnqueueZero() || !cap->epochSettled())
+        return false;
+
+    // capability は single-use。
+    if (!cap->consume())
+        return false;
+    if (cap->consume())
+        return false;
+
+    // Q6 不成立（post-stop enqueue 実測 > 0）の Proof は発行されない。
+    shutdown.markPostStopEnqueue();
+    return !shutdown.tryMakeQuiescenceProof(makeQuiescentObservation(7, 3)).has_value();
+}
+
 } // anonymous namespace
 } // namespace convo::isr
 
@@ -1029,42 +1097,63 @@ int main()
 {
     try
     {
+        std::fprintf(stderr, "[progress] testInv3_1RetireEpochSafeReclaim\n");
         if (!convo::isr::testInv3_1RetireEpochSafeReclaim())
             throw std::runtime_error("INV-3-1: retire → epoch safe → reclaim 順序違反");
+        std::fprintf(stderr, "[progress] testInv3_2ReclaimDeferredThenSucceeds\n");
         if (!convo::isr::testInv3_2ReclaimDeferredThenSucceeds())
             throw std::runtime_error("INV-3-2: epoch 非安全 → pending 再登録（TOCTOU）違反");
+        std::fprintf(stderr, "[progress] testInv5_1RecoveryFullDrop\n");
         if (!convo::isr::testInv5_1RecoveryFullDrop())
             throw std::runtime_error("INV-5-1: Recovery full → drop + pendingIntentCount 不変 違反");
+        std::fprintf(stderr, "[progress] testInv5_2QuarantineStateChangedGate\n");
         if (!convo::isr::testInv5_2QuarantineStateChangedGate())
             throw std::runtime_error("INV-5-2: Quarantine stateChanged ゲート違反");
+        std::fprintf(stderr, "[progress] testInv5_3SubmitAfterShutdownDiscards\n");
         if (!convo::isr::testInv5_3SubmitAfterShutdownDiscards())
             throw std::runtime_error("INV-5-3: shutdown 後 submit → ShutdownDiscard 違反");
+        std::fprintf(stderr, "[progress] testInv5_4DiscardResidualOnShutdown\n");
         if (!convo::isr::testInv5_4DiscardResidualOnShutdown())
             throw std::runtime_error("INV-5-4: 残留 Recovery の明示 discard 違反");
+        std::fprintf(stderr, "[progress] testInvX3_4ReaderRegistrationClosed\n");
         if (!convo::isr::testInvX3_4ReaderRegistrationClosed())
             throw std::runtime_error("INV-X3-4: reader registration closure 違反");
+        std::fprintf(stderr, "[progress] testInvX3_4ReclaimModeQuiescent\n");
         if (!convo::isr::testInvX3_4ReclaimModeQuiescent())
             throw std::runtime_error("INV-X3-4: ShutdownQuiescent reclaim precondition 違反");
+        std::fprintf(stderr, "[progress] testA2G19G20EpochGenerationSupply\n");
         if (!convo::isr::testA2G19G20EpochGenerationSupply())
             throw std::runtime_error("A2-G19/G20: epoch/readerReg generation 供給違反");
+        std::fprintf(stderr, "[progress] testA2G10G13G21G22ProofPermit\n");
         if (!convo::isr::testA2G10G13G21G22ProofPermit())
             throw std::runtime_error("A2-G10/G13/G21/G22: Proof/Permit acceptance 違反");
+        std::fprintf(stderr, "[progress] testA2Step14ConcurrentDoubleReclaim\n");
         if (!convo::isr::testA2Step14ConcurrentDoubleReclaim())
             throw std::runtime_error("A2-Step14/T9: concurrent double reclaim 違反");
+        std::fprintf(stderr, "[progress] testA2Step14PermitABA\n");
         if (!convo::isr::testA2Step14PermitABA())
             throw std::runtime_error("A2-Step14/T10: Permit ABA 違反");
+        std::fprintf(stderr, "[progress] testA2Step14SetterResurrection\n");
         if (!convo::isr::testA2Step14SetterResurrection())
             throw std::runtime_error("A2-Step14/T11: setter resurrection 違反");
+        std::fprintf(stderr, "[progress] testA2Step14DestructionOrderingAudit\n");
         if (!convo::isr::testA2Step14DestructionOrderingAudit())
             throw std::runtime_error("A2-Step14/T13: destruction ordering audit 違反");
+        std::fprintf(stderr, "[progress] testQ2ProducerJoinAuthorityGate\n");
         if (!convo::isr::testQ2ProducerJoinAuthorityGate())
             throw std::runtime_error("Q2 (2026-11-08): producer join の authority gate 違反");
+        std::fprintf(stderr, "[progress] testQ5EpochEvidenceRealDomain\n");
         if (!convo::isr::testQ5EpochEvidenceRealDomain())
             throw std::runtime_error("Q5 (2026-11-08): EpochQuiescenceEvidence の実観測違反");
+        std::fprintf(stderr, "[progress] testQ6PostStopEnqueueBlocksProof\n");
         if (!convo::isr::testQ6PostStopEnqueueBlocksProof())
             throw std::runtime_error("Q6 (2026-11-08): post-stop enqueue による Proof 阻止違反");
+        std::fprintf(stderr, "[progress] testReclaimProofFailureObservability\n");
         if (!convo::isr::testReclaimProofFailureObservability())
             throw std::runtime_error("reclaim 失敗観測 (2026-11-08): collectResult 反映違反");
+        std::fprintf(stderr, "[progress] testDrainCapabilityIssuance\n");
+        if (!convo::isr::testDrainCapabilityIssuance())
+            throw std::runtime_error("WORK113: DrainCapability の発行条件違反");
     }
     catch (const std::exception& e)
     {

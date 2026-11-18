@@ -5117,7 +5117,11 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
 {
     // 前提: 呼び出し側が reader fence と publish gate を閉じ、最終 retire と
     //       D / Q / E / T の drain を済ませていること（terminal shutdown の停止状態は解除しない）。
-    if (m_epochDomain.activeReaderCount() != 0)
+    // 静止条件: active reader 0・admission（予約〜enter）0・admission 中の slot 0。
+    //   admission は fence 閉鎖後に開始できないため、ここが 0 なら以後の入場は起きない。
+    if (m_epochDomain.activeReaderCount() != 0
+        || m_epochDomain.readerAdmissionsActive() != 0
+        || m_epochDomain.admissionPendingSlots() != 0)
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         juce::Logger::writeToLog("[DRAIN_DIAG] checkedDrain skipped=readers_not_quiescent");
@@ -5183,6 +5187,7 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     juce::Logger::writeToLog(juce::String::formatted(
         "[DRAIN_DIAG] checkedDrain=%d completed=%d finalizeCalls=%llu requests=%llu "
         "denqueues=%llu fallback=%llu remaining=%llu readerFailures=%llu "
+        "readerAdmissions=%u admissionPending=%u "
         "quarantineCount=%llu quarantinePending=%llu "
         "pendingAfter=%u qResident=%zu eResident=%zu tResident=%zu",
         static_cast<int>(result), completed ? 1 : 0,
@@ -5192,6 +5197,8 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
         static_cast<unsigned long long>(counts.fallbackTransfers),
         static_cast<unsigned long long>(m_epochDomain.drainRemainingAfter()),
         static_cast<unsigned long long>(m_epochDomain.drainReaderFailures()),
+        static_cast<unsigned>(m_epochDomain.readerAdmissionsActive()),
+        static_cast<unsigned>(m_epochDomain.admissionPendingSlots()),
         static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
         static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries()),
         static_cast<unsigned>((m_retireRouter != nullptr) ? m_retireRouter->pendingRetireCount() : 0u),

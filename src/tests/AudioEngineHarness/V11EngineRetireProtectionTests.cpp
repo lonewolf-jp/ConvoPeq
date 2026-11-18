@@ -2948,6 +2948,17 @@ bool checkQuarantineContract()
         return false;
     }
 
+    // ★ WORK113: 空 queue では pending の増加確認が空振りになるため、sentinel を 1 件入れる。
+    static std::atomic<int> qDeleterCalls { 0 };
+    static int qSentinel = 0;
+    auto qDeleter = [](void*) noexcept { qDeleterCalls.fetch_add(1, std::memory_order_relaxed); };
+    qDeleterCalls.store(0, std::memory_order_relaxed);
+    if (! domain->enqueueRetire(&qSentinel, qDeleter, domain->currentEpoch()))
+    {
+        std::fprintf(stderr, "[DQ-Q0] FAIL: enqueueRetire for the quarantine probe failed\n");
+        ok = false;
+    }
+
     const auto countBefore = convo::EpochDomain::quarantineCount();
     const auto pendingBefore = convo::EpochDomain::quarantinePendingEntries();
     const auto pendingInQueue = static_cast<std::uint64_t>(local->sizeApprox());
@@ -2969,9 +2980,20 @@ bool checkQuarantineContract()
         std::fprintf(stderr, "[DQ-Q3] FAIL: quarantineCount delta != 1\n");
         ok = false;
     }
+    if (pendingInQueue != 1u)
+    {
+        std::fprintf(stderr, "[DQ-Q4a] FAIL: quarantine probe queue is empty (pending=%u)\n",
+                     static_cast<unsigned>(pendingInQueue));
+        ok = false;
+    }
     if (convo::EpochDomain::quarantinePendingEntries() != pendingBefore + pendingInQueue)
     {
         std::fprintf(stderr, "[DQ-Q4] FAIL: pending entries not accumulated\n");
+        ok = false;
+    }
+    if (qDeleterCalls.load(std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-Q4b] FAIL: deleter ran for a quarantined entry\n");
         ok = false;
     }
     // 自己参照で保持されているので、local を手放した後も queue は有効（deleter は実行しない）。
@@ -2982,7 +3004,7 @@ bool checkQuarantineContract()
     }
 
     if (ok)
-        std::printf("[DQ-Q] quarantine: PASS (single registration, counters, self-ref retention)\n");
+        std::printf("[DQ-Q] quarantine: PASS (non-empty queue, pending +1, deleter not run, self-ref retention)\n");
     return ok;
 }
 
