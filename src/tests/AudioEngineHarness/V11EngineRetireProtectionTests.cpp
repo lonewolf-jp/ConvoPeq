@@ -3619,6 +3619,7 @@ bool checkShutdownHoldPublisherTimeout()
                      AudioEngine::abandonedReaderSubstratesForTest());
         ok = false;
     }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
         const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
         if (reason == nullptr || juce::String(reason) != "epoch_publishers_not_idle")
@@ -3628,6 +3629,7 @@ bool checkShutdownHoldPublisherTimeout()
             ok = false;
         }
     }
+#endif
 
     if (ok)
         std::printf("[DQ-H4] publisher timeout: PASS (publishers not idle, reader admissions idle, "
@@ -3763,6 +3765,7 @@ bool checkShutdownHoldActiveReader()
                      AudioEngine::abandonedReaderSubstratesForTest());
         ok = false;
     }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
         const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
         if (reason == nullptr || juce::String(reason) != "active_readers_not_idle")
@@ -3772,6 +3775,7 @@ bool checkShutdownHoldActiveReader()
             ok = false;
         }
     }
+#endif
 
     if (ok)
         std::printf("[DQ-H5] active reader hold: PASS (publisher idle, admission idle, active reader 1, "
@@ -3903,6 +3907,7 @@ bool checkShutdownHoldEngineReader()
                      AudioEngine::abandonedReaderSubstratesForTest());
         ok = false;
     }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
         const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
         if (reason == nullptr || juce::String(reason) != "active_readers_not_idle")
@@ -3912,6 +3917,7 @@ bool checkShutdownHoldEngineReader()
             ok = false;
         }
     }
+#endif
 
     if (ok)
         std::printf("[DQ-H6] engine-owned reader hold: PASS (reader inside at teardown, busy observed, "
@@ -4083,7 +4089,9 @@ bool checkDeferredCoreNotRetried()
         }
 
         deferredBefore = ShutdownHoldTestAccess::deferredResident (*engine);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         destroyedBefore = convo::diag::registry().totals().destroyedTotal;
+#endif
 
         if (! deferredSeen || deferredBefore != 1u)
         {
@@ -4096,6 +4104,7 @@ bool checkDeferredCoreNotRetried()
         // ここで ~AudioEngine（hold 経路 → retryDeferredDestroys は実行されない）
     }
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const auto destroyedAfter = convo::diag::registry().totals().destroyedTotal;
     if (destroyedAfter != destroyedBefore)
     {
@@ -4108,6 +4117,13 @@ bool checkDeferredCoreNotRetried()
         std::printf("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
                     "destroyedTotal unchanged %u, retry not executed)\n",
                     deferredBefore, static_cast<unsigned>(destroyedAfter));
+#else
+    // DIAG OFF では DiagObjectRegistry が存在しないため、resident の不変だけを確認する。
+    if (ok)
+        std::printf("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
+                    "destroyedTotal unavailable with DIAG OFF, retry not executed)\n",
+                    deferredBefore);
+#endif
     return ok;
 }
 
