@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -43,6 +44,20 @@ void check (bool cond, const char* what)
     }
 }
 
+// ★ bounded wait: 条件が成立するまで待つ（上限付き）。タイムアウトは false。
+//   固定 sleep だけで「競合区間に到達した」ことを仮定しないための補助。
+bool waitUntil (const std::function<bool()>& pred, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (pred())
+            return true;
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+    }
+    return pred();
+}
+
 // ── T1: publish gate と publishEpoch の競合 ─────────────────────────────────
 //   4 本の publisher が publishEpoch() を回し続ける中で gate を閉じる。
 //   gate 閉鎖後は epoch が進まないこと、遅延 publish が計数されることを見る。
@@ -59,12 +74,22 @@ void t1_publishGate()
                 (void) domain->publishEpoch();
         });
 
-    std::this_thread::sleep_for (std::chrono::milliseconds (30));
+    // publisher が実際に実行されていることを、固定 sleep ではなく epoch 前進で確認する。
+    const std::uint64_t epochBeforeClose = domain->currentEpoch();
+    check (waitUntil ([&] {
+               return domain->currentEpoch() != epochBeforeClose;
+           }, std::chrono::milliseconds (2000)),
+           "T1: publishers must be running before the gate closes");
+
     const bool idle = domain->closePublishersAndWaitIdle (std::chrono::milliseconds (2000));
     const std::uint64_t epochAtFence = domain->epochAtFence();
 
-    // gate 閉鎖後も publisher は回り続ける（= 遅延 publish の計数対象）。
-    std::this_thread::sleep_for (std::chrono::milliseconds (20));
+    // gate 閉鎖後の遅延 publish が計数されるまで待つ（固定 sleep 不使用）。
+    check (waitUntil ([&] {
+               return domain->latePublisherAttempts() > 0;
+           }, std::chrono::milliseconds (2000)),
+           "T1: late publisher attempts must be counted after the gate closed");
+
     stop.store (true, std::memory_order_release);
     for (auto& t : pubs)
         t.join();
@@ -72,8 +97,6 @@ void t1_publishGate()
     check (idle, "T1: publishers must become idle");
     check (domain->currentEpoch() == epochAtFence,
            "T1: epoch must not advance after the gate closed");
-    check (domain->latePublisherAttempts() > 0,
-           "T1: late publisher attempts must be counted");
     std::printf ("T1 publish gate: attempts=%u epoch=%llu\n",
                  static_cast<unsigned> (domain->latePublisherAttempts()),
                  static_cast<unsigned long long> (domain->currentEpoch()));
@@ -105,17 +128,24 @@ void t2_readerFence()
             }
         });
 
-    std::this_thread::sleep_for (std::chrono::milliseconds (30));
+    // fence を閉じる前に、reader が実際に入場したことを待つ。
+    check (waitUntil ([&] { return entered.load (std::memory_order_acquire) > 0; },
+                      std::chrono::milliseconds (2000)),
+           "T2: readers must have entered before the fence closes");
+
     domain->closeReaderRegistration();
     domain->engageShutdownReaderFence();
+
+    // fence 閉鎖後の入場試行が拒否されたことを待つ。
+    check (waitUntil ([&] { return domain->enterAfterFence() > 0; },
+                      std::chrono::milliseconds (2000)),
+           "T2: enter-after-fence attempts must be observed");
+
     const bool admissionsIdle = domain->waitForReaderAdmissions (std::chrono::milliseconds (2000));
     const bool publishersIdle = domain->closePublishersAndWaitIdle (std::chrono::milliseconds (2000));
-    std::this_thread::sleep_for (std::chrono::milliseconds (20));
     stop.store (true, std::memory_order_release);
     for (auto& t : readers)
         t.join();
-
-    check (entered.load() > 0, "T2: readers must have entered at least once");
     check (admissionsIdle, "T2: reader admissions must become idle");
     check (publishersIdle, "T2: publishers must become idle");
     check (domain->activeReaderCount() == 0, "T2: no active reader after the fence");
@@ -198,8 +228,10 @@ void t4_takeDuringEnqueue()
         }
     });
 
-    // producer が回り続けている途中で引き取る（行数を十分に多くしてある）。
-    std::this_thread::sleep_for (std::chrono::milliseconds (1));
+    // producer が少なくとも 1 件を受け入れたことを確認してから引き取る（固定 sleep 不使用）。
+    check (waitUntil ([&] { return accepted.load (std::memory_order_acquire) > 0; },
+                      std::chrono::milliseconds (2000)),
+           "T4: producer must enqueue at least once before the take");
     auto taken = domain->takeForShutdown();   // ← producer と同時
     stop.store (true, std::memory_order_release);
     producer.join();

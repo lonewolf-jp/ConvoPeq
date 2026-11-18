@@ -18,6 +18,11 @@
 
 name: Sanitizer CI
 
+# ★ 2026-11-19: GitHub Advanced Security の指摘（過剰な GITHUB_TOKEN 権限）に対応。
+#   このワークフローは読み取りのみで足りるため、既定を contents: read にする。
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, "release/**"]
