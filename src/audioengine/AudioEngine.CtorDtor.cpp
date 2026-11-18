@@ -345,7 +345,14 @@ AudioEngine::~AudioEngine()
                 + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())));
     }
 
+    // ★ WORK113 (2026-11-18 Owner 指示): reader の静止を確認できない場合は、reader quiescence を
+    //   前提とする破棄・回収を一切実行しない（fail-closed）。予約中（depth 0・未 enter）の reader は
+    //   activeReaderCount() に現れないため、activeReaderCount() == 0 だけを根拠に force drain しては
+    //   ならない。安全を証明できない対象は強制解放せず保持する（リークを選び、UAF を選ばない）。
+    const bool readerQuiescent = terminalReaderAdmissionsIdle;
+
     // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
+    //   ここは retire 要求の移送のみで、ポインタの解放は行わない。
     (void) m_coordinator.finalizeRetireOnce();
 
     // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
@@ -357,11 +364,23 @@ AudioEngine::~AudioEngine()
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
-    drainDeferredRetireQueues(true);
+
+    // 解放を伴う deferred queue の回収は reader 静止時だけ実行する。
+    if (readerQuiescent)
+    {
+        drainDeferredRetireQueues(true);
+    }
+    else
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[WORK113] shutdown hold: deferred retire queues retained (reader admission in flight)");
+#endif
+    }
 
     // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) before pointer-lifetime
     //   drain (drainAll). OverflowRing may hold entries not yet processed because the RT commit
     //   path (the only caller of dequeuePendingRetireIntents()) has stopped.
+    //   （移送のみでポインタは解放しないため、reader 静止の有無にかかわらず実行できる）
     drainPendingRetireIntentsForShutdown();
 
     // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
@@ -372,7 +391,14 @@ AudioEngine::~AudioEngine()
     // ★ 15-P-5 FIX: stuck-reader fallback は D のみにしない。Audio Thread は停止済みのため、
     //   Q + E + T の drainAllQuarantineStore（drainAllUnsafe ベース、epoch 非依存）も強制実行する。
     //   drainAllUnsafe は Audio Thread 停止後のみ呼ばれる契約を満たす（RetireQuarantineStore.h:59参照）。
-    if (m_retireRouter->activeReaderCount() == 0)
+    // ★ WORK113 (2026-11-18 Owner 指示): reader の静止を確認できない場合は、この force drain を
+    //   行わない。activeReaderCount()==0 だけでは、予約中（depth 0）の reader が後から入場する
+    //   可能性を排除できないため、所有権を保持する fail-closed 経路に切り替える。
+    if (! readerQuiescent)
+    {
+        holdRetireQueuesForShutdownNonRt();
+    }
+    else if (m_retireRouter->activeReaderCount() == 0)
         m_retireRouter->drainAll();
     else
     {
@@ -392,7 +418,17 @@ AudioEngine::~AudioEngine()
         const auto deferredBefore = deferredDestroyResidentCount();
         if (deferredBefore > 0)
         {
-            (void)retryDeferredDestroys();
+            if (readerQuiescent)
+            {
+                (void)retryDeferredDestroys();
+            }
+            else
+            {
+                // ★ WORK113: reader 静止を確認できないため、pin が解放済みに見えても回収しない。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                diagLog("[WORK113] shutdown hold: deferred DSPCore retry skipped (retained)");
+#endif
+            }
             const auto deferredAfter = deferredDestroyResidentCount();
             juce::Logger::writeToLog(juce::String::formatted(
                 "[F1_DEFERRED_SHUTDOWN] before=%zu after=%zu%s",
@@ -429,7 +465,9 @@ AudioEngine::~AudioEngine()
         if (residualPending != 0)
             diagLog("[D162-2E] INV-D162-8: EBR residual pending=" + juce::String((int)residualPending)
                 + " after drainAll — DSPCore destruction may carry into member teardown");
-        jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
+        if (readerQuiescent)
+            jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
+        // reader 静止を確認できない場合は残留が想定内（fail-closed で保持している）。
     }
 #endif
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -489,11 +527,22 @@ AudioEngine::~AudioEngine()
     //   この時点では shutdownRuntime_ / m_retireRouter / dspHandleRuntime_ 等が全て生存しているため、
     //   dspHandleRuntime_.retire + resolve + delete が安全に実行できる。
     //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
-    eqCacheManager.drainForShutdown();
+    if (readerQuiescent)
+    {
+        eqCacheManager.drainForShutdown();
+    }
+    else
+    {
+        // ★ WORK113: reader 静止を確認できないため、EQ cache の強制破棄は行わない。
+        //   （~EQCacheManager は CacheMap のみを破棄し、EQCoeffCache の実体は解放しない）
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[WORK113] shutdown hold: EQ cache drain skipped (retained)");
+#endif
+    }
 
     // ★ WORK113 Queue/Gate/Drain: 全 retire source の処理後、最後に checked drain（終端）。
     //   fence / gate は閉じたまま（解除しない）。idle 不成立なら drain しない。
-    if (terminalPublishersIdle && terminalReaderAdmissionsIdle)
+    if (terminalPublishersIdle && readerQuiescent)
     {
         const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt();
         juce::ignoreUnused(checkedDrainCompleted);

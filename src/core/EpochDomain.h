@@ -169,14 +169,17 @@ public:
         return n;
     }
 
-    // ★ WORK113 テスト用シーム: reader admission の取得直後（fence 判定より前）に 1 回呼ぶ。
-    //   本番では nullptr のまま（null チェック 1 回のみ）。interleaving の決定論的再現に使う。
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ WORK113 テスト専用シーム（CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY を定義する単一 TU だけ）。
+    //   reader admission の取得直後（fence 判定より前）に 1 回呼ぶ。interleaving の
+    //   決定論的再現に使う。本番・harness のビルドには存在しない。
     using ReaderAdmissionSeam = void (*) (void*);
     static void setReaderAdmissionSeam (ReaderAdmissionSeam fn, void* ctx) noexcept
     {
         readerAdmissionSeamCtx_.store (ctx, std::memory_order_release);
         readerAdmissionSeamFn_.store (fn, std::memory_order_release);
     }
+#endif
     [[nodiscard]] bool shutdownReaderFenceEngaged() const noexcept
     {
         return shutdownReaderFence_.load(std::memory_order_acquire);
@@ -509,9 +512,11 @@ public:
             return false;
         }
 
-        // テスト用シーム（本番は nullptr）。admission 取得後・fence 判定前に停止点を作る。
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+        // テスト用シーム（テスト専用 TU のみ）。admission 取得後・fence 判定前に停止点を作る。
         if (auto fn = readerAdmissionSeamFn_.load (std::memory_order_acquire))
             fn (readerAdmissionSeamCtx_.load (std::memory_order_acquire));
+#endif
 
         // ★ WORK113: admission 取得後に fence を読み直す。閉鎖済みなら入場しない
         //   （admission はここで終了させるため、shutdown の静止確認は待たされない）。
@@ -1224,8 +1229,10 @@ private:
     RtThreadProbe rtProbe_ { nullptr };
     std::atomic<std::uint64_t> rtMisuseCount_ { 0 };
     std::atomic<bool> shutdownReaderFence_ { false };
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
     inline static std::atomic<ReaderAdmissionSeam> readerAdmissionSeamFn_ { nullptr };
     inline static std::atomic<void*> readerAdmissionSeamCtx_ { nullptr };
+#endif
     std::atomic<std::uint32_t> reacquireAfterFence_ { 0 };
     std::atomic<std::uint32_t> enterAfterFence_ { 0 };
     std::atomic<std::uint32_t> epochIdleTimeouts_ { 0 };

@@ -4194,6 +4194,11 @@ private:
 
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
+    // ★ WORK113: terminal shutdown の fail-closed 経路（reader admission 保留中）を実 dtor で
+    //   検証するためのテスト専用アクセス。本体は
+    //   src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp に定義する。
+    //   Production ビルドでは宣言のみで、追加メンバも評価分岐も存在しない。
+    friend class ShutdownHoldTestAccess;
     // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
     //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
     //   Production ビルドでは宣言ごと非存在・バイナリ無変更。
@@ -5222,6 +5227,54 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
 #endif
 
     return completed;
+}
+
+// ★ WORK113 (2026-11-18 Owner 指示): reader admission の idle を確認できない terminal shutdown の
+//   fail-closed 経路。D queue の所有権を隔離（自己参照）して deleter を実行せず、Q / E / T は
+//   drain しない（各 store は destructor で deleter を実行しない）。安全を証明できない対象は
+//   強制解放せず保持する（リークを選び、UAF を選ばない）。NonRT（Message Thread）専用。
+inline void holdRetireQueuesForShutdownNonRt() noexcept
+{
+    auto held = m_epochDomain.takeForShutdown();
+    if (held == nullptr)
+    {
+        return;
+    }
+
+    const auto pending = static_cast<juce::int64>(held->sizeApprox());
+    const auto result = m_epochDomain.quarantineQueue(held);
+    held.reset();
+    juce::ignoreUnused (pending, result);   // DIAG OFF では診断出力が無い
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[WORK113] shutdown hold: reader admission in flight - D queue kept "
+            "result=%d pending=%lld quarantineCount=%llu quarantinePending=%llu",
+            static_cast<int>(result),
+            pending,
+            static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
+            static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries())));
+
+        auto evidence = juce::File::getCurrentWorkingDirectory()
+                            .getChildFile("evidence/shutdown_hold.json");
+        evidence.getParentDirectory().createDirectory();
+        juce::String js;
+        js << "{\n  \"schema\": \"shutdown_hold_v1\",\n"
+           << "  \"reason\": \"reader_admissions_not_idle\",\n"
+           << "  \"quarantineResult\": " << static_cast<int>(result) << ",\n"
+           << "  \"pendingEntries\": " << pending << ",\n"
+           << "  \"quarantineCount\": "
+           << static_cast<juce::int64>(convo::EpochDomain::quarantineCount()) << ",\n"
+           << "  \"quarantinePending\": "
+           << static_cast<juce::int64>(convo::EpochDomain::quarantinePendingEntries()) << ",\n"
+           << "  \"readerAdmissions\": "
+           << static_cast<unsigned>(m_epochDomain.readerAdmissionsActive()) << ",\n"
+           << "  \"admissionPendingSlots\": "
+           << static_cast<unsigned>(m_epochDomain.admissionPendingSlots()) << "\n}\n";
+        evidence.replaceWithText(js);
+    }
+#endif
 }
 
 // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):

@@ -3008,6 +3008,119 @@ bool checkQuarantineContract()
     return ok;
 }
 
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): reader admission の保留中に ~AudioEngine が
+//   reader quiescence 前提の破棄・回収を実行しないこと（fail-closed）を実 engine で検証する。
+//   testReservedNotEntered と同じ状態（slot 予約・depth 0・未 enter）を実 destructor に接続する。
+//
+//   観測: sentinel の deleter 呼出し回数と EpochDomain の隔離カウンタ。
+//     - admission 保留中: deleter 0 回・D queue は隔離（pending に sentinel を含む）
+//     - 対照（保留なし）: deleter 1 回・隔離 0（force drain が実際に解放する証拠）
+//   sentinel は将来 epoch で登録するため graceful drain の epoch-gated reclaim では回収されず、
+//   force drain（drainAll / drainAllUnsafe）だけが解放する。
+//==============================================================================
+class ShutdownHoldTestAccess
+{
+public:
+    static int reserveReaderAdmission (AudioEngine& engine, const char* tag) noexcept
+    {
+        return engine.m_epochDomain.registerReaderThread (tag);
+    }
+
+    static bool enqueueFutureEpochSentinel (AudioEngine& engine, void* ptr,
+                                            void (*deleter) (void*)) noexcept
+    {
+        return engine.m_epochDomain.enqueueRetire (ptr, deleter,
+                                                   engine.m_epochDomain.currentEpoch() + 1000);
+    }
+};
+
+bool checkShutdownHoldContract()
+{
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    // (1) admission を保留したまま破棄（予約済み・depth 0・未 enter）
+    {
+        deleteCalls.store (0, std::memory_order_relaxed);
+        const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+        const auto pendingBefore = convo::EpochDomain::quarantinePendingEntries();
+
+        {
+            auto engine = std::make_unique<AudioEngine>();
+            const int slot = ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "shutdown-hold");
+            if (slot < 0)
+            {
+                std::fprintf(stderr, "[DQ-H1] FAIL: reader admission reservation failed\n");
+                return false;
+            }
+            if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+            {
+                std::fprintf(stderr, "[DQ-H1] FAIL: sentinel enqueue failed\n");
+                return false;
+            }
+            // ここで ~AudioEngine（admission 保留中 → fail-closed 経路）
+        }
+
+        if (deleteCalls.load (std::memory_order_acquire) != 0)
+        {
+            std::fprintf(stderr,
+                         "[DQ-H2] FAIL: destructive drain ran with an in-flight reader admission (deleter=%d)\n",
+                         deleteCalls.load (std::memory_order_acquire));
+            ok = false;
+        }
+        if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+        {
+            std::fprintf(stderr, "[DQ-H3] FAIL: D queue was not quarantined (count=%llu)\n",
+                         static_cast<unsigned long long> (convo::EpochDomain::quarantineCount()));
+            ok = false;
+        }
+        if (convo::EpochDomain::quarantinePendingEntries() < pendingBefore + 1u)
+        {
+            std::fprintf(stderr, "[DQ-H4] FAIL: quarantined pending entries did not include the sentinel\n");
+            ok = false;
+        }
+    }
+
+    // (2) 対照: admission を保留しない → 通常の drain で deleter が 1 回だけ実行される
+    {
+        deleteCalls.store (0, std::memory_order_relaxed);
+        const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+
+        {
+            auto engine = std::make_unique<AudioEngine>();
+            if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+            {
+                std::fprintf(stderr, "[DQ-H5] FAIL: control sentinel enqueue failed\n");
+                return false;
+            }
+        }
+
+        if (deleteCalls.load (std::memory_order_acquire) != 1)
+        {
+            std::fprintf(stderr, "[DQ-H6] FAIL: control drain did not run exactly once (deleter=%d)\n",
+                         deleteCalls.load (std::memory_order_acquire));
+            ok = false;
+        }
+        if (convo::EpochDomain::quarantineCount() != quarantineBefore)
+        {
+            std::fprintf(stderr, "[DQ-H7] FAIL: control queue must not be quarantined\n");
+            ok = false;
+        }
+    }
+
+    if (ok)
+        std::printf("[DQ-H] shutdown hold: PASS (in-flight admission -> no destructive drain, "
+                    "D queue kept; control drains once)\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -3147,6 +3260,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkQuarantineContract())
     {
         std::fprintf(stderr, "FAIL: checkQuarantineContract (DQ-Q)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldContract())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldContract (DQ-H)\n");
         hdOk = false;
     }
     if (!hdOk)
