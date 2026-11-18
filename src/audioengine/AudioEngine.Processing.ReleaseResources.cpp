@@ -599,6 +599,7 @@ void AudioEngine::releaseResources()
     //     terminalAfterRetire = clear→retire 直後に TerminalReclaimAuthority が保持している件数。
     //                      直後の drainAllQuarantineStore() より前の値である。
     //   1 shutdown あたり 1 行。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     diagLog("[DRAIN_DIAG] worldClear cleared=" + juce::String(clearedWorld != nullptr ? 1 : 0)
             + " retireResult=void"
             + " publishedAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.publishedCount()))
@@ -606,6 +607,7 @@ void AudioEngine::releaseResources()
             + " activeAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.activeWorldCount()))
             + " terminalAfterRetire=" + juce::String(m_retireRouter != nullptr
                 ? static_cast<juce::int64>(m_retireRouter->terminalReclaimResidentCount()) : juce::int64{0}));
+#endif
 
     // ★ 15-P-5: clear 後の最終強制 drain（quiescence 確立時のみ）。
     //   clearPublishedRuntimeSnapshotsNonRt が返した oldWorld は enqueueDeferredDeleteNonRt →
@@ -757,6 +759,7 @@ void AudioEngine::releaseResources()
         if (!c9BridgeDrained) addFailed("c9");
         if (failed.isEmpty()) failed = "none";
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         diagLog("[DRAIN_DIAG] timedOut=1 domain=EngineISR failed=" + failed
                 + " c1_deferredPublish=" + juce::String(static_cast<juce::int64>(audit.deferredPublish))
                 + " c2_pendingReclaim=" + juce::String(static_cast<juce::int64>(c2PendingReclaim))
@@ -807,6 +810,7 @@ void AudioEngine::releaseResources()
                 + " currentEpoch=" + juce::String(static_cast<juce::int64>(head.currentEpoch))
                 + " retireEpochLtMinReader=" + (head.valid
                       ? juce::String(head.epochOlderThanMinReader ? 1 : 0) : juce::String("na")));
+#endif
     }
 
     // ★ 改善③: World Consistency 診断は VerifyDrained では常に実行（タイムアウト有無に依存しない）
