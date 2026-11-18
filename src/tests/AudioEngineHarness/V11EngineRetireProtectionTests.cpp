@@ -3073,6 +3073,16 @@ public:
     {
         return domain.publishGate_;
     }
+
+    // ★ WORK113: engine 所有の RCUReader（実オブジェクト）をテストから使う。
+    static convo::RCUReader& audioReader (AudioEngine& engine) noexcept
+    {
+        return engine.audioThreadRcuReader;
+    }
+    static convo::RCUReader& messageReader (AudioEngine& engine) noexcept
+    {
+        return engine.messageThreadRcuReader;
+    }
 };
 
 bool checkShutdownHoldContract()
@@ -3567,6 +3577,15 @@ bool checkShutdownHoldPublisherTimeout()
                      AudioEngine::abandonedReaderSubstratesForTest());
         ok = false;
     }
+    {
+        const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
+        if (reason == nullptr || juce::String(reason) != "epoch_publishers_not_idle")
+        {
+            std::fprintf(stderr, "[DQ-H4-10] FAIL: hold reason mismatch (reason=%s)\n",
+                         reason != nullptr ? reason : "(null)");
+            ok = false;
+        }
+    }
 
     if (ok)
         std::printf("[DQ-H4] publisher timeout: PASS (publishers not idle, reader admissions idle, "
@@ -3702,10 +3721,159 @@ bool checkShutdownHoldActiveReader()
                      AudioEngine::abandonedReaderSubstratesForTest());
         ok = false;
     }
+    {
+        const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
+        if (reason == nullptr || juce::String(reason) != "active_readers_not_idle")
+        {
+            std::fprintf(stderr, "[DQ-H5-11] FAIL: hold reason mismatch (reason=%s)\n",
+                         reason != nullptr ? reason : "(null)");
+            ok = false;
+        }
+    }
 
     if (ok)
         std::printf("[DQ-H5] active reader hold: PASS (publisher idle, admission idle, active reader 1, "
                     "no destructive drain, substrate retained, exit after teardown)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): engine 所有 RCUReader の寿命 [DQ-H6]。
+//   AudioEngine が所有する audioThreadRcuReader を保護区間に入れたまま engine を破棄し、
+//   (1) destructor が使用中を観測して FAULT を数え hold 経路に入ること、
+//   (2) reader オブジェクト自身もプロセス寿命へ移され、破棄後の exit() が完了すること、
+//   (3) deleter が実行されないこと を確認する。
+//   local 生成の RCUReader ではなく、engine のメンバーである実 reader を使う。
+//==============================================================================
+bool checkShutdownHoldEngineReader()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+    const auto busyBefore = AudioEngine::shutdownEngineReaderBusyForTest();
+
+    convo::IReaderEpochProvider* providerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    convo::EpochDomain* domainPtr = nullptr;
+    convo::RCUReader* audioReaderPtr = nullptr;
+    convo::RCUReader* messageReaderPtr = nullptr;
+
+    std::atomic<bool> entered { false };
+    std::atomic<bool> engineGone { false };
+    std::atomic<bool> exited { false };
+    std::atomic<bool> exitSawZero { false };
+
+    std::thread reader;
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        providerPtr = &ShutdownHoldTestAccess::readerProvider (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+        audioReaderPtr = &ShutdownHoldTestAccess::audioReader (*engine);
+        messageReaderPtr = &ShutdownHoldTestAccess::messageReader (*engine);
+
+        if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H6-1] FAIL: sentinel enqueue failed\n");
+            return false;
+        }
+
+        reader = std::thread ([&]
+        {
+            // engine 所有 reader（audioThreadRcuReader）を別スレッドから入場させる
+            const bool enteredOk = audioReaderPtr->enter();
+            entered.store (enteredOk, std::memory_order_release);
+            if (! enteredOk)
+                return;
+
+            while (! engineGone.load (std::memory_order_acquire))
+                std::this_thread::yield();
+
+            // 破棄後: reader オブジェクト自体が保持されていれば自分のメンバーに触れられる
+            audioReaderPtr->exit();
+            exited.store (true, std::memory_order_release);
+            exitSawZero.store (providerPtr->activeReaderCount() == 0u, std::memory_order_release);
+        });
+
+        while (! entered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+        while (providerPtr->activeReaderCount() != 1u)
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（engine 所有 reader が保護区間内）
+    }
+
+    engineGone.store (true, std::memory_order_release);
+    reader.join();
+
+    if (! entered.load())
+    {
+        std::fprintf(stderr, "[DQ-H6-2] FAIL: engine-owned reader did not enter\n");
+        ok = false;
+    }
+    if (! exited.load())
+    {
+        std::fprintf(stderr, "[DQ-H6-3] FAIL: exit() did not complete after engine teardown\n");
+        ok = false;
+    }
+    if (! exitSawZero.load())
+    {
+        std::fprintf(stderr, "[DQ-H6-4] FAIL: activeReaderCount did not return to 0\n");
+        ok = false;
+    }
+    if (AudioEngine::shutdownEngineReaderBusyForTest() != busyBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H6-5] FAIL: destructor did not observe the engine-owned reader in use (count=%d)\n",
+                     AudioEngine::shutdownEngineReaderBusyForTest());
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-H6-6] FAIL: deleter ran with an engine-owned reader in use (deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H6-7] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (! AudioEngine::abandonedSubstrateContainsReadersForTest (routerPtr, audioReaderPtr, messageReaderPtr))
+    {
+        std::fprintf(stderr, "[DQ-H6-8] FAIL: engine-owned readers were not retained\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H6-9] FAIL: retained substrate count mismatch (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+    {
+        const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
+        if (reason == nullptr || juce::String(reason) != "active_readers_not_idle")
+        {
+            std::fprintf(stderr, "[DQ-H6-10] FAIL: hold reason mismatch (reason=%s)\n",
+                         reason != nullptr ? reason : "(null)");
+            ok = false;
+        }
+    }
+
+    if (ok)
+        std::printf("[DQ-H6] engine-owned reader hold: PASS (reader inside at teardown, busy observed, "
+                    "no destructive drain, readers retained, exit after teardown)\n");
     return ok;
 }
 
@@ -3873,6 +4041,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkShutdownHoldActiveReader())
     {
         std::fprintf(stderr, "FAIL: checkShutdownHoldActiveReader (DQ-H5)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldEngineReader())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldEngineReader (DQ-H6)\n");
         hdOk = false;
     }
     if (!hdOk)

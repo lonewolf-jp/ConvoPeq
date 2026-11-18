@@ -5244,6 +5244,8 @@ inline void abandonReaderSubstrateForShutdownNonRt() noexcept
     auto* domain = epochDomainOwner_.get();
     auto* observer = worldRetirementReferenceOwner_.get();
     auto* telemetry = worldRetirementTelemetryOwner_.get();
+    auto* audioReader = audioThreadRcuReaderOwner_.get();
+    auto* messageReader = messageThreadRcuReaderOwner_.get();
 
     // 移譲先（プロセス寿命テーブル）へ記録してから所有権を手放す。固定容量・確保なしなので
     // 記録に失敗する経路は無く、所有権を失ったまま記録だけが欠ける状態にならない。
@@ -5252,7 +5254,8 @@ inline void abandonReaderSubstrateForShutdownNonRt() noexcept
     const int index = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
     if (index >= 0 && index < kMaxAbandonedReaderSubstrates)
     {
-        s_abandonedSubstrates_[index] = AbandonedReaderSubstrate { router, domain, observer, telemetry };
+        s_abandonedSubstrates_[index] = AbandonedReaderSubstrate {
+            router, domain, observer, telemetry, audioReader, messageReader };
         convo::publishAtomic (s_abandonedReaderSubstrates_, index + 1, std::memory_order_release);
     }
     else
@@ -5265,13 +5268,19 @@ inline void abandonReaderSubstrateForShutdownNonRt() noexcept
     (void) epochDomainOwner_.release();
     (void) worldRetirementReferenceOwner_.release();
     (void) worldRetirementTelemetryOwner_.release();
+    (void) audioThreadRcuReaderOwner_.release();
+    (void) messageThreadRcuReaderOwner_.release();
 }
 
 // ★ WORK113 (2026-11-18 Owner 指示): reader admission の idle を確認できない terminal shutdown の
 //   fail-closed 経路。D queue の所有権を隔離（自己参照）して deleter を実行せず、Q / E / T は
 //   drain しない（各 store は destructor で deleter を実行しない）。安全を証明できない対象は
 //   強制解放せず保持する（リークを選び、UAF を選ばない）。NonRT（Message Thread）専用。
-inline void holdRetireQueuesForShutdownNonRt() noexcept
+inline void holdRetireQueuesForShutdownNonRt (const char* reason,
+                                              bool publishersIdle,
+                                              bool readerAdmissionsIdle,
+                                              bool activeReadersIdle,
+                                              bool engineReadersIdle) noexcept
 {
     auto held = m_epochDomain.takeForShutdown();
     if (held == nullptr)
@@ -5282,13 +5291,20 @@ inline void holdRetireQueuesForShutdownNonRt() noexcept
     const auto pending = static_cast<juce::int64>(held->sizeApprox());
     const auto result = m_epochDomain.quarantineQueue(held);
     held.reset();
-    juce::ignoreUnused (pending, result);   // DIAG OFF では診断出力が無い
+    juce::ignoreUnused (pending, result, reason, publishersIdle, readerAdmissionsIdle,
+                        activeReadersIdle, engineReadersIdle);   // DIAG OFF では診断出力が無い
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     {
         juce::Logger::writeToLog(juce::String::formatted(
-            "[WORK113] shutdown hold: reader admission in flight - D queue kept "
+            "[WORK113] shutdown hold: reason=%s publishersIdle=%d readerAdmissionsIdle=%d "
+            "activeReaders=%u engineReadersIdle=%d - D queue kept "
             "result=%d pending=%lld quarantineCount=%llu quarantinePending=%llu",
+            reason != nullptr ? reason : "unknown",
+            publishersIdle ? 1 : 0,
+            readerAdmissionsIdle ? 1 : 0,
+            static_cast<unsigned>(m_retireRouter != nullptr ? m_retireRouter->activeReaderCount() : 0u),
+            engineReadersIdle ? 1 : 0,
             static_cast<int>(result),
             pending,
             static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
@@ -5299,7 +5315,12 @@ inline void holdRetireQueuesForShutdownNonRt() noexcept
         evidence.getParentDirectory().createDirectory();
         juce::String js;
         js << "{\n  \"schema\": \"shutdown_hold_v1\",\n"
-           << "  \"reason\": \"reader_admissions_not_idle\",\n"
+           << "  \"reason\": \"" << (reason != nullptr ? reason : "unknown") << "\",\n"
+           << "  \"publishersIdle\": " << (publishersIdle ? "true" : "false") << ",\n"
+           << "  \"readerAdmissionsIdle\": " << (readerAdmissionsIdle ? "true" : "false") << ",\n"
+           << "  \"activeReaders\": "
+           << juce::String(static_cast<int>(m_retireRouter != nullptr ? m_retireRouter->activeReaderCount() : 0u)) << ",\n"
+           << "  \"engineReadersIdle\": " << (engineReadersIdle ? "true" : "false") << ",\n"
            << "  \"quarantineResult\": " << static_cast<int>(result) << ",\n"
            << "  \"pendingEntries\": " << pending << ",\n"
            << "  \"quarantineCount\": "
@@ -5307,9 +5328,9 @@ inline void holdRetireQueuesForShutdownNonRt() noexcept
            << "  \"quarantinePending\": "
            << static_cast<juce::int64>(convo::EpochDomain::quarantinePendingEntries()) << ",\n"
            << "  \"readerAdmissions\": "
-           << static_cast<unsigned>(m_epochDomain.readerAdmissionsActive()) << ",\n"
+           << juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive())) << ",\n"
            << "  \"admissionPendingSlots\": "
-           << static_cast<unsigned>(m_epochDomain.admissionPendingSlots()) << "\n}\n";
+           << juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())) << "\n}\n";
         evidence.replaceWithText(js);
     }
 #endif
@@ -5797,9 +5818,16 @@ public:
     // [work21] ISRRetireRouter — 唯一のretire/publication API入口(unique_ptr, forward-declared)
     std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
-    convo::RCUReader audioThreadRcuReader { m_epochDomain };
+    // ★ WORK113 (2026-11-18 Owner 指示): reader オブジェクト自体も shutdown の保持対象にする。
+    //   固定アドレスとし、fail-closed 経路では所有権をプロセス寿命へ移す（reader の exit() が
+    //   破棄後に走っても自分のメンバーに触れるため）。
+    std::unique_ptr<convo::RCUReader> audioThreadRcuReaderOwner_ {
+        std::make_unique<convo::RCUReader> (m_epochDomain) };
+    convo::RCUReader& audioThreadRcuReader { *audioThreadRcuReaderOwner_ };
     // Message Thread + JUCE Timer 専用 RCU reader。
-    convo::RCUReader messageThreadRcuReader { m_epochDomain };
+    std::unique_ptr<convo::RCUReader> messageThreadRcuReaderOwner_ {
+        std::make_unique<convo::RCUReader> (m_epochDomain) };
+    convo::RCUReader& messageThreadRcuReader { *messageThreadRcuReaderOwner_ };
     RTLocalState rtLocalState_ {};
     RTAuxMutable rtAuxMutable_ {};
     convo::SnapshotCoordinator m_coordinator;
@@ -6050,6 +6078,8 @@ public:
         const void* domain;
         const void* observer;
         const void* telemetry;
+        const void* audioReader;
+        const void* messageReader;
     };
     static constexpr int kMaxAbandonedReaderSubstrates = 8;
     // static storage なのでゼロ初期化される（NSDMI は enclosing class 内では使えない）。
@@ -6067,6 +6097,13 @@ public:
     //   publishers idle の失敗と reader admission idle の失敗を別々に数える。
     static std::atomic<int> s_shutdownPublisherIdleFailures_;
     static std::atomic<int> s_shutdownReaderAdmissionIdleFailures_;
+    static std::atomic<int> s_shutdownEngineReaderBusy_;
+    // ★ WORK113: 直近の shutdown で hold に入った理由（quiescent なら nullptr）。
+    static std::atomic<const char*> s_lastShutdownHoldReason_;
+    [[nodiscard]] static const char* lastShutdownHoldReasonForTest() noexcept
+    {
+        return convo::consumeAtomic (s_lastShutdownHoldReason_, std::memory_order_acquire);
+    }
     [[nodiscard]] static int shutdownPublisherIdleFailuresForTest() noexcept
     {
         return convo::consumeAtomic (s_shutdownPublisherIdleFailures_, std::memory_order_acquire);
@@ -6074,6 +6111,27 @@ public:
     [[nodiscard]] static int shutdownReaderAdmissionIdleFailuresForTest() noexcept
     {
         return convo::consumeAtomic (s_shutdownReaderAdmissionIdleFailures_, std::memory_order_acquire);
+    }
+    [[nodiscard]] static int shutdownEngineReaderBusyForTest() noexcept
+    {
+        return convo::consumeAtomic (s_shutdownEngineReaderBusy_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] static bool abandonedSubstrateContainsReadersForTest (const void* router,
+                                                                        const void* audioReader,
+                                                                        const void* messageReader) noexcept
+    {
+        int n = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
+        if (n > kMaxAbandonedReaderSubstrates)
+            n = kMaxAbandonedReaderSubstrates;
+        for (int i = 0; i < n; ++i)
+        {
+            if (s_abandonedSubstrates_[i].router == router
+                && s_abandonedSubstrates_[i].audioReader == audioReader
+                && s_abandonedSubstrates_[i].messageReader == messageReader)
+                return true;
+        }
+        return false;
     }
 
     [[nodiscard]] static bool abandonedSubstrateContainsForTest (const void* router,

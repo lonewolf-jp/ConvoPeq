@@ -29,6 +29,8 @@ std::atomic<int> AudioEngine::s_abandonedReaderSubstrates_{0};
 std::atomic<int> AudioEngine::s_abandonedSubstrateOverflow_{0};
 std::atomic<int> AudioEngine::s_shutdownPublisherIdleFailures_{0};
 std::atomic<int> AudioEngine::s_shutdownReaderAdmissionIdleFailures_{0};
+std::atomic<int> AudioEngine::s_shutdownEngineReaderBusy_{0};
+std::atomic<const char*> AudioEngine::s_lastShutdownHoldReason_{nullptr};
 
 namespace
 {
@@ -362,14 +364,49 @@ AudioEngine::~AudioEngine()
     //   (2) reader admission が idle: 予約〜enter の途中の reader が残っていない。
     //   (3) active reader が 0: enterReader 完了後、保護区間内に留まる reader が残っていない。
     //       (2) だけでは depth>0 の reader を見落とす。
+    //   (4) engine 所有 reader が保護区間外: audioThreadRcuReader / messageThreadRcuReader は
+    //       AudioEngine のメンバーであり、使用中に engine を破棄すると reader 自身のメンバーが
+    //       寿命切れになる。ホスト契約（audio callback の停止・join 後に破棄する）を実行時に観測する。
+    //       契約の根拠: 製品は ~MainWindow で removeAudioCallback → closeAudioDevice の後に
+    //       member の audioEngine を破棄する。harness は stop() で audio thread を join してから
+    //       engine を破棄する。
     //   取得順序: fence は既に閉じている（engageShutdownReaderFence）。admission gate も閉じて
     //   いるため新規 admission は開始できず、(2) の成立後は新規入場も起きない。したがって (3) は
     //   単調にしか減らない値を (2) の後に読むことになり、以後の増加はない。
     //   安全性を証明できない対象は強制解放せず保持する（リークを選び、UAF を選ばない）。
+    const bool activeReadersIdle =
+        (m_retireRouter != nullptr && m_retireRouter->activeReaderCount() == 0);
+    const bool engineReadersIdle =
+        ! audioThreadRcuReader.isInside() && ! messageThreadRcuReader.isInside();
+    if (! engineReadersIdle)
+    {
+        (void) convo::fetchAddAtomic(s_shutdownEngineReaderBusy_, 1, std::memory_order_acq_rel);
+        diagLog("[FAULT] engine_reader_busy audioInside="
+                + juce::String(static_cast<int>(audioThreadRcuReader.isInside() ? 1 : 0))
+                + " messageInside="
+                + juce::String(static_cast<int>(messageThreadRcuReader.isInside() ? 1 : 0)));
+    }
+
     const bool shutdownSubstrateQuiescent =
-        terminalPublishersIdle
-        && terminalReaderAdmissionsIdle
-        && (m_retireRouter != nullptr && m_retireRouter->activeReaderCount() == 0);
+        terminalPublishersIdle && terminalReaderAdmissionsIdle
+        && activeReadersIdle && engineReadersIdle;
+
+    // 実際に成立しなかった条件を保持理由として記録する（診断の整合）。
+    // 文字列は DIAG ON のときだけ持つ（OFF ではログも evidence も出さない）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const char* const shutdownHoldReason =
+        ! terminalPublishersIdle      ? "epoch_publishers_not_idle"
+        : ! terminalReaderAdmissionsIdle ? "reader_admissions_not_idle"
+        : ! activeReadersIdle         ? "active_readers_not_idle"
+        : "engine_readers_not_idle";
+
+    convo::publishAtomic(s_lastShutdownHoldReason_,
+                         shutdownSubstrateQuiescent ? static_cast<const char*>(nullptr)
+                                                    : shutdownHoldReason,
+                         std::memory_order_release);
+#else
+    const char* const shutdownHoldReason = nullptr;
+#endif
 
     // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
     //   ここは retire 要求の移送のみで、ポインタの解放は行わない。
@@ -416,20 +453,19 @@ AudioEngine::~AudioEngine()
     }
 
     // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
-    //   TerminalReclaimAuthority に保持された World（stuck reader ケースの clearedWorld 等）が
-    //   漏れる。quiescence（activeReaderCount==0）確立時のみ m_retireRouter->drainAll() で
-    //   全 store を強制解放する。stuck reader が残る場合は UAF 回避のため D のみ（従来動作）に
-    //   フォールバックし、epoch-gated drain（drainTerminalReclaim）に委ねる。
-    // ★ 15-P-5 FIX: stuck-reader fallback は D のみにしない。Audio Thread は停止済みのため、
-    //   Q + E + T の drainAllQuarantineStore（drainAllUnsafe ベース、epoch 非依存）も強制実行する。
-    //   drainAllUnsafe は Audio Thread 停止後のみ呼ばれる契約を満たす（RetireQuarantineStore.h:59参照）。
-    // ★ WORK113 (2026-11-18 Owner 指示): 3 条件のいずれかが欠ける場合は、この force drain を
-    //   行わない。とくに active reader が残る場合は、Q/E/T の drainAllQuarantineStore（epoch 非依存）
-    //   が参照中の World / DSP を解放し得るため、従来の stuck-reader fallback も実行しない。
-    //   所有権を保持する fail-closed 経路に切り替える。
+    //   TerminalReclaimAuthority に保持された World が漏れる。静止を確認できたときだけ
+    //   m_retireRouter->drainAll()（D + Q/E/T の強制解放）を実行する。
+    // ★ WORK113 (2026-11-18 Owner 指示): 4 条件のいずれかが欠ける場合は force drain を行わない。
+    //   active reader が残る場合、Q/E/T の drainAllQuarantineStore（epoch 非依存）が参照中の
+    //   World / DSP を解放し得る。旧 stuck-reader fallback（D + Q/E/T の強制解放）は撤去済みで、
+    //   ここでは所有権を保持する fail-closed 経路だけを通る。
     if (! shutdownSubstrateQuiescent)
     {
-        holdRetireQueuesForShutdownNonRt();
+        holdRetireQueuesForShutdownNonRt(shutdownHoldReason,
+                                         terminalPublishersIdle,
+                                         terminalReaderAdmissionsIdle,
+                                         activeReadersIdle,
+                                         engineReadersIdle);
     }
     else
     {
@@ -579,9 +615,7 @@ AudioEngine::~AudioEngine()
     else
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        diagLog(terminalPublishersIdle
-                    ? "[DRAIN_DIAG] checkedDrain skipped=reader_admissions_not_idle"
-                    : "[DRAIN_DIAG] checkedDrain skipped=epoch_publishers_not_idle");
+        diagLog(juce::String("[DRAIN_DIAG] checkedDrain skipped=") + shutdownHoldReason);
 #endif
     }
 
