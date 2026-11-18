@@ -4437,6 +4437,123 @@ bool checkCapabilityIssuedWithFullFallback()
     return ok;
 }
 
+//==============================================================================
+// ★ WORK113 (2026-11-19 Owner 指示): reader exit の途中で shutdown が quiescence を
+//   判定できるかを、決定的な seam で観測する。[DQ-W1]
+//   EpochDomain::exitReader() は slot.depth を 0 にした後も slot の診断・epoch・
+//   quarantineFlags にアクセスする。その間に ~AudioEngine が静止判定を
+//   行うと、activeReaderCount()==0 と isInside()==false になり得る。
+//   ここでは engine を破棄せず、静止判定の入力が揃うことだけを確認する（UAF を避ける）。
+//==============================================================================
+bool checkReaderExitQuiescenceWindow()
+{
+    bool ok = true;
+
+    struct Seam
+    {
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+    };
+
+    static Seam seam;
+    seam.reached.store (false);
+    seam.release.store (false);
+
+    auto seamFn = [] (void* ctx) noexcept
+    {
+        auto* s = static_cast<Seam*> (ctx);
+        s->reached.store (true, std::memory_order_release);
+        while (! s->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    };
+
+    auto engine = std::make_unique<AudioEngine>();
+    auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+    auto* routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+    if (domainPtr == nullptr || routerPtr == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-W1-1] FAIL: engine substrate is null\n");
+        return false;
+    }
+
+    convo::EpochDomain::setReaderExitSeam (seamFn, &seam);
+
+    std::atomic<convo::RCUReader*> readerPtr { nullptr };
+    std::atomic<bool> entered { false };
+    std::atomic<bool> exitDone { false };
+
+    std::thread worker ([&]
+    {
+        convo::RCUReader reader (*domainPtr);
+        readerPtr.store (&reader, std::memory_order_release);
+        entered.store (reader.enter(), std::memory_order_release);
+        readerPtr.store (nullptr, std::memory_order_release);   // 以降は isInside だけを読む
+        reader.exit();
+        exitDone.store (true, std::memory_order_release);
+    });
+
+    // 入場完了（activeReaderCount()==1）を bounded wait で待つ
+    for (int i = 0; i < 20000 && routerPtr->activeReaderCount() == 0; ++i)
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+
+    // seam 到達（depth==0 だが exit 未完了）を待つ
+    for (int i = 0; i < 20000 && ! seam.reached.load (std::memory_order_acquire); ++i)
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+
+    const bool reached = seam.reached.load (std::memory_order_acquire);
+    if (! reached)
+    {
+        std::fprintf(stderr, "[DQ-W1-2] FAIL: read exit seam was not reached\n");
+        ok = false;
+    }
+
+    // ここが実測する窓。静止判定の入力 4 つを読む。
+    const std::uint32_t activeReaders = routerPtr->activeReaderCount();
+    const std::uint32_t admissionsActive = domainPtr->readerAdmissionsActive();
+    const std::uint32_t admissionPending = domainPtr->admissionPendingSlots();
+    const bool exitFinished = exitDone.load (std::memory_order_acquire);
+
+    if (exitFinished)
+    {
+        std::fprintf(stderr, "[DQ-W1-3] FAIL: exit finished before the seam (window lost)\n");
+        ok = false;
+    }
+    if (activeReaders != 0)
+    {
+        std::fprintf(stderr, "[DQ-W1-4] FAIL: activeReaderCount=%u inside the window\n",
+                     static_cast<unsigned> (activeReaders));
+        ok = false;
+    }
+    if (admissionsActive != 0 || admissionPending != 0)
+    {
+        std::fprintf(stderr, "[DQ-W1-5] FAIL: admission not idle (active=%u pending=%u)\n",
+                     static_cast<unsigned> (admissionsActive),
+                     static_cast<unsigned> (admissionPending));
+        ok = false;
+    }
+
+    // seam を放して exit を完了させる（engine は破棄しない）
+    seam.release.store (true, std::memory_order_release);
+    worker.join();
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+
+    if (! entered.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W1-6] FAIL: reader.enter() failed\n");
+        ok = false;
+    }
+    if (! exitDone.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W1-7] FAIL: exit did not complete after the seam\n");
+        ok = false;
+    }
+
+    if (ok)
+        std::printf ("[DQ-W1] exit window: PASS (depth==0 but exit in progress; "
+                     "activeReaderCount=0 admissions=0 pending=0; exit completed)\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -4626,6 +4743,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkCapabilityIssuedWithFullFallback())
     {
         std::fprintf(stderr, "FAIL: checkCapabilityIssuedWithFullFallback (DQ-V4)\n");
+        hdOk = false;
+    }
+    if (!checkReaderExitQuiescenceWindow())
+    {
+        std::fprintf(stderr, "FAIL: checkReaderExitQuiescenceWindow (DQ-W1)\n");
         hdOk = false;
     }
     if (!hdOk)

@@ -190,6 +190,16 @@ public:
         convo::publishAtomic(readerAdmissionSeamCtx_, ctx, std::memory_order_release);
         convo::publishAtomic(readerAdmissionSeamFn_, fn, std::memory_order_release);
     }
+
+    // ★ WORK113 (2026-11-19 Owner 指示): exitReader() の depth デクリメント直後で
+    //   呼び出しを止める seam。「depth == 0 だが exit 処理は未完了」の窓を
+    //   決定論的に作り、shutdown の quiescence 判定との競合を検査する。
+    using ReaderExitSeam = void (*) (void*);
+    static void setReaderExitSeam (ReaderExitSeam fn, void* ctx) noexcept
+    {
+        convo::publishAtomic(readerExitSeamCtx_, ctx, std::memory_order_release);
+        convo::publishAtomic(readerExitSeamFn_, fn, std::memory_order_release);
+    }
 #endif
     [[nodiscard]] bool shutdownReaderFenceEngaged() const noexcept
     {
@@ -631,6 +641,15 @@ public:
         const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth,
                                                               static_cast<uint32_t>(1),
                                                               std::memory_order_acq_rel);
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+        // ★ seam: depth を 0 にした直後、残りの provider アクセスの前で止める。
+        if (previousDepth == 1)
+        {
+            const auto fn = convo::consumeAtomic(readerExitSeamFn_, std::memory_order_acquire);
+            if (fn != nullptr)
+                fn (convo::consumeAtomic(readerExitSeamCtx_, std::memory_order_acquire));
+        }
+#endif
         // ★ 計測: 区画の保持時間（1ms 以上のときだけ最長値を更新）
         if (previousDepth == 1 && readerIndex >= 0 && readerIndex < kMaxReaders)
         {
@@ -1241,6 +1260,8 @@ private:
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
     inline static std::atomic<ReaderAdmissionSeam> readerAdmissionSeamFn_ { nullptr };
     inline static std::atomic<void*> readerAdmissionSeamCtx_ { nullptr };
+    inline static std::atomic<ReaderExitSeam> readerExitSeamFn_ { nullptr };
+    inline static std::atomic<void*> readerExitSeamCtx_ { nullptr };
 #endif
     std::atomic<std::uint32_t> reacquireAfterFence_ { 0 };
     std::atomic<std::uint32_t> enterAfterFence_ { 0 };

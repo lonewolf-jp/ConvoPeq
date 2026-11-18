@@ -2613,6 +2613,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_definitions(AudioEngineHarness PRIVATE
         CONVOPEQ_STANDALONE_ONLY=1
         CONVOPEQ_UNIT_TESTS=1
+        # ★ WORK113 (2026-11-19): exitReader の interleaving 検証 seam（DQ-W1）を使う。
+        #   このマクロは本ターゲット（テスト）だけに定義する。製品ビルドには入らない。
+        CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         # ★ 2026-11-08: 本ターゲットは ConvoPeq と同じエンジン TU をビルドする。
