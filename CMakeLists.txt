@@ -132,6 +132,11 @@ option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (X
 # 通常ビルドでは出力しない。調査時のみ ON にする（既定ビルドで stderr 出力ゼロを保証する）。
 option(CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS "Enable IR load-chain diagnostics on stderr (investigation builds only)" OFF)
 option(CONVOPEQ_ENABLE_TEST_HOOKS "Compile the audio-block test hook (verification builds only; default OFF)" OFF)
+# ★ WORK113 (2026-11-18 Owner 承認): shutdown 基盤の TSan ハーネス（Linux clang 専用）。
+#   ON にすると src/tests/tsan-substrate を登録する。
+#   JUCE / MKL / IPP を要求しないため、Linux で単独 configure / build できる。
+#   sanitize フラグは -DCMAKE_CXX_FLAGS で渡す（この option はフラグを設定しない）。
+option(CONVOPEQ_ENABLE_TSAN_SUBSTRATE "Register the substrate ThreadSanitizer harness targets (Linux clang only; default OFF)" OFF)
 
 # work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 ON（Part 8 E）。
 # 旧挙動（2×/4×/8× で 0.75 / 0.5625 / 0.421875 = −2.50 / −5.00 / −7.50 dB）は
@@ -145,6 +150,15 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         "SET(CTEST_PROJECT_NAME \"${PROJECT_NAME}\")\n"
         "SET(CTEST_SOURCE_DIRECTORY \"${CMAKE_SOURCE_DIR}\")\n"
         "SET(CTEST_BINARY_DIRECTORY \"${CMAKE_BINARY_DIR}\")\n")
+
+    # ★ WORK113 (2026-11-18 Owner 承認): shutdown 基盤の ThreadSanitizer ハーネス。
+    #   src/tests/tsan-substrate は単独 configure 可能な独立プロジェクトで、
+    #   ルートの ConvoPeq フルビルドに依存しない（Linux clang 専用）。
+    #   Windows (MSVC) には TSan が無いため、CONVOPEQ_ENABLE_TSAN_SUBSTRATE=ON を
+    #   付けた configure でのみ登録する（既定 OFF。通常の Windows ビルドに影響しない）。
+    if(CONVOPEQ_ENABLE_TSAN_SUBSTRATE)
+        add_subdirectory(src/tests/tsan-substrate)
+    endif()
 
     add_executable(ISRRuntimeIdentityTests
         src/tests/ISRRuntimeIdentityGeneratorsTests.cpp
