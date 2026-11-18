@@ -4207,6 +4207,17 @@ bool checkCapabilityIssuedWithFullFallback()
     auto qNoop = [](void*) noexcept { qDeletes.fetch_add (1, std::memory_order_relaxed); };
     auto eNoop = [](void*) noexcept { eDeletes.fetch_add (1, std::memory_order_relaxed); };
 
+    // ★ fixture 寿命（Owner 指摘 2026-11-18）: sentinel の storage を engine より先に宣言する。
+    //   ローカル変数は逆順で破棄されるため、この順序なら ~AudioEngine() が Q / E を処理する
+    //   時点で sentinel はまだ生存している（deleter へ渡るポインタが有効である）。
+    //   1) D / Q / E を容量まで埋める（D を満杯にして最終 retire の移送を失敗させる）
+    constexpr int kDQueueCapacity = 4096;
+    constexpr int kQCapacity = 512;
+    constexpr int kECapacity = 512;
+    std::vector<int> dSentinels (kDQueueCapacity);
+    std::vector<int> qSentinels (kQCapacity);
+    std::vector<int> eSentinels (kECapacity);
+
     auto engine = std::make_unique<AudioEngine>();
     auto* routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
     auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
@@ -4215,14 +4226,6 @@ bool checkCapabilityIssuedWithFullFallback()
         std::fprintf(stderr, "[DQ-V4-1] FAIL: engine substrate is null\n");
         return false;
     }
-
-    // 1) D / Q / E を容量まで埋める（D を満杯にして最終 retire の移送を失敗させる）
-    constexpr int kDQueueCapacity = 4096;
-    constexpr int kQCapacity = 512;
-    constexpr int kECapacity = 512;
-    std::vector<int> dSentinels (kDQueueCapacity);
-    std::vector<int> qSentinels (kQCapacity);
-    std::vector<int> eSentinels (kECapacity);
 
     int filledD = 0;
     for (int i = 0; i < kDQueueCapacity; ++i)
@@ -4275,6 +4278,11 @@ bool checkCapabilityIssuedWithFullFallback()
     const auto counts = ShutdownHoldTestAccess::finalizeCounts (*engine);
     const std::uint64_t tStoreAfter = routerPtr->terminalStoreCount();
     const std::size_t tResidentAfter = routerPtr->terminalReclaimResidentCount();
+    // ★ Q / E の resident は checked drain の前後で不変であること（entry が別の場所へ
+    //   移されていないこと）を直接 assert するため、drain 直後の値を取る。
+    const std::size_t qResidentAfter =
+        routerPtr->quarantineResidentCount() - routerPtr->emergencyQuarantineResidentCount();
+    const std::size_t eResidentAfter = routerPtr->emergencyQuarantineResidentCount();
     const auto pendingAfter = domainPtr->pendingRetireCount();
     const auto quarantineAfter = convo::EpochDomain::quarantineCount();
     const auto remainingAfter = domainPtr->drainRemainingAfter();
@@ -4345,6 +4353,21 @@ bool checkCapabilityIssuedWithFullFallback()
                      static_cast<unsigned long long>(tStoreAfter));
         ok = false;
     }
+    // 4b. Q / E の resident は drain 前後で不変（entry は移動も解放もされていない）
+    if (qResidentAfter != kQCapacity)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-17] FAIL: Q resident changed across the drain (%zu -> %zu)\n",
+                     qResident, qResidentAfter);
+        ok = false;
+    }
+    if (eResidentAfter != kECapacity)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-18] FAIL: E resident changed across the drain (%zu -> %zu)\n",
+                     eResident, eResidentAfter);
+        ok = false;
+    }
 
     // 5. requests == denqueues + fallbackTransfers（D 満杯で denqueue 失敗、fallback 成立）
     const auto transfers = counts.denqueues + counts.fallbackTransfers;
@@ -4389,10 +4412,12 @@ bool checkCapabilityIssuedWithFullFallback()
     if (ok)
         std::printf("[DQ-V4] capability issued: PASS (D=%d/Q=%d/E=%d full, checked drain completed, "
                     "requests=%llu == denqueues+fallback, T store +1 (%zu -> %zu resident), "
-                    "D deleters=%d, Q/E deleters=0)\n",
+                    "Q/E resident unchanged (%d/%d), D deleters=%d, Q/E deleters=0)\n",
                     filledD, filledQ, filledE,
                     static_cast<unsigned long long>(counts.requests),
-                    tResidentBefore, tResidentAfter, dDeletes.load());
+                    tResidentBefore, tResidentAfter,
+                    static_cast<int>(qResidentAfter), static_cast<int>(eResidentAfter),
+                    dDeletes.load());
     return ok;
 }
 
