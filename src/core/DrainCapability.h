@@ -66,6 +66,22 @@ public:
     [[nodiscard]] std::uint64_t finalizeCalls() const noexcept { return finalizeCalls_; }
     [[nodiscard]] std::uint64_t finalizeRequests() const noexcept { return finalizeRequests_; }
 
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ テスト専用（本番ビルドでは存在しない）。proof の代わりに条件を直接指定して発行する。
+    //   単一 TU のテストターゲットだけがこのマクロを定義する。
+    [[nodiscard]] static DrainCapability makeForTest (bool producersJoined,
+                                                      bool readersQuiescent,
+                                                      bool postStopEnqueueZero,
+                                                      bool epochSettled,
+                                                      std::uint64_t epochAtIssue,
+                                                      std::uint64_t finalizeCalls,
+                                                      std::uint64_t finalizeRequests) noexcept
+    {
+        return DrainCapability (true, producersJoined, readersQuiescent, postStopEnqueueZero,
+                                epochSettled, epochAtIssue, finalizeCalls, finalizeRequests);
+    }
+#endif
+
 private:
     friend class convo::isr::ShutdownRuntime;
 
