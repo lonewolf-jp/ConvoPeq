@@ -356,12 +356,20 @@ AudioEngine::~AudioEngine()
                 + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())));
     }
 
-    // ★ WORK113 (2026-11-18 Owner 指示): 破棄・回収の前提は「publisher と reader の両方が静止」である。
-    //   terminalPublishersIdle == false は、publisher がまだ EpochPublishGate の active scope 内に
-    //   いることを意味する。その scope のデストラクタは gate_.exit() を呼ぶため、domain を破棄すると
-    //   破棄済み gate へのアクセスになる。reader admission だけでは不十分である。
+    // ★ WORK113 (2026-11-18 Owner 指示): 破棄・回収の前提は次の 3 条件である。
+    //   (1) publisher が idle: false は PublishScope 内にいることを意味し、そのデストラクタは
+    //       gate_.exit() を呼ぶ。domain を破棄すると破棄済み gate へのアクセスになる。
+    //   (2) reader admission が idle: 予約〜enter の途中の reader が残っていない。
+    //   (3) active reader が 0: enterReader 完了後、保護区間内に留まる reader が残っていない。
+    //       (2) だけでは depth>0 の reader を見落とす。
+    //   取得順序: fence は既に閉じている（engageShutdownReaderFence）。admission gate も閉じて
+    //   いるため新規 admission は開始できず、(2) の成立後は新規入場も起きない。したがって (3) は
+    //   単調にしか減らない値を (2) の後に読むことになり、以後の増加はない。
     //   安全性を証明できない対象は強制解放せず保持する（リークを選び、UAF を選ばない）。
-    const bool shutdownSubstrateQuiescent = terminalPublishersIdle && terminalReaderAdmissionsIdle;
+    const bool shutdownSubstrateQuiescent =
+        terminalPublishersIdle
+        && terminalReaderAdmissionsIdle
+        && (m_retireRouter != nullptr && m_retireRouter->activeReaderCount() == 0);
 
     // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
     //   ここは retire 要求の移送のみで、ポインタの解放は行わない。
@@ -415,21 +423,17 @@ AudioEngine::~AudioEngine()
     // ★ 15-P-5 FIX: stuck-reader fallback は D のみにしない。Audio Thread は停止済みのため、
     //   Q + E + T の drainAllQuarantineStore（drainAllUnsafe ベース、epoch 非依存）も強制実行する。
     //   drainAllUnsafe は Audio Thread 停止後のみ呼ばれる契約を満たす（RetireQuarantineStore.h:59参照）。
-    // ★ WORK113 (2026-11-18 Owner 指示): publisher と reader の静止を確認できない場合は、この
-    //   force drain を行わない。activeReaderCount()==0 だけでは、予約中（depth 0）の reader が
-    //   後から入場する可能性を排除できず、publisher が gate 内に残る場合は PublishScope の
-    //   終了（gate_.exit）が破棄済み gate に触れる。所有権を保持する fail-closed 経路に切り替える。
+    // ★ WORK113 (2026-11-18 Owner 指示): 3 条件のいずれかが欠ける場合は、この force drain を
+    //   行わない。とくに active reader が残る場合は、Q/E/T の drainAllQuarantineStore（epoch 非依存）
+    //   が参照中の World / DSP を解放し得るため、従来の stuck-reader fallback も実行しない。
+    //   所有権を保持する fail-closed 経路に切り替える。
     if (! shutdownSubstrateQuiescent)
     {
         holdRetireQueuesForShutdownNonRt();
     }
-    else if (m_retireRouter->activeReaderCount() == 0)
-        m_retireRouter->drainAll();
     else
     {
-        diagLog("[DRAIN] Destructor stuck-reader fallback: activeReaderCount > 0 — draining D + Q + E + T");
-        m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
-        m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
+        m_retireRouter->drainAll();
     }
 
     // ★ A(D1): 最終 drain 後の状態を違反レポートへ反映する（runtime 段階は保持される）
