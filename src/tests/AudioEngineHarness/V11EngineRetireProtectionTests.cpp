@@ -3086,15 +3086,23 @@ public:
         return engine.deferredDestroyResidentCount();
     }
 
-    // ★ WORK113: proof の前提（producer 停止相当・admission closed・登録 closed）を作る。
-    //   白箱の状態設定であり、対象は capability 検証だけ（[DQ-V4]）。
-    static void prepareQuiescentForProof (AudioEngine& engine) noexcept
+    // ★ WORK113: 生産（~​AudioEngine）と同じ順序で terminal shutdown の前提を作る。
+    //   登録 close → fence → publish gate close（ここで epochAtFence が確定）→ admission 待ち。
+    //   gate を閉じてから publishEpoch() は進まないため、
+    //   後から実行される最終 retire の epoch と fence epoch が一致する。
+    //   戻り値は publish gate が idle になったか（false なら epochAtFence 未確定）。
+    static bool prepareTerminalShutdownForDrain (AudioEngine& engine) noexcept
     {
         engine.shutdownRuntime_.closeAdmission();
         (void) engine.shutdownRuntime_.joinProducers();
         engine.rebuildThreadStopped.store (true, std::memory_order_release);
         engine.coordinatorLoopStopped.store (true, std::memory_order_release);
         engine.m_epochDomain.closeReaderRegistration();
+        engine.m_epochDomain.engageShutdownReaderFence();
+        const bool publishersIdle =
+            engine.m_epochDomain.closePublishersAndWaitIdle (std::chrono::milliseconds (2000));
+        (void) engine.m_epochDomain.waitForReaderAdmissions (std::chrono::milliseconds (2000));
+        return publishersIdle;
     }
 
     static void installSnapshot (AudioEngine& engine, convo::GlobalSnapshot* snapshot) noexcept
@@ -4106,7 +4114,9 @@ bool checkDeferredCoreNotRetried()
 //==============================================================================
 // ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): proof 不成立時の drain end-to-end。
 //   producer 未 join（bare engine）のため quiescence proof は発行できない。
-//   その状態で生産の checked drain を呼び、queue が取り出されず deleter も走らないことを示す。
+//   この検証が見るのは、proof の取得が不成立して checked drain が
+//   **capability 生成より前に停止する経路** である。
+//   tryMakeDrainCapability() の !proof.valid() 分岐を実行したわけではない（Owner 2026-11-18 指摘）。
 //==============================================================================
 bool checkProofUnavailableKeepsOwnership()
 {
@@ -4168,29 +4178,32 @@ bool checkProofUnavailableKeepsOwnership()
     }
 
     if (ok)
-        std::printf("[DQ-V3] proof unavailable: PASS (checked drain refused, queue retained, "
-                    "deleter 0)\n");
+        std::printf("[DQ-V3] proof unavailable: PASS (checked drain stops before capability "
+                    "creation, queue retained, deleter 0)\n");
     return ok;
 }
 
 //==============================================================================
-// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): capability 失敗時の drain end-to-end。
-//   proof は成立する状態で、最終 retire の移送を失敗させ（D queue 満杯 + Q 満杯）、
-//   capability が発行されない状況を作る。queue が取り出されず deleter も走らないことを示す。
-//   移送失敗そのものは FinalizeRetireCounts（requests > transfers）で観測する。
+// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位 4 補強版): capability は拒否されず発行される。
+//   D を容量 4096 まで、Q と E を各 512 まで埋め、最終 retire の 1 件だけを
+//   D に入れられなくする（D 満杯）→ fallback で T が受領する。
+//   受領は T の**累積 store 回数**で確認する（epoch-safe な entry は T が即時破棄するため、
+//   resident の増減に依存しない）。
+//   並せて、drain が実行されるときに走る deleter（D の各 entry）と、
+//   走ってはいけない deleter（Q / E の entry）を回数で区別する。
 //==============================================================================
-bool checkCapabilityFailureReachability()
+bool checkCapabilityIssuedWithFullFallback()
 {
     bool ok = true;
 
-    static std::atomic<int> deletes { 0 };
+    static std::atomic<int> dDeletes { 0 };
     static std::atomic<int> qDeletes { 0 };
     static std::atomic<int> eDeletes { 0 };
-    deletes.store (0);
+    dDeletes.store (0);
     qDeletes.store (0);
     eDeletes.store (0);
 
-    auto noop = [](void*) noexcept { deletes.fetch_add (1, std::memory_order_relaxed); };
+    auto dNoop = [](void*) noexcept { dDeletes.fetch_add (1, std::memory_order_relaxed); };
     auto qNoop = [](void*) noexcept { qDeletes.fetch_add (1, std::memory_order_relaxed); };
     auto eNoop = [](void*) noexcept { eDeletes.fetch_add (1, std::memory_order_relaxed); };
 
@@ -4203,42 +4216,52 @@ bool checkCapabilityFailureReachability()
         return false;
     }
 
-    // proof の前提（producer 停止相当・admission closed・登録 closed・reader 0）
-    ShutdownHoldTestAccess::prepareQuiescentForProof (*engine);
-
-    // D queue を容量まで埋める
+    // 1) D / Q / E を容量まで埋める（D を満杯にして最終 retire の移送を失敗させる）
     constexpr int kDQueueCapacity = 4096;
-    std::vector<int> dSentinels (kDQueueCapacity);
-    for (int i = 0; i < kDQueueCapacity; ++i)
-    {
-        if (! domainPtr->enqueueRetire (&dSentinels[static_cast<std::size_t>(i)], noop,
-                                        domainPtr->currentEpoch() + 100000))
-            break;
-    }
-
-    // Q と E も容量まで埋める（fallback の受け皿を塞ぐ）
     constexpr int kQCapacity = 512;
     constexpr int kECapacity = 512;
+    std::vector<int> dSentinels (kDQueueCapacity);
     std::vector<int> qSentinels (kQCapacity);
     std::vector<int> eSentinels (kECapacity);
+
+    int filledD = 0;
+    for (int i = 0; i < kDQueueCapacity; ++i)
+    {
+        if (! domainPtr->enqueueRetire (&dSentinels[static_cast<std::size_t>(i)], dNoop,
+                                        domainPtr->currentEpoch() + 100000))
+            break;
+        ++filledD;
+    }
+    int filledQ = 0;
     for (int i = 0; i < kQCapacity; ++i)
     {
         if (! routerPtr->quarantineRetire (&qSentinels[static_cast<std::size_t>(i)], qNoop,
                                            routerPtr->currentEpoch(),
                                            DeletionEntryType::Generic, "dq-v4-fill-q", 0, 0))
             break;
+        ++filledQ;
     }
+    int filledE = 0;
     for (int i = 0; i < kECapacity; ++i)
     {
         if (! routerPtr->emergencyQuarantine (&eSentinels[static_cast<std::size_t>(i)], eNoop,
                                               routerPtr->currentEpoch(),
                                               DeletionEntryType::Generic, "dq-v4-fill-e", 0, 0))
             break;
+        ++filledE;
     }
 
-    const auto tBefore = routerPtr->terminalReclaimResidentCount();
+    const std::size_t qResident =
+        routerPtr->quarantineResidentCount() - routerPtr->emergencyQuarantineResidentCount();
+    const std::size_t eResident = routerPtr->emergencyQuarantineResidentCount();
+    const std::uint64_t tStoreBefore = routerPtr->terminalStoreCount();
+    const std::size_t tResidentBefore = routerPtr->terminalReclaimResidentCount();
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
 
-    // 最終 retire の対象を 1 つ用意する
+    // 2) 生産と同じ順序で terminal shutdown の前提を作る（fence → gate close + epochAtFence）
+    const bool publishersIdle = ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine);
+
+    // 3) 最終 retire の対象を 1 件だけ用意する
     auto* snapshot = convo::SnapshotFactory::create (convo::SnapshotParams{});
     if (snapshot == nullptr)
     {
@@ -4247,54 +4270,129 @@ bool checkCapabilityFailureReachability()
     }
     ShutdownHoldTestAccess::installSnapshot (*engine, snapshot);
 
-    // 生産の checked drain（proof 成立 → 移送 → capability 判定）
+    // 4) 生産の checked drain（proof → capability → take → drain）
     const bool ran = ShutdownHoldTestAccess::runCheckedDrain (*engine);
     const auto counts = ShutdownHoldTestAccess::finalizeCounts (*engine);
-    const auto tAfter = routerPtr->terminalReclaimResidentCount();
+    const std::uint64_t tStoreAfter = routerPtr->terminalStoreCount();
+    const std::size_t tResidentAfter = routerPtr->terminalReclaimResidentCount();
+    const auto pendingAfter = domainPtr->pendingRetireCount();
+    const auto quarantineAfter = convo::EpochDomain::quarantineCount();
+    const auto remainingAfter = domainPtr->drainRemainingAfter();
 
-    // 移送の受け皿は Q → E → T の順で無条件に試され、T は growable（容量上限なし）である。
-    // したがって requests != transfers は通常経路では成立せず、capability の拒否条件
-    // （finalizeCalls != 1 / requests != transfers）は到達できない。
-    const auto transfers = counts.denqueues + counts.fallbackTransfers;
-    if (counts.calls != 1 || counts.requests == 0)
+    // 引き取り後の queue は enqueue できない（takeForShutdown 済みの観測）
+    static int probeSentinel = 0;
+    const bool queueUsableAfter =
+        domainPtr->enqueueRetire (&probeSentinel, dNoop, domainPtr->currentEpoch() + 100000);
+
+    // 前提の実測（満杯到達と gate 停止）
+    if (filledD != kDQueueCapacity)
     {
-        std::fprintf(stderr, "[DQ-V4-3] FAIL: finalize counts invalid (calls=%llu requests=%llu)\n",
+        std::fprintf(stderr, "[DQ-V4-3] FAIL: D did not reach capacity (filled=%d capacity=%d)\n",
+                     filledD, kDQueueCapacity);
+        ok = false;
+    }
+    if (filledQ != kQCapacity || qResident != kQCapacity)
+    {
+        std::fprintf(stderr, "[DQ-V4-4] FAIL: Q did not reach capacity (filled=%d resident=%zu)\n",
+                     filledQ, qResident);
+        ok = false;
+    }
+    if (filledE != kECapacity || eResident != kECapacity)
+    {
+        std::fprintf(stderr, "[DQ-V4-5] FAIL: E did not reach capacity (filled=%d resident=%zu)\n",
+                     filledE, eResident);
+        ok = false;
+    }
+    if (! publishersIdle)
+    {
+        std::fprintf(stderr, "[DQ-V4-6] FAIL: publish gate did not go idle (epochAtFence unsettled)\n");
+        ok = false;
+    }
+
+    // 1. checked drain が完了した（capability は発行された）
+    if (! ran)
+    {
+        std::fprintf(stderr, "[DQ-V4-7] FAIL: checked drain did not complete (capability refused)\n");
+        ok = false;
+    }
+    if (remainingAfter != 0)
+    {
+        std::fprintf(stderr, "[DQ-V4-8] FAIL: drain left entries behind (remaining=%llu)\n",
+                     static_cast<unsigned long long>(remainingAfter));
+        ok = false;
+    }
+    if (pendingAfter != 0 || queueUsableAfter)
+    {
+        std::fprintf(stderr, "[DQ-V4-9] FAIL: queue ownership was not taken (pending=%u usable=%d)\n",
+                     static_cast<unsigned>(pendingAfter), queueUsableAfter ? 1 : 0);
+        ok = false;
+    }
+    if (quarantineAfter != quarantineBefore)
+    {
+        std::fprintf(stderr, "[DQ-V4-10] FAIL: queue was quarantined (count=%llu -> %llu)\n",
+                     static_cast<unsigned long long>(quarantineBefore),
+                     static_cast<unsigned long long>(quarantineAfter));
+        ok = false;
+    }
+
+    // 4. T が受領した（累積 store 回数で +1）
+    if (tStoreAfter != tStoreBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-11] FAIL: terminal store count did not increase by exactly 1 "
+                     "(%llu -> %llu)\n",
+                     static_cast<unsigned long long>(tStoreBefore),
+                     static_cast<unsigned long long>(tStoreAfter));
+        ok = false;
+    }
+
+    // 5. requests == denqueues + fallbackTransfers（D 満杯で denqueue 失敗、fallback 成立）
+    const auto transfers = counts.denqueues + counts.fallbackTransfers;
+    if (counts.calls != 1 || counts.requests != 1)
+    {
+        std::fprintf(stderr, "[DQ-V4-12] FAIL: finalize counts invalid (calls=%llu requests=%llu)\n",
                      static_cast<unsigned long long>(counts.calls),
                      static_cast<unsigned long long>(counts.requests));
         ok = false;
     }
-    if (transfers != counts.requests)
+    if (counts.denqueues != 0 || counts.fallbackTransfers != 1)
     {
-        std::fprintf(stderr,
-                     "[DQ-V4-4] FAIL: untransferred requests exist (requests=%llu transfers=%llu)\n",
-                     static_cast<unsigned long long>(counts.requests),
-                     static_cast<unsigned long long>(transfers));
-        ok = false;
-    }
-    if (counts.denqueues != 0 || counts.fallbackTransfers == 0)
-    {
-        std::fprintf(stderr,
-                     "[DQ-V4-4b] FAIL: D was not full (denq=%llu fallback=%llu)\n",
+        std::fprintf(stderr, "[DQ-V4-13] FAIL: D was not full (denq=%llu fallback=%llu)\n",
                      static_cast<unsigned long long>(counts.denqueues),
                      static_cast<unsigned long long>(counts.fallbackTransfers));
         ok = false;
     }
-    // Stage 3 の T は「格納」または「epoch-safe なら即時破棄」のどちらでも所有権を引き取る。
-    //   どちらの場合も untransferred にはならない（これが capability 拒否の非到達性の根拠）。
-    juce::ignoreUnused (tBefore, tAfter);
-    if (deletes.load() != 0 || qDeletes.load() != 0 || eDeletes.load() != 0)
+    if (counts.requests != transfers)
     {
-        std::fprintf(stderr, "[DQ-V4-6] FAIL: deleter ran (d=%d q=%d e=%d)\n",
-                     deletes.load(), qDeletes.load(), eDeletes.load());
+        std::fprintf(stderr,
+                     "[DQ-V4-14] FAIL: requests != denqueues + fallbackTransfers "
+                     "(requests=%llu transfers=%llu)\n",
+                     static_cast<unsigned long long>(counts.requests),
+                     static_cast<unsigned long long>(transfers));
         ok = false;
     }
-    juce::ignoreUnused (ran);
+
+    // 6. deleter の区別: D は drain が実行し、Q / E は実行されない
+    if (dDeletes.load() != filledD)
+    {
+        std::fprintf(stderr, "[DQ-V4-15] FAIL: D deleter count %d != filled %d\n",
+                     dDeletes.load(), filledD);
+        ok = false;
+    }
+    if (qDeletes.load() != 0 || eDeletes.load() != 0)
+    {
+        std::fprintf(stderr, "[DQ-V4-16] FAIL: Q/E deleter ran unexpectedly (q=%d e=%d)\n",
+                     qDeletes.load(), eDeletes.load());
+        ok = false;
+    }
 
     if (ok)
-        std::printf("[DQ-V4] capability reachability: PASS (D/Q/E full, fallback reached T, "
-                    "requests=%llu transfers=%llu -> untransferred 0; refusal needs injection)\n",
+        std::printf("[DQ-V4] capability issued: PASS (D=%d/Q=%d/E=%d full, checked drain completed, "
+                    "requests=%llu == denqueues+fallback, T store +1 (%zu -> %zu resident), "
+                    "D deleters=%d, Q/E deleters=0)\n",
+                    filledD, filledQ, filledE,
                     static_cast<unsigned long long>(counts.requests),
-                    static_cast<unsigned long long>(transfers));
+                    tResidentBefore, tResidentAfter, dDeletes.load());
     return ok;
 }
 
@@ -4484,9 +4582,9 @@ int runV11EngineRetireProtectionTests()
         std::fprintf(stderr, "FAIL: checkProofUnavailableKeepsOwnership (DQ-V3)\n");
         hdOk = false;
     }
-    if (!checkCapabilityFailureReachability())
+    if (!checkCapabilityIssuedWithFullFallback())
     {
-        std::fprintf(stderr, "FAIL: checkCapabilityFailureReachability (DQ-V4)\n");
+        std::fprintf(stderr, "FAIL: checkCapabilityIssuedWithFullFallback (DQ-V4)\n");
         hdOk = false;
     }
     if (!hdOk)
