@@ -5237,12 +5237,16 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
 //   NonRT（Message Thread）専用。
 inline void abandonReaderSubstrateForShutdownNonRt() noexcept
 {
+    // ★ observer ポインタは書き換えない。参照はコンストラクタで 1 回だけ設定し、以後は
+    //   読み取り専用である。切断すると、publisher が idle でない場合に残る書き込み経路
+    //   （Q / E / T / D の drain・reclaim）と競合する。指す先を生かすことで競合を作らない。
     if (m_retireRouter != nullptr)
     {
-        m_retireRouter->clearReferenceObservers();
         (void) m_retireRouter.release();
     }
     (void) epochDomainOwner_.release();
+    (void) worldRetirementReferenceOwner_.release();
+    (void) worldRetirementTelemetryOwner_.release();
     (void) convo::fetchAddAtomic(s_abandonedReaderSubstrates_, 1, std::memory_order_acq_rel);
 }
 
@@ -5766,7 +5770,13 @@ public:
     convo::EpochDomain& m_epochDomain { *epochDomainOwner_ };
     // ★ T1 (D98): reference observer — m_retireRouter より前に宣言（初期化順: observer → m_retireRouter・
     //   破棄順: m_retireRouter → observer・D97 invariant を満たす）。measurement only・retirement authority でない。
-    convo::isr::WorldRetirementReferenceObserver worldRetirementReference_;
+    // ★ WORK113 (2026-11-18 Owner 指示): engine 破棄後も保持基盤（router / Q / E / T / D queue）が
+    //   この observer を参照するため、実体を heap に置き、fail-closed 経路では所有権を移す。
+    //   参照（ポインタ）の書き換えは行わない（書き換えると publisher timeout 中の読み取りと競合する）。
+    std::unique_ptr<convo::isr::WorldRetirementReferenceObserver> worldRetirementReferenceOwner_ {
+        std::make_unique<convo::isr::WorldRetirementReferenceObserver>() };
+    convo::isr::WorldRetirementReferenceObserver& worldRetirementReference_ {
+        *worldRetirementReferenceOwner_ };
     // [work21] ISRRetireRouter — 唯一のretire/publication API入口(unique_ptr, forward-declared)
     std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
@@ -5977,7 +5987,11 @@ public:
     //   (sole owner). AudioEngine reaches them only via worldAuthority_.lifetime().
     convo::isr::ShutdownRuntime shutdownRuntime_;
     convo::isr::EvidenceExporter evidenceExporter_;
-    convo::isr::WorldRetirementTelemetry worldRetirementTelemetry_;   // ★ T1: world retirement 観測 telemetry（観測値のみ・authority でない・D86）
+    // ★ WORK113: observer が指す telemetry も engine 破棄後に参照され得るため heap に置く。
+    std::unique_ptr<convo::isr::WorldRetirementTelemetry> worldRetirementTelemetryOwner_ {
+        std::make_unique<convo::isr::WorldRetirementTelemetry>() };
+    convo::isr::WorldRetirementTelemetry& worldRetirementTelemetry_ {
+        *worldRetirementTelemetryOwner_ };   // ★ T1: world retirement 観測 telemetry（観測値のみ・authority でない・D86）
     convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;

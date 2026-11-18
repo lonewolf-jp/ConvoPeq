@@ -3044,6 +3044,12 @@ public:
     {
         engine.shutdownWaitTimeoutMs_.store (ms, std::memory_order_release);
     }
+
+    // ★ WORK113: reader が実際に保持する provider（AudioEngine::getRetireRouter() の戻り値）。
+    static convo::IReaderEpochProvider& readerProvider (AudioEngine& engine) noexcept
+    {
+        return engine.getRetireRouter();
+    }
 };
 
 bool checkShutdownHoldContract()
@@ -3156,19 +3162,22 @@ bool checkShutdownHoldReaderResume()
     const auto quarantineBefore = convo::EpochDomain::quarantineCount();
     const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
 
-    convo::EpochDomain* domainPtr = nullptr;
+    // ★ reader が実際に保持する provider（router）。engine 破棄後もこのポインタで操作する。
+    convo::IReaderEpochProvider* providerPtr = nullptr;
     std::atomic<int> slot { -1 };
     std::atomic<bool> registered { false };
     std::atomic<bool> engineGone { false };
-    std::atomic<bool> resumedOk { false };
+    std::atomic<bool> enteredOnProvider { false };
+    std::atomic<bool> exitedOnProvider { false };
     std::atomic<bool> reacquireRefused { false };
+    std::atomic<bool> rcuRefusedAfterTeardown { false };
     std::atomic<std::uint64_t> epochAtEnter { 0 };
 
     std::thread reader;
     {
         auto engine = std::make_unique<AudioEngine>();
         ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
-        domainPtr = &ShutdownHoldTestAccess::epochDomain (*engine);
+        providerPtr = &ShutdownHoldTestAccess::readerProvider (*engine);
 
         if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
         {
@@ -3178,26 +3187,36 @@ bool checkShutdownHoldReaderResume()
 
         reader = std::thread ([&]
         {
-            auto& domain = *domainPtr;
-            const int idx = domain.registerReaderThread ("hold-resume");   // admission 保持（enter しない）
+            // 破棄前から provider を保持する（RCUReader は IReaderEpochProvider* を保持する）
+            convo::RCUReader rcu (*providerPtr);
+
+            // admission を provider 経由で取得し、enterReader は呼ばない（depth 0・予約のみ）
+            const int idx = providerPtr->registerReaderThreadWithTag ("hold-resume");
             slot.store (idx, std::memory_order_release);
             registered.store (true, std::memory_order_release);
             if (idx < 0)
                 return;
 
-            // engine の破棄を待つ（provider はプロセス寿命へ移される）
             while (! engineGone.load (std::memory_order_acquire))
                 std::this_thread::yield();
 
-            // engine は破棄済み。provider が生存していれば、この入場は安全に完了する。
-            domain.enterReader (idx);
-            epochAtEnter.store (domain.currentEpoch(), std::memory_order_release);
-            const auto active = domain.activeReaderCount();
-            domain.exitReader (idx);
-            resumedOk.store (active == 1u && domain.activeReaderCount() == 0u,
-                             std::memory_order_release);
-            // fence は閉じたままなので、以降の再取得は拒否される（停止状態の維持）。
-            reacquireRefused.store (! domain.reacquireReaderSlot (idx), std::memory_order_release);
+            // ---- engine 破棄後: 保持された provider 経由で入場・退場する ----
+            providerPtr->enterReader (idx);
+            epochAtEnter.store (providerPtr->currentEpoch(), std::memory_order_release);
+            const auto active = providerPtr->activeReaderCount();
+            providerPtr->exitReader (idx);
+            const auto afterExit = providerPtr->activeReaderCount();
+            enteredOnProvider.store (active == 1u, std::memory_order_release);
+            exitedOnProvider.store (afterExit == 0u, std::memory_order_release);
+
+            // fence は閉じたまま: 再取得は拒否される
+            reacquireRefused.store (! providerPtr->reacquireReaderSlot (idx), std::memory_order_release);
+
+            // 実 RCUReader（破棄前から provider を保持）でも拒否され、安全に戻る
+            const bool rcuEntered = rcu.enter();
+            if (rcuEntered)
+                rcu.exit();
+            rcuRefusedAfterTeardown.store (! rcuEntered, std::memory_order_release);
         });
 
         while (! registered.load (std::memory_order_acquire))
@@ -3209,42 +3228,52 @@ bool checkShutdownHoldReaderResume()
     engineGone.store (true, std::memory_order_release);
     reader.join();
 
-    if (! resumedOk.load())
+    if (! enteredOnProvider.load())
     {
-        std::fprintf(stderr, "[DQ-H2-2] FAIL: reader did not complete on the retained provider\n");
+        std::fprintf(stderr, "[DQ-H2-2] FAIL: enterReader on the retained provider did not become active\n");
+        ok = false;
+    }
+    if (! exitedOnProvider.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-3] FAIL: exitReader on the retained provider did not return to 0\n");
         ok = false;
     }
     if (epochAtEnter.load() == 0)
     {
-        std::fprintf(stderr, "[DQ-H2-3] FAIL: provider epoch is not readable after engine teardown\n");
+        std::fprintf(stderr, "[DQ-H2-4] FAIL: provider epoch is not readable after engine teardown\n");
         ok = false;
     }
     if (! reacquireRefused.load())
     {
-        std::fprintf(stderr, "[DQ-H2-4] FAIL: reacquire was not refused after the fence\n");
+        std::fprintf(stderr, "[DQ-H2-5] FAIL: provider reacquire was not refused after the fence\n");
+        ok = false;
+    }
+    if (! rcuRefusedAfterTeardown.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-6] FAIL: RCUReader enter was not refused on the retained provider\n");
         ok = false;
     }
     if (deleteCalls.load (std::memory_order_acquire) != 0)
     {
-        std::fprintf(stderr, "[DQ-H2-5] FAIL: deleter ran (deleter=%d)\n",
+        std::fprintf(stderr, "[DQ-H2-7] FAIL: deleter ran (deleter=%d)\n",
                      deleteCalls.load (std::memory_order_acquire));
         ok = false;
     }
     if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
     {
-        std::fprintf(stderr, "[DQ-H2-6] FAIL: D queue was not quarantined\n");
+        std::fprintf(stderr, "[DQ-H2-8] FAIL: D queue was not quarantined\n");
         ok = false;
     }
     if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
     {
-        std::fprintf(stderr, "[DQ-H2-7] FAIL: reader substrate was not retained (count=%d)\n",
+        std::fprintf(stderr, "[DQ-H2-9] FAIL: reader substrate was not retained (count=%d)\n",
                      AudioEngine::abandonedReaderSubstratesForTest());
         ok = false;
     }
 
     if (ok)
-        std::printf("[DQ-H2] shutdown hold + reader resume: PASS (provider retained across engine teardown, "
-                    "enter/exit complete, reacquire refused, no deleter)\n");
+        std::printf("[DQ-H2] shutdown hold + reader resume via provider: PASS (router/domain retained across "
+                    "engine teardown, enter/exit on provider, reacquire and RCUReader enter refused, no deleter)\n");
     return ok;
 }
 
