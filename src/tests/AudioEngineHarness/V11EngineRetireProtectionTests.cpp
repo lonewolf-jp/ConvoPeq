@@ -3050,6 +3050,23 @@ public:
     {
         return engine.getRetireRouter();
     }
+
+    // ★ WORK113: 保持対象の実体（同一性の確認と、Q/E/T 経由の observer 生存確認に使う）。
+    static convo::isr::ISRRetireRouter* retireRouter (AudioEngine& engine) noexcept
+    {
+        return engine.m_retireRouter.get();
+    }
+
+    static convo::EpochDomain* epochDomainPtr (AudioEngine& engine) noexcept
+    {
+        return engine.epochDomainOwner_.get();
+    }
+
+    static convo::isr::WorldRetirementReferenceObserver*
+        referenceObserver (AudioEngine& engine) noexcept
+    {
+        return engine.worldRetirementReferenceOwner_.get();
+    }
 };
 
 bool checkShutdownHoldContract()
@@ -3164,6 +3181,9 @@ bool checkShutdownHoldReaderResume()
 
     // ★ reader が実際に保持する provider（router）。engine 破棄後もこのポインタで操作する。
     convo::IReaderEpochProvider* providerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    convo::EpochDomain* domainPtr = nullptr;
+    convo::isr::WorldRetirementReferenceObserver* observerPtr = nullptr;
     std::atomic<int> slot { -1 };
     std::atomic<bool> registered { false };
     std::atomic<bool> engineGone { false };
@@ -3178,6 +3198,9 @@ bool checkShutdownHoldReaderResume()
         auto engine = std::make_unique<AudioEngine>();
         ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
         providerPtr = &ShutdownHoldTestAccess::readerProvider (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+        observerPtr = ShutdownHoldTestAccess::referenceObserver (*engine);
 
         if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
         {
@@ -3227,6 +3250,55 @@ bool checkShutdownHoldReaderResume()
 
     engineGone.store (true, std::memory_order_release);
     reader.join();
+
+    // ★ WORK113: 移譲先（プロセス寿命テーブル）に、reader が使った実体が記録されていること。
+    if (routerPtr != nullptr && domainPtr != nullptr)
+    {
+        if (! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+        {
+            std::fprintf(stderr, "[DQ-H2-9a] FAIL: abandoned substrate is not reachable from the table\n");
+            ok = false;
+        }
+    }
+    else
+    {
+        std::fprintf(stderr, "[DQ-H2-9a] FAIL: router / domain snapshot is null\n");
+        ok = false;
+    }
+
+    // ★ WORK113: 破棄後も Q/E/T の解放経路が保持された observer に到達できること。
+    //   この経路は referenceObserver_->onRelease() を呼ぶ（observer が破棄済みなら UAF）。
+    if (routerPtr != nullptr && observerPtr != nullptr)
+    {
+        const auto releaseBefore = observerPtr->referenceReleaseCount();
+
+        static int worldSentinel = 0;
+        auto worldRetryable = [](void*) noexcept -> DestroyOutcome
+        {
+            return DestroyOutcome::Destroyed;
+        };
+
+        const bool stored = routerPtr->storeWorldRetryableForTest (
+            &worldSentinel, worldRetryable, routerPtr->currentEpoch());
+        routerPtr->drainAllTerminalForTest();
+
+        const auto releaseAfter = observerPtr->referenceReleaseCount();
+        if (! stored || releaseAfter != releaseBefore + 1u)
+        {
+            std::fprintf(stderr,
+                         "[DQ-H2-9b] FAIL: retained store did not reach the retained observer "
+                         "(stored=%d before=%llu after=%llu)\n",
+                         stored ? 1 : 0,
+                         static_cast<unsigned long long>(releaseBefore),
+                         static_cast<unsigned long long>(releaseAfter));
+            ok = false;
+        }
+    }
+    else
+    {
+        std::fprintf(stderr, "[DQ-H2-9b] FAIL: router / observer snapshot is null\n");
+        ok = false;
+    }
 
     if (! enteredOnProvider.load())
     {

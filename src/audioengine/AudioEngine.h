@@ -5240,14 +5240,26 @@ inline void abandonReaderSubstrateForShutdownNonRt() noexcept
     // ★ observer ポインタは書き換えない。参照はコンストラクタで 1 回だけ設定し、以後は
     //   読み取り専用である。切断すると、publisher が idle でない場合に残る書き込み経路
     //   （Q / E / T / D の drain・reclaim）と競合する。指す先を生かすことで競合を作らない。
-    if (m_retireRouter != nullptr)
+    auto* router = m_retireRouter.get();
+    auto* domain = epochDomainOwner_.get();
+    auto* observer = worldRetirementReferenceOwner_.get();
+    auto* telemetry = worldRetirementTelemetryOwner_.get();
+
+    // 移譲先（プロセス寿命テーブル）へ記録してから所有権を手放す。固定容量・確保なしなので
+    // 記録に失敗する経路は無く、所有権を失ったまま記録だけが欠ける状態にならない。
+    // 書き手は Message Thread の 1 スレッドだけ（engine の破棄は Message Thread 専用）。
+    // スロットを書いてから件数を publish する（読み手が未書き込みスロットを見ない）。
+    const int index = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
+    if (index >= 0 && index < kMaxAbandonedReaderSubstrates)
     {
-        (void) m_retireRouter.release();
+        s_abandonedSubstrates_[index] = AbandonedReaderSubstrate { router, domain, observer, telemetry };
     }
+    convo::publishAtomic (s_abandonedReaderSubstrates_, index + 1, std::memory_order_release);
+
+    (void) m_retireRouter.release();
     (void) epochDomainOwner_.release();
     (void) worldRetirementReferenceOwner_.release();
     (void) worldRetirementTelemetryOwner_.release();
-    (void) convo::fetchAddAtomic(s_abandonedReaderSubstrates_, 1, std::memory_order_acq_rel);
 }
 
 // ★ WORK113 (2026-11-18 Owner 指示): reader admission の idle を確認できない terminal shutdown の
@@ -6022,6 +6034,36 @@ public:
     [[nodiscard]] static int abandonedReaderSubstratesForTest() noexcept
     {
         return convo::consumeAtomic(s_abandonedReaderSubstrates_, std::memory_order_acquire);
+    }
+
+    // ★ WORK113 (2026-11-18 Owner 指示): 移譲先の到達可能性を明示するための固定容量テーブル。
+    //   abandon した基盤の 4 つの実体を記録し、テスト・診断から同一性を確認できるようにする。
+    //   確保を伴わない（失敗経路が無い）ため、記録に失敗して所有権を失うことはない。
+    struct AbandonedReaderSubstrate
+    {
+        const void* router;
+        const void* domain;
+        const void* observer;
+        const void* telemetry;
+    };
+    static constexpr int kMaxAbandonedReaderSubstrates = 8;
+    // static storage なのでゼロ初期化される（NSDMI は enclosing class 内では使えない）。
+    inline static AbandonedReaderSubstrate
+        s_abandonedSubstrates_[kMaxAbandonedReaderSubstrates];
+
+    [[nodiscard]] static bool abandonedSubstrateContainsForTest (const void* router,
+                                                                 const void* domain) noexcept
+    {
+        int n = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
+        if (n > kMaxAbandonedReaderSubstrates)
+            n = kMaxAbandonedReaderSubstrates;
+        for (int i = 0; i < n; ++i)
+        {
+            if (s_abandonedSubstrates_[i].router == router
+                && s_abandonedSubstrates_[i].domain == domain)
+                return true;
+        }
+        return false;
     }
 
     // ★ WORK113 テスト専用: terminal shutdown の待機時間（既定 5000 ms）。

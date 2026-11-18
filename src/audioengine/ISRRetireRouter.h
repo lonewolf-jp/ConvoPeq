@@ -432,6 +432,15 @@ public:
             ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test-direct");
     }
 
+    // ★ WORK113 (2026-11-18 Owner 指示): Terminal に World 型で預け、Q/E/T の解放経路が
+    //   reference observer に到達することを検証する（shutdown 保持経路の observer 生存確認用）。
+    bool storeWorldRetryableForTest (void* ptr, RetryableDeleter retryable, uint64_t epoch) noexcept
+    {
+        return m_terminalReclaim.storeRetryable (ptr, retryable, epoch,
+                                                 DeletionEntryType::World,
+                                                 "work113-world-probe");
+    }
+
     // ★ F1'-b: retryable として所有権を保持しているエントリ総数（延期前も含む）。
     [[nodiscard]] std::size_t terminalRetryableResidentCount() const noexcept
     {
