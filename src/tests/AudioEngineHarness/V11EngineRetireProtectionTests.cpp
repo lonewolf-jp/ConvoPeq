@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <thread>
 
 // B2 Stage 1 / T1 (R-01): 自プロセスのスレッド数取得（CreateToolhelp32Snapshot）。
@@ -2862,6 +2863,129 @@ bool checkDSPHandleResolveStates()
     return ok;
 }
 
+// ★ WORK113 Queue/Gate/Drain: gate の期限判定・reader fence・隔離の契約（終端 shutdown 用）。
+bool checkDrainGateContract()
+{
+    bool ok = true;
+
+    // G1: active publisher がいる間の waitForIdle は期限で false になる。
+    convo::EpochDomain::EpochPublishGate gate;
+    if (! gate.tryEnter())
+    {
+        std::fprintf(stderr, "[DQ-G1] FAIL: tryEnter failed while open\n");
+        return false;
+    }
+    gate.close();
+    if (gate.waitForIdle(std::chrono::milliseconds(50)))
+    {
+        std::fprintf(stderr, "[DQ-G1] FAIL: waitForIdle succeeded while a publisher is active\n");
+        ok = false;
+    }
+    // G2: close 後の入場は拒否される。
+    if (gate.tryEnter())
+    {
+        std::fprintf(stderr, "[DQ-G2] FAIL: tryEnter succeeded after close\n");
+        ok = false;
+    }
+    gate.exit();
+    if (! gate.waitForIdle(std::chrono::milliseconds(50)))
+    {
+        std::fprintf(stderr, "[DQ-G3] FAIL: waitForIdle did not observe idle after exit\n");
+        ok = false;
+    }
+    if (ok)
+        std::printf("[DQ-G] publish gate: PASS (timeout while active / refuse after close / idle after exit)\n");
+    return ok;
+}
+
+bool checkReaderFenceContract()
+{
+    bool ok = true;
+    auto domain = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+
+    domain->engageShutdownReaderFence();
+    const int registered = domain->registerReaderThread("fence-probe");
+    const bool reserved = domain->reserveReaderThread(0);
+    const bool reacquired = domain->reacquireReaderSlot(0);
+
+    if (registered != -1 || reserved || reacquired)
+    {
+        std::fprintf(stderr, "[DQ-F1] FAIL: reader entry not blocked (reg=%d reserve=%d reacq=%d)\n",
+                     registered, reserved ? 1 : 0, reacquired ? 1 : 0);
+        ok = false;
+    }
+    if (domain->enterAfterFence() < 2u || domain->reacquireAfterFence() < 1u)
+    {
+        std::fprintf(stderr, "[DQ-F2] FAIL: fence counters too small (enter=%u reacq=%u)\n",
+                     (unsigned) domain->enterAfterFence(), (unsigned) domain->reacquireAfterFence());
+        ok = false;
+    }
+
+    // fence 中でも enqueue（NonRT）は継続できる（停止するのは reader の入場だけ）。
+    static int sentinel = 0;
+    auto deleter = [](void*) noexcept {};
+    if (! domain->enqueueRetire(&sentinel, deleter, domain->currentEpoch()))
+    {
+        std::fprintf(stderr, "[DQ-F3] FAIL: enqueueRetire failed under reader fence\n");
+        ok = false;
+    }
+    domain->drainAll();
+
+    if (ok)
+        std::printf("[DQ-F] reader fence: PASS (register/reserve/reacquire blocked, enqueue alive)\n");
+    return ok;
+}
+
+bool checkQuarantineContract()
+{
+    bool ok = true;
+    auto domain = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+
+    auto local = domain->borrow();
+    if (! local)
+    {
+        std::fprintf(stderr, "[DQ-Q1] FAIL: borrow() returned null\n");
+        return false;
+    }
+
+    const auto countBefore = convo::EpochDomain::quarantineCount();
+    const auto pendingBefore = convo::EpochDomain::quarantinePendingEntries();
+    const auto pendingInQueue = static_cast<std::uint64_t>(local->sizeApprox());
+    auto* raw = local.get();
+
+    const auto first = domain->quarantineQueue(local);
+    const auto second = domain->quarantineQueue(local);
+    local.reset();
+
+    if (first != convo::EpochDomain::QuarantineResult::Registered
+        || second != convo::EpochDomain::QuarantineResult::AlreadyRegistered)
+    {
+        std::fprintf(stderr, "[DQ-Q2] FAIL: uniqueness broken (first=%d second=%d)\n",
+                     static_cast<int>(first), static_cast<int>(second));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != countBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-Q3] FAIL: quarantineCount delta != 1\n");
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantinePendingEntries() != pendingBefore + pendingInQueue)
+    {
+        std::fprintf(stderr, "[DQ-Q4] FAIL: pending entries not accumulated\n");
+        ok = false;
+    }
+    // 自己参照で保持されているので、local を手放した後も queue は有効（deleter は実行しない）。
+    if (raw == nullptr || raw->sizeApprox() != static_cast<std::uint32_t>(pendingInQueue))
+    {
+        std::fprintf(stderr, "[DQ-Q5] FAIL: quarantined queue is not retained\n");
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-Q] quarantine: PASS (single registration, counters, self-ref retention)\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -2986,6 +3110,21 @@ int runV11EngineRetireProtectionTests()
     if (!checkDSPHandleResolveStates())
     {
         std::fprintf(stderr, "FAIL: checkDSPHandleResolveStates (P2-1)\n");
+        hdOk = false;
+    }
+    if (!checkDrainGateContract())
+    {
+        std::fprintf(stderr, "FAIL: checkDrainGateContract (DQ-G)\n");
+        hdOk = false;
+    }
+    if (!checkReaderFenceContract())
+    {
+        std::fprintf(stderr, "FAIL: checkReaderFenceContract (DQ-F)\n");
+        hdOk = false;
+    }
+    if (!checkQuarantineContract())
+    {
+        std::fprintf(stderr, "FAIL: checkQuarantineContract (DQ-Q)\n");
         hdOk = false;
     }
     if (!hdOk)
