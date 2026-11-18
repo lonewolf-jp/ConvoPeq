@@ -5229,6 +5229,23 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     return completed;
 }
 
+// ★ WORK113 (2026-11-18 Owner 指示): admission timeout 時の reader 基盤の寿命延長。
+//   reader が参照する provider（ISRRetireRouter）と admission の所有者（EpochDomain）を
+//   プロセス寿命へ移す。~AudioEngine は残りのメンバーを破棄するが、停止中の reader が再開して
+//   provider を触っても破棄済みメモリにはならない（deleter も実行しない）。
+//   破棄される engine メンバー（reference observer）への参照は先に切る。
+//   NonRT（Message Thread）専用。
+inline void abandonReaderSubstrateForShutdownNonRt() noexcept
+{
+    if (m_retireRouter != nullptr)
+    {
+        m_retireRouter->clearReferenceObservers();
+        (void) m_retireRouter.release();
+    }
+    (void) epochDomainOwner_.release();
+    (void) convo::fetchAddAtomic(s_abandonedReaderSubstrates_, 1, std::memory_order_acq_rel);
+}
+
 // ★ WORK113 (2026-11-18 Owner 指示): reader admission の idle を確認できない terminal shutdown の
 //   fail-closed 経路。D queue の所有権を隔離（自己参照）して deleter を実行せず、Q / E / T は
 //   drain しない（各 store は destructor で deleter を実行しない）。安全を証明できない対象は
@@ -5740,7 +5757,13 @@ public:
     // スナップショット基盤（Phase 2）
     // ==================================================================
     // ★ domain tag (v2.9): Engine の epoch ドメイン（退役は EngineISR に帰属する）
-    convo::EpochDomain m_epochDomain { convo::RetireDomainId::EngineISR };
+    // ★ WORK113 (2026-11-18 Owner 指示): reader が参照する provider の寿命を engine の寿命から
+    //   切り離せるよう、実体は heap に置き、m_epochDomain は参照のまま残す（既存の
+    //   m_epochDomain. 呼出しは不変）。admission timeout 時は epochDomainOwner_ を release し、
+    //   reader が入場を完了できるようプロセス寿命へ移す。
+    std::unique_ptr<convo::EpochDomain> epochDomainOwner_ {
+        std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EngineISR) };
+    convo::EpochDomain& m_epochDomain { *epochDomainOwner_ };
     // ★ T1 (D98): reference observer — m_retireRouter より前に宣言（初期化順: observer → m_retireRouter・
     //   破棄順: m_retireRouter → observer・D97 invariant を満たす）。measurement only・retirement authority でない。
     convo::isr::WorldRetirementReferenceObserver worldRetirementReference_;
@@ -5979,6 +6002,18 @@ public:
     {
         return convo::consumeAtomic(s_engineInstanceCount_, std::memory_order_acquire);
     }
+
+    // ★ WORK113: プロセス寿命へ移した reader 基盤（provider）の累計（テスト・診断用）。
+    static std::atomic<int> s_abandonedReaderSubstrates_;
+    [[nodiscard]] static int abandonedReaderSubstratesForTest() noexcept
+    {
+        return convo::consumeAtomic(s_abandonedReaderSubstrates_, std::memory_order_acquire);
+    }
+
+    // ★ WORK113 テスト専用: terminal shutdown の待機時間（既定 5000 ms）。
+    //   待つ/待たないの判断（同期契約）は変えず、時間だけを差し替える。
+    //   設定経路は friend のテストアクセスだけで、製品コードからは設定できない。
+    std::atomic<int> shutdownWaitTimeoutMs_ { 5000 };
     uint64_t engineInstanceId_{0};
 
     // ==================================================================

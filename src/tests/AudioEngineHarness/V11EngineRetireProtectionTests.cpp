@@ -3033,6 +3033,17 @@ public:
         return engine.m_epochDomain.enqueueRetire (ptr, deleter,
                                                    engine.m_epochDomain.currentEpoch() + 1000);
     }
+
+    static convo::EpochDomain& epochDomain (AudioEngine& engine) noexcept
+    {
+        return engine.m_epochDomain;
+    }
+
+    // ★ WORK113: shutdown の待機時間だけを差し替える（同期契約は変えない）。
+    static void setShutdownWaitTimeout (AudioEngine& engine, int ms) noexcept
+    {
+        engine.shutdownWaitTimeoutMs_.store (ms, std::memory_order_release);
+    }
 };
 
 bool checkShutdownHoldContract()
@@ -3054,6 +3065,7 @@ bool checkShutdownHoldContract()
 
         {
             auto engine = std::make_unique<AudioEngine>();
+            ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
             const int slot = ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "shutdown-hold");
             if (slot < 0)
             {
@@ -3095,6 +3107,7 @@ bool checkShutdownHoldContract()
 
         {
             auto engine = std::make_unique<AudioEngine>();
+            ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
             if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
             {
                 std::fprintf(stderr, "[DQ-H5] FAIL: control sentinel enqueue failed\n");
@@ -3118,6 +3131,120 @@ bool checkShutdownHoldContract()
     if (ok)
         std::printf("[DQ-H] shutdown hold: PASS (in-flight admission -> no destructive drain, "
                     "D queue kept; control drains once)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): admission timeout 後の Reader 再開テスト [DQ-H2]。
+//   AudioEngine を破棄しても、reader が参照する provider（EpochDomain と router）は
+//   プロセス寿命へ移される。停止していた reader が再開して入場を完了でき、fence による
+//   停止状態（再取得の拒否）も維持されていることを検証する。
+//   待機は 50 ms に差し替えて決定的に再現する（本番の同期契約は変えない）。
+//==============================================================================
+bool checkShutdownHoldReaderResume()
+{
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+
+    convo::EpochDomain* domainPtr = nullptr;
+    std::atomic<int> slot { -1 };
+    std::atomic<bool> registered { false };
+    std::atomic<bool> engineGone { false };
+    std::atomic<bool> resumedOk { false };
+    std::atomic<bool> reacquireRefused { false };
+    std::atomic<std::uint64_t> epochAtEnter { 0 };
+
+    std::thread reader;
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+        domainPtr = &ShutdownHoldTestAccess::epochDomain (*engine);
+
+        if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H2-1] FAIL: sentinel enqueue failed\n");
+            return false;
+        }
+
+        reader = std::thread ([&]
+        {
+            auto& domain = *domainPtr;
+            const int idx = domain.registerReaderThread ("hold-resume");   // admission 保持（enter しない）
+            slot.store (idx, std::memory_order_release);
+            registered.store (true, std::memory_order_release);
+            if (idx < 0)
+                return;
+
+            // engine の破棄を待つ（provider はプロセス寿命へ移される）
+            while (! engineGone.load (std::memory_order_acquire))
+                std::this_thread::yield();
+
+            // engine は破棄済み。provider が生存していれば、この入場は安全に完了する。
+            domain.enterReader (idx);
+            epochAtEnter.store (domain.currentEpoch(), std::memory_order_release);
+            const auto active = domain.activeReaderCount();
+            domain.exitReader (idx);
+            resumedOk.store (active == 1u && domain.activeReaderCount() == 0u,
+                             std::memory_order_release);
+            // fence は閉じたままなので、以降の再取得は拒否される（停止状態の維持）。
+            reacquireRefused.store (! domain.reacquireReaderSlot (idx), std::memory_order_release);
+        });
+
+        while (! registered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（admission 保留 → 50 ms で待機失敗 → provider を保持）
+    }
+
+    engineGone.store (true, std::memory_order_release);
+    reader.join();
+
+    if (! resumedOk.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-2] FAIL: reader did not complete on the retained provider\n");
+        ok = false;
+    }
+    if (epochAtEnter.load() == 0)
+    {
+        std::fprintf(stderr, "[DQ-H2-3] FAIL: provider epoch is not readable after engine teardown\n");
+        ok = false;
+    }
+    if (! reacquireRefused.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-4] FAIL: reacquire was not refused after the fence\n");
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-H2-5] FAIL: deleter ran (deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H2-6] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H2-7] FAIL: reader substrate was not retained (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-H2] shutdown hold + reader resume: PASS (provider retained across engine teardown, "
+                    "enter/exit complete, reacquire refused, no deleter)\n");
     return ok;
 }
 
@@ -3265,6 +3392,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkShutdownHoldContract())
     {
         std::fprintf(stderr, "FAIL: checkShutdownHoldContract (DQ-H)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldReaderResume())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldReaderResume (DQ-H2)\n");
         hdOk = false;
     }
     if (!hdOk)

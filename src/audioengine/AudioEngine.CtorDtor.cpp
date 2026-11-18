@@ -24,6 +24,9 @@ std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
 // ★ 2026-10-30 (別変更単位): 生存エンジン数の診断カウンタ。診断のみで、振る舞いは変えない。
 std::atomic<int> AudioEngine::s_engineInstanceCount_{0};
 
+// ★ WORK113: reader 基盤をプロセス寿命へ移した累計（shutdown の fail-closed 経路）。
+std::atomic<int> AudioEngine::s_abandonedReaderSubstrates_{0};
+
 namespace
 {
 // 警告の重複抑制用（最初の 1 回だけ出す）。
@@ -299,7 +302,8 @@ AudioEngine::~AudioEngine()
     //   （0 に達した後の再登録を構造的に排除）。登録済み slot の enter/exit は継続可能。
     m_epochDomain.closeReaderRegistration();
     {
-        constexpr int kGracefulDrainMaxMs = 5000;
+        const int kGracefulDrainMaxMs =
+            convo::consumeAtomic(shutdownWaitTimeoutMs_, std::memory_order_acquire);
         constexpr int kGracefulDrainPollMs = 10;
         int waitedMs = 0;
         while (waitedMs < kGracefulDrainMaxMs)
@@ -324,8 +328,10 @@ AudioEngine::~AudioEngine()
 
     // ★ WORK113: terminal shutdown の停止状態を確定する（fence / gate は以後解除しない）。
     m_epochDomain.engageShutdownReaderFence();
+    const int shutdownWaitMs =
+        convo::consumeAtomic(shutdownWaitTimeoutMs_, std::memory_order_acquire);
     const bool terminalPublishersIdle =
-        m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(5000));
+        m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(shutdownWaitMs));
     if (! terminalPublishersIdle)
     {
         diagLog("[FAULT] epoch_publishers_not_idle timeouts="
@@ -336,7 +342,7 @@ AudioEngine::~AudioEngine()
     //   閉じているため新規の入場は開始されず、待機後は「入場中の reader が存在しない」
     //   ことが確定する（proof と checked drain の前提）。
     const bool terminalReaderAdmissionsIdle =
-        m_epochDomain.waitForReaderAdmissions(std::chrono::milliseconds(5000));
+        m_epochDomain.waitForReaderAdmissions(std::chrono::milliseconds(shutdownWaitMs));
     if (! terminalReaderAdmissionsIdle)
     {
         diagLog("[FAULT] reader_admissions_not_idle active="
@@ -380,8 +386,20 @@ AudioEngine::~AudioEngine()
     // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) before pointer-lifetime
     //   drain (drainAll). OverflowRing may hold entries not yet processed because the RT commit
     //   path (the only caller of dequeuePendingRetireIntents()) has stopped.
-    //   （移送のみでポインタは解放しないため、reader 静止の有無にかかわらず実行できる）
-    drainPendingRetireIntentsForShutdown();
+    // ★ WORK113 (2026-11-18 Owner 指示): この関数は retire 要求を移送するだけで物理解放は
+    //   しないが、EpochControl::reclaim() によって slot の lifecycle lane を
+    //   ReclaimEligible → Reclaimed へ進める。reader の静止を確認できない状態で slot の
+    //   再利用可能性を動かさないため、fail-closed 経路では実行しない（残存要求は保持する）。
+    if (readerQuiescent)
+    {
+        drainPendingRetireIntentsForShutdown();
+    }
+    else
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[WORK113] shutdown hold: residual RetireIntents retained (slot lanes untouched)");
+#endif
+    }
 
     // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
     //   TerminalReclaimAuthority に保持された World（stuck reader ケースの clearedWorld 等）が
@@ -554,6 +572,14 @@ AudioEngine::~AudioEngine()
                     ? "[DRAIN_DIAG] checkedDrain skipped=reader_admissions_not_idle"
                     : "[DRAIN_DIAG] checkedDrain skipped=epoch_publishers_not_idle");
 #endif
+    }
+
+    // ★ WORK113 (2026-11-18 Owner 指示): reader の静止を確認できない場合、reader が参照する
+    //   基盤（provider と EpochDomain）をプロセス寿命へ移してから engine を破棄する。
+    //   停止中の reader が再開して入場を完了しても、provider は生存している。
+    if (! readerQuiescent)
+    {
+        abandonReaderSubstrateForShutdownNonRt();
     }
 
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");

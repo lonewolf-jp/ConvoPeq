@@ -235,6 +235,20 @@ public:
     void exitReader(int readerIndex) noexcept override;
     uint64_t minReaderEpoch() const noexcept;
 
+    // ★ WORK113 (2026-11-18 Owner 指示): reader 基盤をプロセス寿命へ移す前に、
+    //   破棄される AudioEngine メンバー（reference observer）への参照を全経路で切る。
+    //   対象は ctor で observer を伝搬した 4 箇所（Q / E / T / provider）と同じ。
+    //   shutdown の fail-closed 経路だけが呼ぶ。
+    void clearReferenceObservers() noexcept
+    {
+        referenceObserver_ = nullptr;
+        m_retireQuarantine.setReferenceObserver(nullptr);
+        m_emergencyQuarantine.setReferenceObserver(nullptr);
+        m_terminalReclaim.setReferenceObserver(nullptr);
+        if (provider_ != nullptr)
+            provider_->setReferenceObserver(nullptr);
+    }
+
     // ★ B-1: Reader Slot 詳細取得 (delegates to provider)
     [[nodiscard]] ReaderSlotDetail getReaderSlotDetail(int readerIndex) const noexcept override;
 
