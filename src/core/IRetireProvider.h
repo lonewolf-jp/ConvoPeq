@@ -29,6 +29,14 @@ public:
     /** Enqueue a retire request. Returns true on success. */
     virtual bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept = 0;
 
+    // ★ WORK113: RT 専用 enqueue（生ポインタ経路・mutex も shared_ptr も触らない）。
+    //   既定は false: 未対応の provider は RT 経路で明示的に失敗する（NonRT への誤降格を防ぐ）。
+    virtual bool enqueueRetireRt(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept
+    {
+        (void) ptr; (void) deleter; (void) epoch;
+        return false;
+    }
+
     // ★ T1 (D86): telemetry type tag 付き enqueue（type==World で world retirement を識別）。
     //   デフォルト実装は type を無視して既存 3 引数版を呼ぶ（既存実装クラスは変更不要）。
     //   EpochDomain がオーバーライドして DeferredDeletionQueue に type を伝搬する。
@@ -38,6 +46,29 @@ public:
     {
         return enqueueRetire(ptr, deleter, epoch);
     }
+
+    // ★ WORK113 変更1: 帰属メタ付き enqueue（NonRT 専用）。
+    //   既定実装は typed へ委譲し、メタを落としたことを計数する（黙って消さない）。
+    //   メタに対応する provider は supportsRetireMeta() を true にし、この関数を override する。
+    virtual bool enqueueRetireSized(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                                   DeletionEntryType type, const RetireMeta& /*meta*/) noexcept
+    {
+        metaDroppedCount_.fetch_add(1, std::memory_order_relaxed);
+        return enqueueRetireTyped(ptr, deleter, epoch, type);
+    }
+
+    [[nodiscard]] virtual bool supportsRetireMeta() const noexcept { return false; }
+
+    [[nodiscard]] uint64_t metaDroppedCount() const noexcept
+    {
+        return convo::consumeAtomic(metaDroppedCount_, std::memory_order_acquire);
+    }
+
+private:
+    // ★ WORK113 変更1: メタ非対応 provider が落とした件数（既定実装だけが増やす）。
+    std::atomic<std::uint64_t> metaDroppedCount_ { 0 };
+
+public:
 
     /** Try to reclaim retired objects. */
     virtual void tryReclaim() noexcept = 0;

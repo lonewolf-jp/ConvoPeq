@@ -1302,6 +1302,44 @@ void AudioEngine::timerCallback()
             (unsigned long long)osMem.privateUsageMB, (unsigned long long)osMem.workingSetMB,
             otherPrivate/(1024.0*1024.0),
             dspTrackedTotalMB, dspOversamplingMB, dspEqMB, dspAlignedMB, dspLatencyMB));
+
+        // ★ WORK113 変更1: 帰属の 1 行サマリ（レジストリ＋メタ disposition）。
+        {
+            // 起動初期（CLI ログファイルが開く前）のイベントを 1 回だけ吐き出す。
+            static std::atomic<bool> s_recentFlushed { false };
+            if (! convo::exchangeAtomic(s_recentFlushed, true, std::memory_order_acq_rel))
+                convo::diag::registry().flushRecentLog();
+
+            const auto totals = convo::diag::registry().totals();
+            const auto counters = (m_retireRouter != nullptr)
+                ? m_retireRouter->metaCounters()
+                : convo::isr::ISRRetireRouter::MetaCounters {};
+            const auto head = m_epochDomain.inspectRetireHead();
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[MEM_ATTR] liveCores=%u deferredCores=%u measuredCoreBytes=%llu "
+                "convolvers=%u measuredConvolverBytes=%llu retireEntries=%u "
+                "headMeta=%d headOwner=%llu headBytes=%llu "
+                "metaSized=%llu metaStored=%llu metaLostQ=%llu metaLostE=%llu metaLostT=%llu "
+                "metaUnsupported=%llu consistent=%d overflow=%u unregisteredCreated=%u",
+                static_cast<unsigned>(totals.liveOnlyCores),
+                static_cast<unsigned>(totals.deferredCores),
+                static_cast<unsigned long long>(totals.measuredCoreBytes),
+                static_cast<unsigned>(totals.liveConvolvers),
+                static_cast<unsigned long long>(totals.measuredConvolverBytes),
+                static_cast<unsigned>(pendingCount),
+                head.metaAvailable ? 1 : 0,
+                static_cast<unsigned long long>(head.ownerId),
+                static_cast<unsigned long long>(head.measuredBytes),
+                static_cast<unsigned long long>(counters.sized),
+                static_cast<unsigned long long>(counters.stored),
+                static_cast<unsigned long long>(counters.lostQuarantine),
+                static_cast<unsigned long long>(counters.lostEmergency),
+                static_cast<unsigned long long>(counters.lostTerminal),
+                static_cast<unsigned long long>(counters.unsupportedProvider),
+                totals.consistent() ? 1 : 0,
+                static_cast<unsigned>(totals.overflowCount),
+                static_cast<unsigned>(totals.unregisteredCreated)));
+        }
     }
 #endif
 

@@ -55,22 +55,50 @@ public:
             return;
 
         // 異常系: 最後の安全網として retire + tryReclaim
-        retireCurrentAndTarget();
+        (void) retireCurrentAndTarget();
         m_epochProvider->tryReclaim();
+    }
+
+    // ★ WORK113: 最終 retire の計数（D enqueue と Q/E/T 移送を分ける）。
+    struct FinalizeRetireCounts
+    {
+        std::uint64_t calls { 0 };                 // finalizeRetireOnce の実行回数（0 または 1）
+        std::uint64_t requests { 0 };              // current / target のうち存在した数（0..2）
+        std::uint64_t denqueues { 0 };             // D queue が受け付けた件数
+        std::uint64_t fallbackTransfers { 0 };     // Q / E / T へ移送した件数
+        std::uint64_t untransferred { 0 };         // 呼び出し元に残った件数（正常時 0）
+    };
+
+    // ★ WORK113: 最終 retire を 1 回だけ実行する（drain より前に呼ぶ）。
+    //   既に確定済みなら calls == 0 を返す（二重 retire しない）。
+    FinalizeRetireCounts finalizeRetireOnce() noexcept
+    {
+        FinalizeRetireCounts counts {};
+        if (convo::consumeAtomic(m_shutdownFinalized, std::memory_order_acquire))
+            return counts;
+
+        counts = retireCurrentAndTarget();
+        counts.calls = 1;
+        m_lastFinalizeCounts = counts;
+        convo::publishAtomic(m_shutdownFinalized, true, std::memory_order_release);
+        return counts;
+    }
+
+    // ★ WORK113: 直近の最終 retire 計数（未実行なら calls == 0）。
+    [[nodiscard]] FinalizeRetireCounts finalizeRetireCounts() const noexcept
+    {
+        return m_lastFinalizeCounts;
     }
 
     // ★ P1-3: releaseResources から呼ばれる。二段構えの正常系。
     //   timedOut=true の場合も retire は実行（reclaim のみスキップ）。
     void finalizeShutdown(bool timedOut) noexcept {
-        if (convo::consumeAtomic(m_shutdownFinalized, std::memory_order_acquire))
+        const auto counts = finalizeRetireOnce();
+        if (counts.calls == 0)
             return;
-
-        retireCurrentAndTarget();
 
         if (!timedOut)
             m_epochProvider->tryReclaim();
-
-        convo::publishAtomic(m_shutdownFinalized, true, std::memory_order_release);
     }
 
     // observeCurrentRuntime:
@@ -177,7 +205,9 @@ private:
 
     // ★ P1-3: current と target の両方を retire する共通ヘルパー
     // [work37 Phase 1.2] enqueueWithRetry を使用
-    void retireCurrentAndTarget() noexcept {
+    // ★ WORK113: 計数を返す（Requests = DEnqueues + FallbackTransfers + Untransferred）。
+    FinalizeRetireCounts retireCurrentAndTarget() noexcept {
+        FinalizeRetireCounts counts {};
         constexpr auto deleter = [](void* ptr) noexcept
         {
             SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
@@ -190,17 +220,30 @@ private:
             //   格納失敗時は quarantineRetireSink が Q→E→T で必ず受領するため取り消さない。
             convo::isr::RetireLatencyRecorder::instance().recordRequest (
                 snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
-            if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+            ++counts.requests;
+            if (enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+                ++counts.denqueues;
+            else
+            {
                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
+                ++counts.fallbackTransfers;
+            }
         }
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
         if (snap) {
             // ★ C5 (2026-11-10): target も同じ規則で記録する。
             convo::isr::RetireLatencyRecorder::instance().recordRequest (
                 snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
-            if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+            ++counts.requests;
+            if (enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+                ++counts.denqueues;
+            else
+            {
                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
+                ++counts.fallbackTransfers;
+            }
         }
+        return counts;
     }
 
     IEpochProvider* m_epochProvider;
@@ -210,6 +253,7 @@ private:
     SnapshotFadeState m_fade;
     // ★ P1-3: 二段構えのフラグ。finalizeShutdown() で true、~SnapshotCoordinator で確認
     std::atomic<bool> m_shutdownFinalized { false };
+    FinalizeRetireCounts m_lastFinalizeCounts {};   // ★ WORK113: 最終 retire の計数（初回のみ）
 
     // ★ D8-2-B-1 T10 (test-only access): resetFadeStateAndRetireTarget() is private and has no
     //   production caller (updateFade was removed 2026-07-28), so T10 cannot be exercised through

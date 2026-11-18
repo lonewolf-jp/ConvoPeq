@@ -243,6 +243,12 @@ RuntimeBuilder::buildRuntimePublishWorld(
             worldOwner->dspProjection.oversamplingFactor = sealedSnapshot->oversamplingFactor;
             worldOwner->dspProjection.sampleRate = sealedSnapshot->sampleRate;
             worldOwner->dspProjection.baseLatencySamples = sealedSnapshot->baseLatencySamples;
+
+            // ★ WORK113 変更 2 (DIAG): provenance 値。比較・hash・実行時判断には使わない。
+            worldOwner->dspProjection.irLength = sealedSnapshot->irLength;
+            worldOwner->dspProjection.convolverFingerprint = sealedSnapshot->convolverFingerprint;
+            worldOwner->dspProjection.diagRequestId = sealedSnapshot->diagRequestId;
+            worldOwner->dspProjection.diagProjectionSealed = true;
         } else if (current != nullptr) {
             worldOwner->dspProjection.irLoaded = current->convolverRt().isIRLoaded();
             worldOwner->dspProjection.irFinalized = current->convolverRt().isIRFinalized();

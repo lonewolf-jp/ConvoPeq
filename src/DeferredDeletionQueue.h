@@ -17,9 +17,13 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <limits>
+#include <memory>
 #include <type_traits>
 
 #include "audioengine/AtomicAccess.h"
+#include "audioengine/DiagObjectRegistry.h"   // ★ WORK113 変更1: [RETIRE_RECLAIM] の共通ログ先
 #include "audioengine/ISRWorldRetirementReference.h"   // ★ T1 (D98): reference observer（measurement only・D97）
 
 enum class DeletionEntryType : uint8_t {
@@ -37,6 +41,35 @@ enum class DestroyOutcome : uint8_t {
 
 // ★ F1'-b: 再試行可能な deleter。void(void*) の上位互換。
 using RetryableDeleter = DestroyOutcome (*)(void*) noexcept;
+
+// ★ WORK113 変更1: sized enqueue で運ぶメタデータ（DIAG 専用の帰属情報）。
+//   DeletionEntry のフィールドにもサイズにも影響しない（別配列に置く）。
+struct RetireMeta
+{
+    std::uint64_t ownerId { 0 };        // DSPCore の runtimeUuid（0 = 未取得）
+    std::uint64_t measuredBytes { 0 };  // 計測済み帰属分（0 = 未計測）
+    bool available { false };           // 供給されたか（false を 0 で埋めない）
+};
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+// ★ WORK113 変更1: スロット単位 seqlock（tag 偶数=安定 / 奇数=書き込み中、64 bit・飽和）。
+//   全フィールド atomic・全アクセス seq_cst。読み取りは最大 3 回で打ち切る。
+struct DiagRetireMetaSlot
+{
+    std::atomic<std::uint64_t> tag { 0 };
+    std::atomic<std::uint32_t> sequence { 0 };
+    std::atomic<std::uint64_t> ownerId { 0 };
+    std::atomic<std::uint64_t> measuredBytes { 0 };
+    std::atomic<std::uint32_t> available { 0 };
+};
+
+struct DiagRetireMetaView
+{
+    std::uint64_t ownerId { 0 };
+    std::uint64_t measuredBytes { 0 };
+    bool available { false };
+};
+#endif
 
 // DeletionEntry: 削除対象のエントリ
 // B23: static_assert を通すため、std::atomic を含まずトリビアルコピー可能である必要があります。
@@ -92,6 +125,11 @@ public:
     DeferredDeletionQueue() noexcept {
         for (uint32_t i = 0; i < kQueueSize; ++i)
             convo::publishAtomic(sequences[i], i, std::memory_order_release); // release: enqueue/dequeue の seq acquire と HB (初期化後の最初の観測を保証)
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ WORK113 変更1: メタはヒープに置く（EpochDomain のスタック占有を増やさない）。
+        //   確保失敗時は nullptr のまま＝メタ無効（0 や推定値で埋めない）。
+        diagMeta_.reset(new (std::nothrow) DiagRetireMetaSlot[kQueueSize]());
+#endif
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
@@ -111,6 +149,63 @@ public:
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
                  uint64_t publicationSequenceId, uint64_t generation,
                  convo::RetireDomainId domain) noexcept {
+        return enqueueImpl(ptr, deleter, epoch, type, publicationSequenceId, generation, domain, nullptr);
+    }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: メタ付き enqueue（NonRT 専用・DIAG ON のみ）。
+    bool enqueueSized(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
+                      uint64_t publicationSequenceId, uint64_t generation,
+                      convo::RetireDomainId domain, const RetireMeta& meta) noexcept {
+        return enqueueImpl(ptr, deleter, epoch, type, publicationSequenceId, generation, domain, &meta);
+    }
+
+    // ★ WORK113 変更1: スロットのメタを読む（reclaim / head 共用・seq 照合つき）。
+    [[nodiscard]] bool readMeta(std::uint32_t slot,
+                                std::uint32_t expectedSequence,
+                                DiagRetireMetaView& out) const noexcept {
+        if (! diagMeta_)
+        {
+            out = DiagRetireMetaView {};
+            return false;
+        }
+
+        auto& m = diagMeta_[slot & kMask];
+        constexpr std::uint64_t kTagMax = std::numeric_limits<std::uint64_t>::max() - 1;
+
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const std::uint64_t s1 = convo::consumeAtomic(m.tag, std::memory_order_acquire);
+            if ((s1 & 1u) != 0u || s1 >= kTagMax)      // 書き込み中、または飽和
+                continue;
+
+            const std::uint32_t seq = convo::consumeAtomic(m.sequence, std::memory_order_acquire);
+            const std::uint64_t owner = convo::consumeAtomic(m.ownerId, std::memory_order_acquire);
+            const std::uint64_t bytes = convo::consumeAtomic(m.measuredBytes, std::memory_order_acquire);
+            const std::uint32_t avail = convo::consumeAtomic(m.available, std::memory_order_acquire);
+            const std::uint64_t s2 = convo::consumeAtomic(m.tag, std::memory_order_acquire);
+
+            if (s1 == s2 && seq == expectedSequence) {
+                out.ownerId = owner;
+                out.measuredBytes = bytes;
+                out.available = (avail != 0u);
+                return true;
+            }
+        }
+
+        metaReadRetry_.fetch_add(1, std::memory_order_relaxed);
+        out = DiagRetireMetaView{};
+        return false;
+    }
+
+    [[nodiscard]] std::uint64_t metaReadRetryCount() const noexcept {
+        return convo::consumeAtomic(metaReadRetry_, std::memory_order_acquire);
+    }
+#endif
+
+private:
+    bool enqueueImpl(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
+                     uint64_t publicationSequenceId, uint64_t generation,
+                     convo::RetireDomainId domain, const RetireMeta* meta) noexcept {
         uint32_t pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire); // acquire: 前回 enqueue の CAS acq_rel と HB し最新の enqueuePos を観測
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
@@ -133,6 +228,11 @@ public:
                     entry.publicationSequenceId = publicationSequenceId;
                     entry.generation = generation;
                     entry.firstScanTsNs = 0;   // ★ 段階③: スロット再利用時の残留を防ぐ
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                    // ★ WORK113 変更1: メタは seq の publish より前に書く（読み手は seq の acquire で観測）。
+                    if (meta != nullptr)
+                        writeMeta(pos & kMask, pos + 1, *meta);
+#endif
                     convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release); // release: dequeue の seq acquire と HB しエントリ書き込み完了を公知
                     return true;
                 }
@@ -143,6 +243,8 @@ public:
             }
         }
     }
+
+public:
 
     // Message Thread / Timer から呼ばれる。
     uint32_t reclaim(uint64_t minReaderEpoch) {
@@ -169,6 +271,12 @@ public:
             //   consumer（この関数）だけが書くため CAS は不要（seq の acquire 後）。
             if (entry.firstScanTsNs == 0)
                 entry.firstScanTsNs = steadyNowNs();
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ WORK113 変更1: メタは CAS 前に複写する（CAS 成功後はスロットが再利用され得る）。
+            DiagRetireMetaView meta {};
+            const bool metaOk = readMeta(scanPos & kMask, seq, meta);
+            const std::uint64_t scanTsNs = entry.firstScanTsNs;
+#endif
             bool canDelete = false;
 
             if (isOlder(entry.epoch, minReaderEpoch)) {
@@ -201,6 +309,40 @@ public:
                                 referenceObserver_->onRelease();
                         }
                     }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                    {
+                        // ★ WORK113 変更1: 解放の帰属を 1 行で残す（メタが無ければ na と明示）。
+                        char line[360];
+                        const double ageMs = (scanTsNs != 0)
+                            ? static_cast<double>(steadyNowNs() - scanTsNs) / 1.0e6
+                            : 0.0;
+                        if (metaOk && meta.available)
+                            std::snprintf(line, sizeof(line),
+                                "[RETIRE_RECLAIM] slot=%u seq=%u epoch=%llu domain=%u type=%u gen=%llu "
+                                "owner=%llu bytes=%llu ageMs=%.3f result=destroyed",
+                                static_cast<unsigned>(scanPos & kMask),
+                                static_cast<unsigned>(seq),
+                                static_cast<unsigned long long>(entry.epoch),
+                                static_cast<unsigned>(entry.domainId),
+                                static_cast<unsigned>(entry.type),
+                                static_cast<unsigned long long>(entry.generation),
+                                static_cast<unsigned long long>(meta.ownerId),
+                                static_cast<unsigned long long>(meta.measuredBytes),
+                                ageMs);
+                        else
+                            std::snprintf(line, sizeof(line),
+                                "[RETIRE_RECLAIM] slot=%u seq=%u epoch=%llu domain=%u type=%u gen=%llu "
+                                "owner=na bytes=na ageMs=%.3f result=destroyed",
+                                static_cast<unsigned>(scanPos & kMask),
+                                static_cast<unsigned>(seq),
+                                static_cast<unsigned long long>(entry.epoch),
+                                static_cast<unsigned>(entry.domainId),
+                                static_cast<unsigned>(entry.type),
+                                static_cast<unsigned long long>(entry.generation),
+                                ageMs);
+                        convo::diag::registry().emitLine(line);
+                    }
+#endif
                     ++reclaimed;  // ★ A-1: 実際に解放した件数をカウント
                     entry.ptr = nullptr;
                     entry.deleter = nullptr;
@@ -340,6 +482,12 @@ public:
         referenceObserver_ = observer;
     }
 
+    // ★ WORK113 Queue Lifetime: 隔離（自己参照で寿命を保つ・移送時の追加確保なし）。
+    //   quarantineQueue() だけが書き、公開後は next を変更しない（append-only）。
+    std::shared_ptr<DeferredDeletionQueue> quarantineSelfRef_;
+    std::atomic<bool> quarantineEnqueued_ { false };
+    std::atomic<DeferredDeletionQueue*> quarantineNext_ { nullptr };
+
 private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
@@ -354,6 +502,34 @@ private:
             std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: メタの書き込み（単一 writer・seq_cst・64 bit tag）。
+    //   tag が飽和域に入ったら奇数固定にして、以後の読み取りを unavailable にする。
+    void writeMeta(std::uint32_t slot, std::uint32_t sequence, const RetireMeta& meta) noexcept
+    {
+        if (! diagMeta_)
+            return;   // 確保失敗時はメタ無効（読む側も unavailable を返す）
+
+        auto& m = diagMeta_[slot & kMask];
+        constexpr std::uint64_t kTagMax = std::numeric_limits<std::uint64_t>::max() - 1;
+        const std::uint64_t t = convo::consumeAtomic(m.tag, std::memory_order_acquire);
+
+        if (t >= kTagMax)
+        {
+            convo::publishAtomic(m.available, 0u, std::memory_order_release);
+            convo::publishAtomic(m.tag, std::numeric_limits<std::uint64_t>::max(), std::memory_order_release);
+            return;
+        }
+
+        convo::publishAtomic(m.tag, t + 1, std::memory_order_release);          // 奇数: 書き込み中
+        convo::publishAtomic(m.sequence, sequence, std::memory_order_release);
+        convo::publishAtomic(m.ownerId, meta.ownerId, std::memory_order_release);
+        convo::publishAtomic(m.measuredBytes, meta.measuredBytes, std::memory_order_release);
+        convo::publishAtomic(m.available, meta.available ? 1u : 0u, std::memory_order_release);
+        convo::publishAtomic(m.tag, t + 2, std::memory_order_release);          // 偶数: 安定
+    }
+#endif
+
     static constexpr uint32_t kQueueSize = 4096;
     static constexpr uint32_t kMask = kQueueSize - 1;
 
@@ -364,5 +540,14 @@ private:
     alignas(64) std::atomic<uint64_t> maxRetireAgeUs_{0};
     alignas(64) std::atomic<uint64_t> worldReclaimCount_{0};  // ★ T1: world 破棄観測カウンタ（telemetry のみ）
     convo::isr::WorldRetirementReferenceObserver* referenceObserver_ = nullptr;  // ★ T1 (D98): non-owning（measurement only）
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: サイドテーブル（4096 × 40 B ≒ 160 KB・DIAG ON のみ）。
+    //   EpochDomain のスタック占有を増やさないためヒープに置く（構築は NonRT）。
+    //   DeletionEntry のサイズ契約（64 / 56）には影響しない。
+    std::unique_ptr<DiagRetireMetaSlot[]> diagMeta_;
+    // 試行回数は診断専用であり、const の readMeta() から更新するため static にする
+    // （mutable は lint AE-011 で禁止。インスタンス横連の合計値でも診断には十分）。
+    static inline std::atomic<std::uint64_t> metaReadRetry_ { 0 };
+#endif
 };
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容

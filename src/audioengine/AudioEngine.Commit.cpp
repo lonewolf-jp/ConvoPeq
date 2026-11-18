@@ -854,6 +854,10 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
         newDSP->diagGeneration.store(static_cast<std::uint64_t>(generation), std::memory_order_relaxed);
         newDSP->diagFootprint = newDSP->diagCaptureFootprint();
         newDSP->diagFootprintCaptured = true;
+        // ★ WORK113 変更1: enqueue 時点の実測値で識別レジストリを更新する（NUC / irData 反映）。
+        convo::diag::registry().coreMeasured(
+            newDSP->runtimeUuid, newDSP->diagFootprint.total(),
+            static_cast<std::uint64_t>(generation));
         const auto& fp = newDSP->diagFootprint;
         diagLog(juce::String::formatted(
             "[DSP_ALLOC] dsp=%p gen=%llu kind=convolver bytes=%zu", (void*)newDSP,

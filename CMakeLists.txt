@@ -479,6 +479,25 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_features(ScopedEpochReaderStructuralTests PRIVATE cxx_std_17)
     target_compile_options(ScopedEpochReaderStructuralTests PRIVATE /EHsc /utf-8)
 
+    # ★ WORK113: Queue/Gate/Drain の契約テスト（テスト専用 factory を有効化した単一 TU）。
+    add_executable(DrainContractTests
+        src/tests/DrainContractTests.cpp
+    )
+    target_include_directories(DrainContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(DrainContractTests PRIVATE
+        CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY=1
+    )
+    target_link_libraries(DrainContractTests PRIVATE juce::juce_core)
+    target_compile_features(DrainContractTests PRIVATE cxx_std_20)
+    target_compile_options(DrainContractTests PRIVATE /EHsc /utf-8)
+    add_test(NAME DrainContract COMMAND DrainContractTests)
+
     # ★ STG-11-D1 (Candidate B): EQ-owned router lifetime の決定論的 regression test。
     #   EQProcessor 本体（eqprocessor/*.cpp）をリンクし、public setter で D→Q→E→T
     #   まで駆動する。standalone target とすることで AudioEngineHarness の深い
@@ -1802,6 +1821,7 @@ set(CONVOPEQ_ALL_SOURCES
     src/NoiseShaperLearnerTypes.h
     src/audioengine/RuntimeBuildTypes.h
     src/audioengine/RuntimeBuilder.h
+    src/audioengine/DiagObjectRegistry.h
     src/audioengine/RuntimeBuilder.cpp
     src/audioengine/AutoGainPlanner.cpp  # ★ v14.0
     src/audioengine/AudioEngineProcessor.cpp

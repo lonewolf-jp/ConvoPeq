@@ -24,6 +24,14 @@ std::atomic<uint64_t> AudioEngine::s_nextEngineInstanceId_{0};
 // ★ 2026-10-30 (別変更単位): 生存エンジン数の診断カウンタ。診断のみで、振る舞いは変えない。
 std::atomic<int> AudioEngine::s_engineInstanceCount_{0};
 
+// ★ WORK113: reader 基盤をプロセス寿命へ移した累計（shutdown の fail-closed 経路）。
+std::atomic<int> AudioEngine::s_abandonedReaderSubstrates_{0};
+std::atomic<int> AudioEngine::s_abandonedSubstrateOverflow_{0};
+std::atomic<int> AudioEngine::s_shutdownPublisherIdleFailures_{0};
+std::atomic<int> AudioEngine::s_shutdownReaderAdmissionIdleFailures_{0};
+std::atomic<int> AudioEngine::s_shutdownEngineReaderBusy_{0};
+std::atomic<const char*> AudioEngine::s_lastShutdownHoldReason_{nullptr};
+
 namespace
 {
 // 警告の重複抑制用（最初の 1 回だけ出す）。
@@ -48,6 +56,20 @@ AudioEngine::AudioEngine()
     , worldAuthority_(runtimePublicationBridge_)
     , shutdownRuntime_(runtimePublicationBridge_)  // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): constructor 固定注入（setReclaimAuthority 廃止 — immutable association）
 {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 識別レジストリのログ出力先を 1 回だけ設定する（以後は読み取り専用）。
+    convo::diag::registry().setLogSink ([] (const char* line)
+    {
+        juce::Logger::writeToLog (juce::String::fromUTF8 (line));
+    });
+
+    // ★ WORK113 Gate: RT から NonRT API を呼ぶ誤用を Debug で検出するための probe。
+    m_epochDomain.setRtThreadProbe ([]() noexcept
+    {
+        return convo::numeric_policy::isAudioThread();
+    });
+#endif
+
     // ★ A(D1): 測定器はエンジン 1 個につき 1 回リセットする（前インスタンスの観測を持ち越さない）
     convo::isr::RetireLatencyRecorder::instance().reset();
     convo::isr::WorldLifetimeRecorder::instance().reset();   // ★ Item2: World 寿命の記録
@@ -285,7 +307,8 @@ AudioEngine::~AudioEngine()
     //   （0 に達した後の再登録を構造的に排除）。登録済み slot の enter/exit は継続可能。
     m_epochDomain.closeReaderRegistration();
     {
-        constexpr int kGracefulDrainMaxMs = 5000;
+        const int kGracefulDrainMaxMs =
+            convo::consumeAtomic(shutdownWaitTimeoutMs_, std::memory_order_acquire);
         constexpr int kGracefulDrainPollMs = 10;
         int waitedMs = 0;
         while (waitedMs < kGracefulDrainMaxMs)
@@ -308,6 +331,87 @@ AudioEngine::~AudioEngine()
         }
     }
 
+    // ★ WORK113: terminal shutdown の停止状態を確定する（fence / gate は以後解除しない）。
+    m_epochDomain.engageShutdownReaderFence();
+    const int shutdownWaitMs =
+        convo::consumeAtomic(shutdownWaitTimeoutMs_, std::memory_order_acquire);
+    const bool terminalPublishersIdle =
+        m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(shutdownWaitMs));
+    if (! terminalPublishersIdle)
+    {
+        (void) convo::fetchAddAtomic(s_shutdownPublisherIdleFailures_, 1, std::memory_order_acq_rel);
+        diagLog("[FAULT] epoch_publishers_not_idle timeouts="
+                + juce::String(static_cast<int>(m_epochDomain.epochIdleTimeouts())));
+    }
+
+    // ★ WORK113: reader admission（予約〜enter）の完了を待つ。fence と admission gate は
+    //   閉じているため新規の入場は開始されず、待機後は「入場中の reader が存在しない」
+    //   ことが確定する（proof と checked drain の前提）。
+    const bool terminalReaderAdmissionsIdle =
+        m_epochDomain.waitForReaderAdmissions(std::chrono::milliseconds(shutdownWaitMs));
+    if (! terminalReaderAdmissionsIdle)
+    {
+        (void) convo::fetchAddAtomic(s_shutdownReaderAdmissionIdleFailures_, 1, std::memory_order_acq_rel);
+        diagLog("[FAULT] reader_admissions_not_idle active="
+                + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
+                + " pendingSlots="
+                + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())));
+    }
+
+    // ★ WORK113 (2026-11-18 Owner 指示): 破棄・回収の前提は次の 3 条件である。
+    //   (1) publisher が idle: false は PublishScope 内にいることを意味し、そのデストラクタは
+    //       gate_.exit() を呼ぶ。domain を破棄すると破棄済み gate へのアクセスになる。
+    //   (2) reader admission が idle: 予約〜enter の途中の reader が残っていない。
+    //   (3) active reader が 0: enterReader 完了後、保護区間内に留まる reader が残っていない。
+    //       (2) だけでは depth>0 の reader を見落とす。
+    //   (4) engine 所有 reader が保護区間外: audioThreadRcuReader / messageThreadRcuReader は
+    //       AudioEngine のメンバーであり、使用中に engine を破棄すると reader 自身のメンバーが
+    //       寿命切れになる。ホスト契約（audio callback の停止・join 後に破棄する）を実行時に観測する。
+    //       契約の根拠: 製品は ~MainWindow で removeAudioCallback → closeAudioDevice の後に
+    //       member の audioEngine を破棄する。harness は stop() で audio thread を join してから
+    //       engine を破棄する。
+    //   取得順序: fence は既に閉じている（engageShutdownReaderFence）。admission gate も閉じて
+    //   いるため新規 admission は開始できず、(2) の成立後は新規入場も起きない。したがって (3) は
+    //   単調にしか減らない値を (2) の後に読むことになり、以後の増加はない。
+    //   安全性を証明できない対象は強制解放せず保持する（リークを選び、UAF を選ばない）。
+    const bool activeReadersIdle =
+        (m_retireRouter != nullptr && m_retireRouter->activeReaderCount() == 0);
+    const bool engineReadersIdle =
+        ! audioThreadRcuReader.isInside() && ! messageThreadRcuReader.isInside();
+    if (! engineReadersIdle)
+    {
+        (void) convo::fetchAddAtomic(s_shutdownEngineReaderBusy_, 1, std::memory_order_acq_rel);
+        diagLog("[FAULT] engine_reader_busy audioInside="
+                + juce::String(static_cast<int>(audioThreadRcuReader.isInside() ? 1 : 0))
+                + " messageInside="
+                + juce::String(static_cast<int>(messageThreadRcuReader.isInside() ? 1 : 0)));
+    }
+
+    const bool shutdownSubstrateQuiescent =
+        terminalPublishersIdle && terminalReaderAdmissionsIdle
+        && activeReadersIdle && engineReadersIdle;
+
+    // 実際に成立しなかった条件を保持理由として記録する（診断の整合）。
+    // 文字列は DIAG ON のときだけ持つ（OFF ではログも evidence も出さない）。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const char* const shutdownHoldReason =
+        ! terminalPublishersIdle      ? "epoch_publishers_not_idle"
+        : ! terminalReaderAdmissionsIdle ? "reader_admissions_not_idle"
+        : ! activeReadersIdle         ? "active_readers_not_idle"
+        : "engine_readers_not_idle";
+
+    convo::publishAtomic(s_lastShutdownHoldReason_,
+                         shutdownSubstrateQuiescent ? static_cast<const char*>(nullptr)
+                                                    : shutdownHoldReason,
+                         std::memory_order_release);
+#else
+    const char* const shutdownHoldReason = nullptr;
+#endif
+
+    // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
+    //   ここは retire 要求の移送のみで、ポインタの解放は行わない。
+    (void) m_coordinator.finalizeRetireOnce();
+
     // ★ work88 (X4-B §6.4 / X4-B-7): shutdown clear を RuntimeWorldAuthority 経由に一本化
     //   （一時生成 makeRuntimePublishAuthority() は X4-B-8 で廃止）。詳細は ReleaseResources 側に同様。
     worldAuthority_.requestShutdownClearNonRt();
@@ -317,28 +421,55 @@ AudioEngine::~AudioEngine()
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
-    drainDeferredRetireQueues(true);
+
+    // 解放を伴う deferred queue の回収は publisher と reader の静止時だけ実行する。
+    if (shutdownSubstrateQuiescent)
+    {
+        drainDeferredRetireQueues(true);
+    }
+    else
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[WORK113] shutdown hold: deferred retire queues retained (publisher or reader not idle)");
+#endif
+    }
 
     // ★ 15-P-4-5-FIX: Drain residual RetireIntents (slot-state System 1) before pointer-lifetime
     //   drain (drainAll). OverflowRing may hold entries not yet processed because the RT commit
     //   path (the only caller of dequeuePendingRetireIntents()) has stopped.
-    drainPendingRetireIntentsForShutdown();
-
-    // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
-    //   TerminalReclaimAuthority に保持された World（stuck reader ケースの clearedWorld 等）が
-    //   漏れる。quiescence（activeReaderCount==0）確立時のみ m_retireRouter->drainAll() で
-    //   全 store を強制解放する。stuck reader が残る場合は UAF 回避のため D のみ（従来動作）に
-    //   フォールバックし、epoch-gated drain（drainTerminalReclaim）に委ねる。
-    // ★ 15-P-5 FIX: stuck-reader fallback は D のみにしない。Audio Thread は停止済みのため、
-    //   Q + E + T の drainAllQuarantineStore（drainAllUnsafe ベース、epoch 非依存）も強制実行する。
-    //   drainAllUnsafe は Audio Thread 停止後のみ呼ばれる契約を満たす（RetireQuarantineStore.h:59参照）。
-    if (m_retireRouter->activeReaderCount() == 0)
-        m_retireRouter->drainAll();
+    // ★ WORK113 (2026-11-18 Owner 指示): この関数は retire 要求を移送するだけで物理解放は
+    //   しないが、EpochControl::reclaim() によって slot の lifecycle lane を
+    //   ReclaimEligible → Reclaimed へ進める。静止を確認できない状態で slot の再利用可能性を
+    //   動かさないため、fail-closed 経路では実行しない（残存要求は保持する）。
+    if (shutdownSubstrateQuiescent)
+    {
+        drainPendingRetireIntentsForShutdown();
+    }
     else
     {
-        diagLog("[DRAIN] Destructor stuck-reader fallback: activeReaderCount > 0 — draining D + Q + E + T");
-        m_epochDomain.drainAll();           // D only (safe — no live readers can access D slots in dtor)
-        m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[WORK113] shutdown hold: residual RetireIntents retained (slot lanes untouched)");
+#endif
+    }
+
+    // ★ 15-P-5: 完全 drain（D + Q + E + Terminal）。m_epochDomain.drainAll() は D のみのため、
+    //   TerminalReclaimAuthority に保持された World が漏れる。静止を確認できたときだけ
+    //   m_retireRouter->drainAll()（D + Q/E/T の強制解放）を実行する。
+    // ★ WORK113 (2026-11-18 Owner 指示): 4 条件のいずれかが欠ける場合は force drain を行わない。
+    //   active reader が残る場合、Q/E/T の drainAllQuarantineStore（epoch 非依存）が参照中の
+    //   World / DSP を解放し得る。旧 stuck-reader fallback（D + Q/E/T の強制解放）は撤去済みで、
+    //   ここでは所有権を保持する fail-closed 経路だけを通る。
+    if (! shutdownSubstrateQuiescent)
+    {
+        holdRetireQueuesForShutdownNonRt(shutdownHoldReason,
+                                         terminalPublishersIdle,
+                                         terminalReaderAdmissionsIdle,
+                                         activeReadersIdle,
+                                         engineReadersIdle);
+    }
+    else
+    {
+        m_retireRouter->drainAll();
     }
 
     // ★ A(D1): 最終 drain 後の状態を違反レポートへ反映する（runtime 段階は保持される）
@@ -352,7 +483,17 @@ AudioEngine::~AudioEngine()
         const auto deferredBefore = deferredDestroyResidentCount();
         if (deferredBefore > 0)
         {
-            (void)retryDeferredDestroys();
+            if (shutdownSubstrateQuiescent)
+            {
+                (void)retryDeferredDestroys();
+            }
+            else
+            {
+                // ★ WORK113: 静止を確認できないため、pin が解放済みに見えても回収しない。
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+                diagLog("[WORK113] shutdown hold: deferred DSPCore retry skipped (retained)");
+#endif
+            }
             const auto deferredAfter = deferredDestroyResidentCount();
             juce::Logger::writeToLog(juce::String::formatted(
                 "[F1_DEFERRED_SHUTDOWN] before=%zu after=%zu%s",
@@ -389,7 +530,48 @@ AudioEngine::~AudioEngine()
         if (residualPending != 0)
             diagLog("[D162-2E] INV-D162-8: EBR residual pending=" + juce::String((int)residualPending)
                 + " after drainAll — DSPCore destruction may carry into member teardown");
-        jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
+        if (shutdownSubstrateQuiescent)
+            jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
+        // 静止を確認できない場合は残留が想定内（fail-closed で保持している）。
+    }
+#endif
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        // ★ WORK113 変更1: 帰属の最終スナップショットを evidence/ に書く（失敗しても shutdown は続行）。
+        const auto totals = convo::diag::registry().totals();
+        const auto metaCounters = (m_retireRouter != nullptr)
+            ? m_retireRouter->metaCounters()
+            : convo::isr::ISRRetireRouter::MetaCounters {};
+
+        juce::String json;
+        json << "{\n  \"schema\": \"memory_attribution_v1\",\n";
+        json << "  \"totals\": {\"liveCores\": " << static_cast<int>(totals.liveCores)
+             << ", \"liveOnlyCores\": " << static_cast<int>(totals.liveOnlyCores)
+             << ", \"deferredCores\": " << static_cast<int>(totals.deferredCores)
+             << ", \"destroyedCores\": " << static_cast<int>(totals.destroyedCores)
+             << ", \"measuredCoreBytes\": " << static_cast<juce::int64>(totals.measuredCoreBytes)
+             << ", \"liveConvolvers\": " << static_cast<int>(totals.liveConvolvers)
+             << ", \"measuredConvolverBytes\": " << static_cast<juce::int64>(totals.measuredConvolverBytes)
+             << ", \"createdTotal\": " << static_cast<int>(totals.createdTotal)
+             << ", \"destroyedTotal\": " << static_cast<int>(totals.destroyedTotal)
+             << ", \"unregisteredCreated\": " << static_cast<int>(totals.unregisteredCreated)
+             << ", \"unregisteredDestroyed\": " << static_cast<int>(totals.unregisteredDestroyed)
+             << ", \"overflow\": " << static_cast<int>(totals.overflowCount)
+             << ", \"uuidZero\": " << static_cast<int>(totals.uuidZeroCount)
+             << ", \"consistent\": " << (totals.consistent() ? "true" : "false") << "},\n";
+        json << "  \"meta\": {\"sized\": " << static_cast<juce::int64>(metaCounters.sized)
+             << ", \"stored\": " << static_cast<juce::int64>(metaCounters.stored)
+             << ", \"lostQuarantine\": " << static_cast<juce::int64>(metaCounters.lostQuarantine)
+             << ", \"lostEmergency\": " << static_cast<juce::int64>(metaCounters.lostEmergency)
+             << ", \"lostTerminal\": " << static_cast<juce::int64>(metaCounters.lostTerminal)
+             << ", \"unsupportedProvider\": " << static_cast<juce::int64>(metaCounters.unsupportedProvider)
+             << "},\n";
+        json << "  " << juce::String(convo::diag::registry().recordsJson().c_str()) << "\n}\n";
+
+        auto evidenceFile = juce::File::getCurrentWorkingDirectory()
+                                .getChildFile("evidence/memory_attribution.json");
+        evidenceFile.getParentDirectory().createDirectory();
+        evidenceFile.replaceWithText(json);
     }
 #endif
     runtimePublicationBridge_.markShutdownComplete();
@@ -410,7 +592,41 @@ AudioEngine::~AudioEngine()
     //   この時点では shutdownRuntime_ / m_retireRouter / dspHandleRuntime_ 等が全て生存しているため、
     //   dspHandleRuntime_.retire + resolve + delete が安全に実行できる。
     //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
-    eqCacheManager.drainForShutdown();
+    if (shutdownSubstrateQuiescent)
+    {
+        eqCacheManager.drainForShutdown();
+    }
+    else
+    {
+        // ★ WORK113: 静止を確認できないため、EQ cache の強制破棄は行わない。
+        //   （~EQCacheManager は CacheMap のみを破棄し、EQCoeffCache の実体は解放しない）
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog("[WORK113] shutdown hold: EQ cache drain skipped (retained)");
+#endif
+    }
+
+    // ★ WORK113 Queue/Gate/Drain: 全 retire source の処理後、最後に checked drain（終端）。
+    //   fence / gate は閉じたまま（解除しない）。idle 不成立なら drain しない。
+    if (shutdownSubstrateQuiescent)
+    {
+        const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt();
+        juce::ignoreUnused(checkedDrainCompleted);
+    }
+    else
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        diagLog(juce::String("[DRAIN_DIAG] checkedDrain skipped=") + shutdownHoldReason);
+#endif
+    }
+
+    // ★ WORK113 (2026-11-18 Owner 指示): 静止を確認できない場合、参照され得る基盤
+    //   （EpochDomain / ISRRetireRouter / observer / telemetry）をプロセス寿命へ移してから
+    //   engine を破棄する。停止中の reader が再開しても、publisher が破棄後に gate scope を
+    //   終了しても、参照先は生存している。
+    if (! shutdownSubstrateQuiescent)
+    {
+        abandonReaderSubstrateForShutdownNonRt();
+    }
 
     setShutdownPhase(ShutdownPhase::Destroy, "~AudioEngine");
     convo::publishAtomic(lifecycleState, EngineLifecycleState::Destroyed, std::memory_order_release); // release: isShuttingDown の acquire と HB

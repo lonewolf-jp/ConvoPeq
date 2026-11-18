@@ -267,6 +267,38 @@ public:
                                           uint64_t epoch,
                                           DeletionEntryType type) noexcept;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 帰属メタ付きのリトライ込み enqueue（NonRT 専用）。
+    //   D が受け取れば metaStored、Q/E/T へ移送した場合はその受け取り先で 1 回だけ計数する。
+    RetireEnqueueResult enqueueWithRetrySized(void* ptr,
+                                              void (*deleter)(void*),
+                                              uint64_t epoch,
+                                              DeletionEntryType type,
+                                              const RetireMeta& meta) noexcept;
+
+    struct MetaCounters
+    {
+        std::uint64_t sized { 0 };
+        std::uint64_t stored { 0 };
+        std::uint64_t lostQuarantine { 0 };
+        std::uint64_t lostEmergency { 0 };
+        std::uint64_t lostTerminal { 0 };
+        std::uint64_t unsupportedProvider { 0 };
+    };
+
+    [[nodiscard]] MetaCounters metaCounters() const noexcept
+    {
+        MetaCounters c;
+        c.sized = convo::consumeAtomic(metaSizedCount_, std::memory_order_acquire);
+        c.stored = convo::consumeAtomic(metaStoredCount_, std::memory_order_acquire);
+        c.lostQuarantine = convo::consumeAtomic(metaLostQuarantineCount_, std::memory_order_acquire);
+        c.lostEmergency = convo::consumeAtomic(metaLostEmergencyCount_, std::memory_order_acquire);
+        c.lostTerminal = convo::consumeAtomic(metaLostTerminalCount_, std::memory_order_acquire);
+        c.unsupportedProvider = convo::consumeAtomic(metaUnsupportedProviderCount_, std::memory_order_acquire);
+        return c;
+    }
+#endif
+
     // ★ R-1: IRetireRouter インターフェース実装
     //   retireRT: 単発 enqueue、リトライなし（RT-safe）。bool 戻り値で成否を伝える。
     [[nodiscard]] bool retireRT(void* ptr, void (*deleter)(void*)) noexcept override;
@@ -400,6 +432,15 @@ public:
             ptr, retryable, epoch, DeletionEntryType::Generic, "f1b-test-direct");
     }
 
+    // ★ WORK113 (2026-11-18 Owner 指示): Terminal に World 型で預け、Q/E/T の解放経路が
+    //   reference observer に到達することを検証する（shutdown 保持経路の observer 生存確認用）。
+    bool storeWorldRetryableForTest (void* ptr, RetryableDeleter retryable, uint64_t epoch) noexcept
+    {
+        return m_terminalReclaim.storeRetryable (ptr, retryable, epoch,
+                                                 DeletionEntryType::World,
+                                                 "work113-world-probe");
+    }
+
     // ★ F1'-b: retryable として所有権を保持しているエントリ総数（延期前も含む）。
     [[nodiscard]] std::size_t terminalRetryableResidentCount() const noexcept
     {
@@ -443,8 +484,11 @@ public:
              + m_terminalReclaim.residentCountAtomic();
     }
 
-    // ★ E-1.9-B: Event-driven drain wake primitive.
-    //   CoordinatorLoop (Non-RT) blocks on drainCv_ with predicate:
+    // ★ WORK113 変更1: meta を渡せる共通実装（meta=nullptr は既存経路と同じ・DIAG OFF でも同じ挙動）。
+    RetireEnqueueResult enqueueRetireImpl(void* ptr, void (*deleter)(void*), uint64_t epoch,
+                                          DeletionEntryType type, const RetireMeta* meta) noexcept;
+
+    // ★ E-1.9-B: Event-driven drain wake primitive.    //   CoordinatorLoop (Non-RT) blocks on drainCv_ with predicate:
     //     pendingRetireCount() != 0 || residentCountAtomic() != 0
     //   Producers (enqueueWithRetry, Non-RT only) call signalDrainWakeup()
     //   after placing an entry in Q/E/T. The predicate reads the E-1.9-A atomic
@@ -485,6 +529,16 @@ private:
     convo::IEpochProvider* provider_ = nullptr;
     convo::isr::WorldRetirementReferenceObserver* referenceObserver_ = nullptr;   // ★ T1 (D98): non-owning（measurement only・D97）
     std::atomic<uint64_t> m_overflowCount_{0};
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 帰属メタの disposition カウンタ（router 所有・engine 寿命）。
+    //   恒等式: sized == stored + lostQuarantine + lostEmergency + lostTerminal + unsupportedProvider
+    std::atomic<std::uint64_t> metaSizedCount_ { 0 };
+    std::atomic<std::uint64_t> metaStoredCount_ { 0 };
+    std::atomic<std::uint64_t> metaLostQuarantineCount_ { 0 };
+    std::atomic<std::uint64_t> metaLostEmergencyCount_ { 0 };
+    std::atomic<std::uint64_t> metaLostTerminalCount_ { 0 };
+    std::atomic<std::uint64_t> metaUnsupportedProviderCount_ { 0 };
+#endif
     std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0};
 
     // ★ BUG-015/027: retire enqueue 失敗時の退避ストア（Router Policy lane 配下に単一配置）

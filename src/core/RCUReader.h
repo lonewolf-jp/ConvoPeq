@@ -114,6 +114,13 @@ public:
         return rootEnterSucceeded_;
     }
 
+    /** ★ WORK113 (2026-11-18 Owner 指示): 保護区間内にいるか（nestingDepth > 0）。
+     *  shutdown が engine 所有 reader の使用中を観測するために使う（読み取りのみ）。 */
+    [[nodiscard]] bool isInside() const noexcept
+    {
+        return convo::consumeAtomic(nestingDepth, std::memory_order_acquire) != 0;
+    }
+
     void exit() noexcept
     {
         // acq_rel: acquire → 直前の enter() release を観測；release → depth展開後値を公開。

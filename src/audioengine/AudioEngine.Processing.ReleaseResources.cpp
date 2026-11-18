@@ -370,9 +370,15 @@ void AudioEngine::releaseResources()
     juce::ignoreUnused(activeToRelease);
     juce::ignoreUnused(fadingToRelease);
 
+    // ★ WORK113 Queue/Gate/Drain: 最終 retire は drain より前に 1 回だけ実行する（v4.13 の順序）。
+    const auto finalizeCounts = m_coordinator.finalizeRetireOnce();
+
     // shutdown/release シーケンスでは明示的に deferred retire queue をドレインする。
     // 通常タイマー経路は Releasing 中に early-return するため、ここで最終回収を保証する。
     drainDeferredRetireQueues(true);
+
+    // ★ WORK113: 最終 retire は 1 回だけ実行し、計数は ~AudioEngine の checked drain で使う。
+    juce::ignoreUnused(finalizeCounts);
     shutdownRuntime_.transitionTo(convo::isr::ShutdownPhase::ReclaimComplete);
 
     // ★ C-2: EmergencyDrain -- Optional 最終手段（デフォルトはスキップ）
@@ -795,6 +801,11 @@ void AudioEngine::releaseResources()
                 + " headScanned=" + (head.valid ? juce::String(head.scanned ? 1 : 0) : juce::String("na"))
                 + " headScanAgeMs=" + ((head.valid && head.scanned)
                       ? juce::String(static_cast<juce::int64>(head.firstScanAgeMs)) : juce::String("na"))
+                + " headOwner=" + ((head.valid && head.metaAvailable)
+                      ? juce::String(static_cast<juce::int64>(head.ownerId)) : juce::String("na"))
+                + " headBytes=" + ((head.valid && head.metaAvailable)
+                      ? juce::String(static_cast<juce::int64>(head.measuredBytes)) : juce::String("na"))
+                + " headMeta=" + ((head.valid && head.metaAvailable) ? juce::String(1) : juce::String(0))
                 + " minReaderEpoch=" + juce::String(static_cast<juce::int64>(head.minReaderEpoch))
                 + " currentEpoch=" + juce::String(static_cast<juce::int64>(head.currentEpoch))
                 + " retireEpochLtMinReader=" + (head.valid

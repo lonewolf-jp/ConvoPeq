@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <thread>
 
 // B2 Stage 1 / T1 (R-01): 自プロセスのスレッド数取得（CreateToolhelp32Snapshot）。
@@ -2862,6 +2863,1580 @@ bool checkDSPHandleResolveStates()
     return ok;
 }
 
+// ★ WORK113 Queue/Gate/Drain: gate の期限判定・reader fence・隔離の契約（終端 shutdown 用）。
+bool checkDrainGateContract()
+{
+    bool ok = true;
+
+    // G1: active publisher がいる間の waitForIdle は期限で false になる。
+    convo::EpochDomain::EpochPublishGate gate;
+    if (! gate.tryEnter())
+    {
+        std::fprintf(stderr, "[DQ-G1] FAIL: tryEnter failed while open\n");
+        return false;
+    }
+    gate.close();
+    if (gate.waitForIdle(std::chrono::milliseconds(50)))
+    {
+        std::fprintf(stderr, "[DQ-G1] FAIL: waitForIdle succeeded while a publisher is active\n");
+        ok = false;
+    }
+    // G2: close 後の入場は拒否される。
+    if (gate.tryEnter())
+    {
+        std::fprintf(stderr, "[DQ-G2] FAIL: tryEnter succeeded after close\n");
+        ok = false;
+    }
+    gate.exit();
+    if (! gate.waitForIdle(std::chrono::milliseconds(50)))
+    {
+        std::fprintf(stderr, "[DQ-G3] FAIL: waitForIdle did not observe idle after exit\n");
+        ok = false;
+    }
+    if (ok)
+        std::printf("[DQ-G] publish gate: PASS (timeout while active / refuse after close / idle after exit)\n");
+    return ok;
+}
+
+bool checkReaderFenceContract()
+{
+    bool ok = true;
+    auto domain = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+
+    domain->engageShutdownReaderFence();
+    const int registered = domain->registerReaderThread("fence-probe");
+    const bool reserved = domain->reserveReaderThread(0);
+    const bool reacquired = domain->reacquireReaderSlot(0);
+
+    if (registered != -1 || reserved || reacquired)
+    {
+        std::fprintf(stderr, "[DQ-F1] FAIL: reader entry not blocked (reg=%d reserve=%d reacq=%d)\n",
+                     registered, reserved ? 1 : 0, reacquired ? 1 : 0);
+        ok = false;
+    }
+    if (domain->enterAfterFence() < 2u || domain->reacquireAfterFence() < 1u)
+    {
+        std::fprintf(stderr, "[DQ-F2] FAIL: fence counters too small (enter=%u reacq=%u)\n",
+                     (unsigned) domain->enterAfterFence(), (unsigned) domain->reacquireAfterFence());
+        ok = false;
+    }
+
+    // fence 中でも enqueue（NonRT）は継続できる（停止するのは reader の入場だけ）。
+    static int sentinel = 0;
+    auto deleter = [](void*) noexcept {};
+    if (! domain->enqueueRetire(&sentinel, deleter, domain->currentEpoch()))
+    {
+        std::fprintf(stderr, "[DQ-F3] FAIL: enqueueRetire failed under reader fence\n");
+        ok = false;
+    }
+    domain->drainAll();
+
+    if (ok)
+        std::printf("[DQ-F] reader fence: PASS (register/reserve/reacquire blocked, enqueue alive)\n");
+    return ok;
+}
+
+bool checkQuarantineContract()
+{
+    bool ok = true;
+    auto domain = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
+
+    auto local = domain->borrow();
+    if (! local)
+    {
+        std::fprintf(stderr, "[DQ-Q1] FAIL: borrow() returned null\n");
+        return false;
+    }
+
+    // ★ WORK113: 空 queue では pending の増加確認が空振りになるため、sentinel を 1 件入れる。
+    static std::atomic<int> qDeleterCalls { 0 };
+    static int qSentinel = 0;
+    auto qDeleter = [](void*) noexcept { qDeleterCalls.fetch_add(1, std::memory_order_relaxed); };
+    qDeleterCalls.store(0, std::memory_order_relaxed);
+    if (! domain->enqueueRetire(&qSentinel, qDeleter, domain->currentEpoch()))
+    {
+        std::fprintf(stderr, "[DQ-Q0] FAIL: enqueueRetire for the quarantine probe failed\n");
+        ok = false;
+    }
+
+    const auto countBefore = convo::EpochDomain::quarantineCount();
+    const auto pendingBefore = convo::EpochDomain::quarantinePendingEntries();
+    const auto pendingInQueue = static_cast<std::uint64_t>(local->sizeApprox());
+    auto* raw = local.get();
+
+    const auto first = domain->quarantineQueue(local);
+    const auto second = domain->quarantineQueue(local);
+    local.reset();
+
+    if (first != convo::EpochDomain::QuarantineResult::Registered
+        || second != convo::EpochDomain::QuarantineResult::AlreadyRegistered)
+    {
+        std::fprintf(stderr, "[DQ-Q2] FAIL: uniqueness broken (first=%d second=%d)\n",
+                     static_cast<int>(first), static_cast<int>(second));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != countBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-Q3] FAIL: quarantineCount delta != 1\n");
+        ok = false;
+    }
+    if (pendingInQueue != 1u)
+    {
+        std::fprintf(stderr, "[DQ-Q4a] FAIL: quarantine probe queue is empty (pending=%u)\n",
+                     static_cast<unsigned>(pendingInQueue));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantinePendingEntries() != pendingBefore + pendingInQueue)
+    {
+        std::fprintf(stderr, "[DQ-Q4] FAIL: pending entries not accumulated\n");
+        ok = false;
+    }
+    if (qDeleterCalls.load(std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-Q4b] FAIL: deleter ran for a quarantined entry\n");
+        ok = false;
+    }
+    // 自己参照で保持されているので、local を手放した後も queue は有効（deleter は実行しない）。
+    if (raw == nullptr || raw->sizeApprox() != static_cast<std::uint32_t>(pendingInQueue))
+    {
+        std::fprintf(stderr, "[DQ-Q5] FAIL: quarantined queue is not retained\n");
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-Q] quarantine: PASS (non-empty queue, pending +1, deleter not run, self-ref retention)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): reader admission の保留中に ~AudioEngine が
+//   reader quiescence 前提の破棄・回収を実行しないこと（fail-closed）を実 engine で検証する。
+//   testReservedNotEntered と同じ状態（slot 予約・depth 0・未 enter）を実 destructor に接続する。
+//
+//   観測: sentinel の deleter 呼出し回数と EpochDomain の隔離カウンタ。
+//     - admission 保留中: deleter 0 回・D queue は隔離（pending に sentinel を含む）
+//     - 対照（保留なし）: deleter 1 回・隔離 0（force drain が実際に解放する証拠）
+//   sentinel は将来 epoch で登録するため graceful drain の epoch-gated reclaim では回収されず、
+//   force drain（drainAll / drainAllUnsafe）だけが解放する。
+//==============================================================================
+class ShutdownHoldTestAccess
+{
+public:
+    static int reserveReaderAdmission (AudioEngine& engine, const char* tag) noexcept
+    {
+        return engine.m_epochDomain.registerReaderThread (tag);
+    }
+
+    static bool enqueueFutureEpochSentinel (AudioEngine& engine, void* ptr,
+                                            void (*deleter) (void*)) noexcept
+    {
+        auto& domain = engine.m_epochDomain;
+        return domain.enqueueRetire (ptr, deleter, domain.currentEpoch() + 1000);
+    }
+
+    static convo::EpochDomain& epochDomain (AudioEngine& engine) noexcept
+    {
+        return engine.m_epochDomain;
+    }
+
+    // ★ WORK113: shutdown の待機時間だけを差し替える（同期契約は変えない）。
+    static void setShutdownWaitTimeout (AudioEngine& engine, int ms) noexcept
+    {
+        engine.shutdownWaitTimeoutMs_.store (ms, std::memory_order_release);
+    }
+
+    // ★ WORK113: reader が実際に保持する provider（AudioEngine::getRetireRouter() の戻り値）。
+    static convo::IReaderEpochProvider& readerProvider (AudioEngine& engine) noexcept
+    {
+        return engine.getRetireRouter();
+    }
+
+    // ★ WORK113: 保持対象の実体（同一性の確認と、Q/E/T 経由の observer 生存確認に使う）。
+    static convo::isr::ISRRetireRouter* retireRouter (AudioEngine& engine) noexcept
+    {
+        return engine.m_retireRouter.get();
+    }
+
+    static convo::EpochDomain* epochDomainPtr (AudioEngine& engine) noexcept
+    {
+        return engine.epochDomainOwner_.get();
+    }
+
+    static convo::isr::WorldRetirementReferenceObserver*
+        referenceObserver (AudioEngine& engine) noexcept
+    {
+        return engine.worldRetirementReferenceOwner_.get();
+    }
+
+    // ★ WORK113: publish gate の admission をテストから取得する（PublishScope で停止させる）。
+    static convo::EpochDomain::EpochPublishGate& publishGate (convo::EpochDomain& domain) noexcept
+    {
+        return domain.publishGate_;
+    }
+
+    // ★ WORK113: 生産の checked drain（proof → capability → take → drain）を直接呼ぶ。
+    //   proof / capability の失敗経路を、engine の実装を変えずに検証するための入口。
+    static bool runCheckedDrain (AudioEngine& engine) noexcept
+    {
+        return engine.finalizeAndDrainRetireQueueNonRt();
+    }
+
+    static std::size_t deferredResident (AudioEngine& engine) noexcept
+    {
+        return engine.deferredDestroyResidentCount();
+    }
+
+    // ★ WORK113: 生産（~​AudioEngine）と同じ順序で terminal shutdown の前提を作る。
+    //   登録 close → fence → publish gate close（ここで epochAtFence が確定）→ admission 待ち。
+    //   gate を閉じてから publishEpoch() は進まないため、
+    //   後から実行される最終 retire の epoch と fence epoch が一致する。
+    //   戻り値は publish gate が idle になったか（false なら epochAtFence 未確定）。
+    static bool prepareTerminalShutdownForDrain (AudioEngine& engine) noexcept
+    {
+        engine.shutdownRuntime_.closeAdmission();
+        (void) engine.shutdownRuntime_.joinProducers();
+        engine.rebuildThreadStopped.store (true, std::memory_order_release);
+        engine.coordinatorLoopStopped.store (true, std::memory_order_release);
+        engine.m_epochDomain.closeReaderRegistration();
+        engine.m_epochDomain.engageShutdownReaderFence();
+        const bool publishersIdle =
+            engine.m_epochDomain.closePublishersAndWaitIdle (std::chrono::milliseconds (2000));
+        (void) engine.m_epochDomain.waitForReaderAdmissions (std::chrono::milliseconds (2000));
+        return publishersIdle;
+    }
+
+    static void installSnapshot (AudioEngine& engine, convo::GlobalSnapshot* snapshot) noexcept
+    {
+        engine.m_coordinator.switchImmediate (snapshot);
+    }
+
+    static convo::SnapshotCoordinator::FinalizeRetireCounts
+        finalizeCounts (AudioEngine& engine) noexcept
+    {
+        return engine.m_coordinator.finalizeRetireCounts();
+    }
+
+    // ★ WORK113: engine 所有の RCUReader（実オブジェクト）をテストから使う。
+    static convo::RCUReader& audioReader (AudioEngine& engine) noexcept
+    {
+        return engine.audioThreadRcuReader;
+    }
+    static convo::RCUReader& messageReader (AudioEngine& engine) noexcept
+    {
+        return engine.messageThreadRcuReader;
+    }
+};
+
+bool checkShutdownHoldContract()
+{
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    // (1) admission を保留したまま破棄（予約済み・depth 0・未 enter）
+    {
+        deleteCalls.store (0, std::memory_order_relaxed);
+        const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+        const auto pendingBefore = convo::EpochDomain::quarantinePendingEntries();
+
+        {
+            auto engine = std::make_unique<AudioEngine>();
+            ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+            const int slot = ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "shutdown-hold");
+            if (slot < 0)
+            {
+                std::fprintf(stderr, "[DQ-H1] FAIL: reader admission reservation failed\n");
+                return false;
+            }
+            if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+            {
+                std::fprintf(stderr, "[DQ-H1] FAIL: sentinel enqueue failed\n");
+                return false;
+            }
+            // ここで ~AudioEngine（admission 保留中 → fail-closed 経路）
+        }
+
+        if (deleteCalls.load (std::memory_order_acquire) != 0)
+        {
+            std::fprintf(stderr,
+                         "[DQ-H2] FAIL: destructive drain ran with an in-flight reader admission (deleter=%d)\n",
+                         deleteCalls.load (std::memory_order_acquire));
+            ok = false;
+        }
+        if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+        {
+            std::fprintf(stderr, "[DQ-H3] FAIL: D queue was not quarantined (count=%llu)\n",
+                         static_cast<unsigned long long> (convo::EpochDomain::quarantineCount()));
+            ok = false;
+        }
+        if (convo::EpochDomain::quarantinePendingEntries() < pendingBefore + 1u)
+        {
+            std::fprintf(stderr, "[DQ-H4] FAIL: quarantined pending entries did not include the sentinel\n");
+            ok = false;
+        }
+    }
+
+    // (2) 対照: admission を保留しない → 通常の drain で deleter が 1 回だけ実行される
+    {
+        deleteCalls.store (0, std::memory_order_relaxed);
+        const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+
+        {
+            auto engine = std::make_unique<AudioEngine>();
+            ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+            if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+            {
+                std::fprintf(stderr, "[DQ-H5] FAIL: control sentinel enqueue failed\n");
+                return false;
+            }
+        }
+
+        if (deleteCalls.load (std::memory_order_acquire) != 1)
+        {
+            std::fprintf(stderr, "[DQ-H6] FAIL: control drain did not run exactly once (deleter=%d)\n",
+                         deleteCalls.load (std::memory_order_acquire));
+            ok = false;
+        }
+        if (convo::EpochDomain::quarantineCount() != quarantineBefore)
+        {
+            std::fprintf(stderr, "[DQ-H7] FAIL: control queue must not be quarantined\n");
+            ok = false;
+        }
+    }
+
+    if (ok)
+        std::printf("[DQ-H] shutdown hold: PASS (in-flight admission -> no destructive drain, "
+                    "D queue kept; control drains once)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): admission timeout 後の Reader 再開テスト [DQ-H2]。
+//   AudioEngine を破棄しても、reader が参照する provider（EpochDomain と router）は
+//   プロセス寿命へ移される。停止していた reader が再開して入場を完了でき、fence による
+//   停止状態（再取得の拒否）も維持されていることを検証する。
+//   待機は 50 ms に差し替えて決定的に再現する（本番の同期契約は変えない）。
+//==============================================================================
+bool checkShutdownHoldReaderResume()
+{
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+
+    // ★ reader が実際に保持する provider（router）。engine 破棄後もこのポインタで操作する。
+    convo::IReaderEpochProvider* providerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    convo::EpochDomain* domainPtr = nullptr;
+    convo::isr::WorldRetirementReferenceObserver* observerPtr = nullptr;
+    std::atomic<int> slot { -1 };
+    std::atomic<bool> registered { false };
+    std::atomic<bool> engineGone { false };
+    std::atomic<bool> enteredOnProvider { false };
+    std::atomic<bool> exitedOnProvider { false };
+    std::atomic<bool> reacquireRefused { false };
+    std::atomic<bool> rcuRefusedAfterTeardown { false };
+    std::atomic<std::uint64_t> epochAtEnter { 0 };
+
+    std::thread reader;
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+        providerPtr = &ShutdownHoldTestAccess::readerProvider (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+        observerPtr = ShutdownHoldTestAccess::referenceObserver (*engine);
+
+        if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H2-1] FAIL: sentinel enqueue failed\n");
+            return false;
+        }
+
+        reader = std::thread ([&]
+        {
+            // 破棄前から provider を保持する（RCUReader は IReaderEpochProvider* を保持する）
+            convo::RCUReader rcu (*providerPtr);
+
+            // admission を provider 経由で取得し、enterReader は呼ばない（depth 0・予約のみ）
+            const int idx = providerPtr->registerReaderThreadWithTag ("hold-resume");
+            slot.store (idx, std::memory_order_release);
+            registered.store (true, std::memory_order_release);
+            if (idx < 0)
+                return;
+
+            while (! engineGone.load (std::memory_order_acquire))
+                std::this_thread::yield();
+
+            // ---- engine 破棄後: 保持された provider 経由で入場・退場する ----
+            providerPtr->enterReader (idx);
+            epochAtEnter.store (providerPtr->currentEpoch(), std::memory_order_release);
+            const auto active = providerPtr->activeReaderCount();
+            providerPtr->exitReader (idx);
+            const auto afterExit = providerPtr->activeReaderCount();
+            enteredOnProvider.store (active == 1u, std::memory_order_release);
+            exitedOnProvider.store (afterExit == 0u, std::memory_order_release);
+
+            // fence は閉じたまま: 再取得は拒否される
+            reacquireRefused.store (! providerPtr->reacquireReaderSlot (idx), std::memory_order_release);
+
+            // 実 RCUReader（破棄前から provider を保持）でも拒否され、安全に戻る
+            const bool rcuEntered = rcu.enter();
+            if (rcuEntered)
+                rcu.exit();
+            rcuRefusedAfterTeardown.store (! rcuEntered, std::memory_order_release);
+        });
+
+        while (! registered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（admission 保留 → 50 ms で待機失敗 → provider を保持）
+    }
+
+    engineGone.store (true, std::memory_order_release);
+    reader.join();
+
+    // ★ WORK113: 移譲先（プロセス寿命テーブル）に、reader が使った実体が記録されていること。
+    if (routerPtr != nullptr && domainPtr != nullptr)
+    {
+        if (! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+        {
+            std::fprintf(stderr, "[DQ-H2-9a] FAIL: abandoned substrate is not reachable from the table\n");
+            ok = false;
+        }
+    }
+    else
+    {
+        std::fprintf(stderr, "[DQ-H2-9a] FAIL: router / domain snapshot is null\n");
+        ok = false;
+    }
+
+    // ★ WORK113: 破棄後も Q/E/T の解放経路が保持された observer に到達できること。
+    //   この経路は referenceObserver_->onRelease() を呼ぶ（observer が破棄済みなら UAF）。
+    if (routerPtr != nullptr && observerPtr != nullptr)
+    {
+        const auto releaseBefore = observerPtr->referenceReleaseCount();
+
+        static int worldSentinel = 0;
+        auto worldRetryable = [](void*) noexcept -> DestroyOutcome
+        {
+            return DestroyOutcome::Destroyed;
+        };
+
+        const bool stored = routerPtr->storeWorldRetryableForTest (
+            &worldSentinel, worldRetryable, routerPtr->currentEpoch());
+        routerPtr->drainAllTerminalForTest();
+
+        const auto releaseAfter = observerPtr->referenceReleaseCount();
+        if (! stored || releaseAfter != releaseBefore + 1u)
+        {
+            std::fprintf(stderr,
+                         "[DQ-H2-9b] FAIL: retained store did not reach the retained observer "
+                         "(stored=%d before=%llu after=%llu)\n",
+                         stored ? 1 : 0,
+                         static_cast<unsigned long long>(releaseBefore),
+                         static_cast<unsigned long long>(releaseAfter));
+            ok = false;
+        }
+    }
+    else
+    {
+        std::fprintf(stderr, "[DQ-H2-9b] FAIL: router / observer snapshot is null\n");
+        ok = false;
+    }
+
+    if (! enteredOnProvider.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-2] FAIL: enterReader on the retained provider did not become active\n");
+        ok = false;
+    }
+    if (! exitedOnProvider.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-3] FAIL: exitReader on the retained provider did not return to 0\n");
+        ok = false;
+    }
+    if (epochAtEnter.load() == 0)
+    {
+        std::fprintf(stderr, "[DQ-H2-4] FAIL: provider epoch is not readable after engine teardown\n");
+        ok = false;
+    }
+    if (! reacquireRefused.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-5] FAIL: provider reacquire was not refused after the fence\n");
+        ok = false;
+    }
+    if (! rcuRefusedAfterTeardown.load())
+    {
+        std::fprintf(stderr, "[DQ-H2-6] FAIL: RCUReader enter was not refused on the retained provider\n");
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-H2-7] FAIL: deleter ran (deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H2-8] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H2-9] FAIL: reader substrate was not retained (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-H2] shutdown hold + reader resume via provider: PASS (router/domain retained across "
+                    "engine teardown, enter/exit on provider, reacquire and RCUReader enter refused, no deleter)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): publisher timeout と observer callback の競合確認。
+//   reader admission を保持したまま engine を破棄し、その間ずっと別スレッドが Q/E/T の
+//   解放経路（World 型）を回して referenceObserver_->onRelease() を呼ぶ。
+//   observer を切断しない方式では、通知回数が publisher の完了回数と一致する。
+//   切断する方式（8 本目）では、切断後の通知が失われて不一致になる。
+//==============================================================================
+bool checkShutdownHoldPublisherObserverRace()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    convo::isr::WorldRetirementReferenceObserver* observerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    std::uint64_t releaseBefore = 0;
+
+    std::atomic<bool> stop { false };
+    std::atomic<long long> completed { 0 };
+    std::thread publisher;
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        observerPtr = ShutdownHoldTestAccess::referenceObserver (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+
+        // admission を保持したまま破棄する（hold 経路 = observer を切断しない）
+        const int slot = ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "publisher-race");
+        if (slot < 0 || observerPtr == nullptr || routerPtr == nullptr)
+        {
+            std::fprintf(stderr, "[DQ-H3-1] FAIL: setup failed\n");
+            return false;
+        }
+
+        releaseBefore = observerPtr->referenceReleaseCount();
+
+        publisher = std::thread ([&]
+        {
+            static int worldProbe = 0;
+            auto worldRetryable = [](void*) noexcept -> DestroyOutcome
+            {
+                return DestroyOutcome::Destroyed;
+            };
+
+            long long n = 0;
+            while (! stop.load (std::memory_order_acquire))
+            {
+                if (routerPtr->storeWorldRetryableForTest (&worldProbe, worldRetryable,
+                                                           routerPtr->currentEpoch()))
+                {
+                    routerPtr->drainAllTerminalForTest();
+                    ++n;
+                    completed.store (n, std::memory_order_release);   // 進捗の公開
+                }
+            }
+        });
+
+        // 少なくとも 1 回は publisher を回してから破棄する
+        while (completed.load (std::memory_order_acquire) == 0 && ! stop.load())
+            std::this_thread::sleep_for (1ms);
+
+        // ここで ~AudioEngine（admission 保留 → 待機失敗 → 保持経路）
+    }
+
+    // engine 破棄後も publish を続けられること（保持された基盤の利用）を確認してから止める
+    std::this_thread::sleep_for (5ms);
+    stop.store (true, std::memory_order_release);
+    publisher.join();
+
+    const auto n = completed.load (std::memory_order_acquire);
+    const auto releaseAfter = observerPtr->referenceReleaseCount();
+
+    if (n <= 0)
+    {
+        std::fprintf(stderr, "[DQ-H3-2] FAIL: publisher did not complete any iteration\n");
+        ok = false;
+    }
+    if (releaseAfter != releaseBefore + static_cast<std::uint64_t>(n))
+    {
+        std::fprintf(stderr,
+                     "[DQ-H3-3] FAIL: observer notifications were lost or duplicated "
+                     "(completed=%lld delta=%llu)\n",
+                     n,
+                     static_cast<unsigned long long>(releaseAfter - releaseBefore));
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-H3] publisher vs observer: PASS (%lld concurrent World releases during teardown, "
+                    "notifications match, observer retained)\n", n);
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): publisher timeout 時の fail-closed [DQ-H4]。
+//   reader admission は idle のまま、publisher だけを EpochPublishGate 内に停止させ、
+//   ~AudioEngine の publisher 待機を timeout させる。基盤（domain / router / observer /
+//   telemetry）が保持され、破棄後に publisher が scope を安全に終了できることを確認する。
+//==============================================================================
+bool checkShutdownHoldPublisherTimeout()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+    const auto publisherFailuresBefore = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    const auto admissionFailuresBefore = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
+
+    convo::EpochDomain* domainPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+
+    std::atomic<bool> publisherEntered { false };
+    std::atomic<bool> releasePublisher { false };
+    std::atomic<bool> publisherCompleted { false };
+    std::atomic<std::uint32_t> gateActiveAfterExit { 999 };
+    std::thread publisher;
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+
+        if (domainPtr == nullptr || routerPtr == nullptr
+            || ! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H4-1] FAIL: setup failed\n");
+            return false;
+        }
+
+        publisher = std::thread ([&]
+        {
+            auto& gate = ShutdownHoldTestAccess::publishGate (*domainPtr);
+            {
+                convo::EpochDomain::PublishScope scope (gate);
+                publisherEntered.store (scope.entered(), std::memory_order_release);
+                if (! scope.entered())
+                    return;
+
+                while (! releasePublisher.load (std::memory_order_acquire))
+                    std::this_thread::yield();
+
+                // engine 破棄後に scope を終了する（gate_.exit() が破棄済み gate を触れば UAF）
+            }
+            gateActiveAfterExit.store (gate.active(), std::memory_order_release);
+            publisherCompleted.store (true, std::memory_order_release);
+        });
+
+        while (! publisherEntered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（publisher は gate 内 → publishers idle は timeout）
+    }
+
+    releasePublisher.store (true, std::memory_order_release);
+    publisher.join();
+
+    if (! publisherCompleted.load())
+    {
+        std::fprintf(stderr, "[DQ-H4-2] FAIL: publisher did not finish the scope after teardown\n");
+        ok = false;
+    }
+    if (gateActiveAfterExit.load() != 0u)
+    {
+        std::fprintf(stderr, "[DQ-H4-3] FAIL: gate active did not return to 0 (active=%u)\n",
+                     static_cast<unsigned>(gateActiveAfterExit.load()));
+        ok = false;
+    }
+    if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publisherFailuresBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H4-4] FAIL: publishers idle timeout was not observed (count=%d)\n",
+                     AudioEngine::shutdownPublisherIdleFailuresForTest());
+        ok = false;
+    }
+    if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() != admissionFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-H4-5] FAIL: reader admission was not idle during this test\n");
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-H4-6] FAIL: deleter ran with a stuck publisher (deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H4-7] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+    {
+        std::fprintf(stderr, "[DQ-H4-8] FAIL: substrate was not retained on the publisher timeout\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H4-9] FAIL: retained substrate count mismatch (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
+        if (reason == nullptr || juce::String(reason) != "epoch_publishers_not_idle")
+        {
+            std::fprintf(stderr, "[DQ-H4-10] FAIL: hold reason mismatch (reason=%s)\n",
+                         reason != nullptr ? reason : "(null)");
+            ok = false;
+        }
+    }
+#endif
+
+    if (ok)
+        std::printf("[DQ-H4] publisher timeout: PASS (publishers not idle, reader admissions idle, "
+                    "no destructive drain, substrate retained, publisher exits safely)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): active reader が残る場合の fail-closed [DQ-H5]。
+//   実 RCUReader を provider 経由で入場させ、保護区間内で停止させる。publisher も reader
+//   admission も idle のまま engine を破棄し、D/Q/E/T の deleter が実行されないことと、
+//   破棄後に exit() が安全に完了することを確認する。
+//   入場前（depth 0）ではなく、入場完了後（active 1）の状態を対象にする。
+//==============================================================================
+bool checkShutdownHoldActiveReader()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+    const auto publisherFailuresBefore = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    const auto admissionFailuresBefore = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
+
+    convo::IReaderEpochProvider* providerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    convo::EpochDomain* domainPtr = nullptr;
+
+    std::atomic<bool> entered { false };
+    std::atomic<bool> engineGone { false };
+    std::atomic<bool> exited { false };
+    std::atomic<bool> exitSawZero { false };
+
+    std::thread reader;
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        providerPtr = &ShutdownHoldTestAccess::readerProvider (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+
+        if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H5-1] FAIL: sentinel enqueue failed\n");
+            return false;
+        }
+
+        reader = std::thread ([&]
+        {
+            convo::RCUReader rcu (*providerPtr);
+            const bool enteredOk = rcu.enter();      // 登録 + enterReader（admission 完了・depth 1）
+            entered.store (enteredOk, std::memory_order_release);
+            if (! enteredOk)
+                return;
+
+            // 保護区間内で停止する（publisher idle・admission idle・active 1 の状態を作る）
+            while (! engineGone.load (std::memory_order_acquire))
+                std::this_thread::yield();
+
+            rcu.exit();                              // 破棄後: provider が保持されていれば安全
+            exited.store (true, std::memory_order_release);
+            exitSawZero.store (providerPtr->activeReaderCount() == 0u,
+                               std::memory_order_release);
+        });
+
+        // 入場完了と active 1 を待つ
+        while (! entered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+        while (providerPtr->activeReaderCount() != 1u)
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（publisher idle・admission idle・active 1）
+    }
+
+    engineGone.store (true, std::memory_order_release);
+    reader.join();
+
+    if (! entered.load())
+    {
+        std::fprintf(stderr, "[DQ-H5-2] FAIL: reader did not enter the protected section\n");
+        ok = false;
+    }
+    if (! exited.load())
+    {
+        std::fprintf(stderr, "[DQ-H5-3] FAIL: exit() did not complete after engine teardown\n");
+        ok = false;
+    }
+    if (! exitSawZero.load())
+    {
+        std::fprintf(stderr, "[DQ-H5-4] FAIL: activeReaderCount did not return to 0 after exit\n");
+        ok = false;
+    }
+    if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publisherFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-H5-5] FAIL: publishers were not idle during this test\n");
+        ok = false;
+    }
+    if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() != admissionFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-H5-6] FAIL: reader admissions were not idle during this test\n");
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr,
+                     "[DQ-H5-7] FAIL: deleter ran while an active reader was inside the protected section "
+                     "(deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H5-8] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+    {
+        std::fprintf(stderr, "[DQ-H5-9] FAIL: substrate was not retained with an active reader\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H5-10] FAIL: retained substrate count mismatch (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
+        if (reason == nullptr || juce::String(reason) != "active_readers_not_idle")
+        {
+            std::fprintf(stderr, "[DQ-H5-11] FAIL: hold reason mismatch (reason=%s)\n",
+                         reason != nullptr ? reason : "(null)");
+            ok = false;
+        }
+    }
+#endif
+
+    if (ok)
+        std::printf("[DQ-H5] active reader hold: PASS (publisher idle, admission idle, active reader 1, "
+                    "no destructive drain, substrate retained, exit after teardown)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): engine 所有 RCUReader の寿命 [DQ-H6]。
+//   AudioEngine が所有する audioThreadRcuReader を保護区間に入れたまま engine を破棄し、
+//   (1) destructor が使用中を観測して FAULT を数え hold 経路に入ること、
+//   (2) reader オブジェクト自身もプロセス寿命へ移され、破棄後の exit() が完了すること、
+//   (3) deleter が実行されないこと を確認する。
+//   local 生成の RCUReader ではなく、engine のメンバーである実 reader を使う。
+//==============================================================================
+bool checkShutdownHoldEngineReader()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+    const auto busyBefore = AudioEngine::shutdownEngineReaderBusyForTest();
+
+    convo::IReaderEpochProvider* providerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    convo::EpochDomain* domainPtr = nullptr;
+    convo::RCUReader* audioReaderPtr = nullptr;
+    convo::RCUReader* messageReaderPtr = nullptr;
+
+    std::atomic<bool> entered { false };
+    std::atomic<bool> engineGone { false };
+    std::atomic<bool> exited { false };
+    std::atomic<bool> exitSawZero { false };
+
+    std::thread reader;
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        providerPtr = &ShutdownHoldTestAccess::readerProvider (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+        audioReaderPtr = &ShutdownHoldTestAccess::audioReader (*engine);
+        messageReaderPtr = &ShutdownHoldTestAccess::messageReader (*engine);
+
+        if (! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H6-1] FAIL: sentinel enqueue failed\n");
+            return false;
+        }
+
+        reader = std::thread ([&]
+        {
+            // engine 所有 reader（audioThreadRcuReader）を別スレッドから入場させる
+            const bool enteredOk = audioReaderPtr->enter();
+            entered.store (enteredOk, std::memory_order_release);
+            if (! enteredOk)
+                return;
+
+            while (! engineGone.load (std::memory_order_acquire))
+                std::this_thread::yield();
+
+            // 破棄後: reader オブジェクト自体が保持されていれば自分のメンバーに触れられる
+            audioReaderPtr->exit();
+            exited.store (true, std::memory_order_release);
+            exitSawZero.store (providerPtr->activeReaderCount() == 0u, std::memory_order_release);
+        });
+
+        while (! entered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+        while (providerPtr->activeReaderCount() != 1u)
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（engine 所有 reader が保護区間内）
+    }
+
+    engineGone.store (true, std::memory_order_release);
+    reader.join();
+
+    if (! entered.load())
+    {
+        std::fprintf(stderr, "[DQ-H6-2] FAIL: engine-owned reader did not enter\n");
+        ok = false;
+    }
+    if (! exited.load())
+    {
+        std::fprintf(stderr, "[DQ-H6-3] FAIL: exit() did not complete after engine teardown\n");
+        ok = false;
+    }
+    if (! exitSawZero.load())
+    {
+        std::fprintf(stderr, "[DQ-H6-4] FAIL: activeReaderCount did not return to 0\n");
+        ok = false;
+    }
+    if (AudioEngine::shutdownEngineReaderBusyForTest() != busyBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H6-5] FAIL: destructor did not observe the engine-owned reader in use (count=%d)\n",
+                     AudioEngine::shutdownEngineReaderBusyForTest());
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-H6-6] FAIL: deleter ran with an engine-owned reader in use (deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H6-7] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (! AudioEngine::abandonedSubstrateContainsReadersForTest (routerPtr, audioReaderPtr, messageReaderPtr))
+    {
+        std::fprintf(stderr, "[DQ-H6-8] FAIL: engine-owned readers were not retained\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H6-9] FAIL: retained substrate count mismatch (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        const auto* reason = AudioEngine::lastShutdownHoldReasonForTest();
+        if (reason == nullptr || juce::String(reason) != "active_readers_not_idle")
+        {
+            std::fprintf(stderr, "[DQ-H6-10] FAIL: hold reason mismatch (reason=%s)\n",
+                         reason != nullptr ? reason : "(null)");
+            ok = false;
+        }
+    }
+#endif
+
+    if (ok)
+        std::printf("[DQ-H6] engine-owned reader hold: PASS (reader inside at teardown, busy observed, "
+                    "no destructive drain, readers retained, exit after teardown)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): Q / E / T の保持内容と所有権。
+//   hold 経路では router がプロセス寿命へ移るため、Q / E / T の resident は
+//   デストラクタ経由でも解放されない。deleter 呼出し数と resident 数で示す。
+//==============================================================================
+bool checkRetainedStoresHoldOwnership()
+{
+    bool ok = true;
+
+    static std::atomic<int> qDeletes { 0 };
+    static std::atomic<int> eDeletes { 0 };
+    static std::atomic<int> tDeletes { 0 };
+    static int qSentinel = 0;
+    static int eSentinel = 0;
+    static int tSentinel = 0;
+
+    auto qDel = [](void*) noexcept { qDeletes.fetch_add (1, std::memory_order_relaxed); };
+    auto eDel = [](void*) noexcept { eDeletes.fetch_add (1, std::memory_order_relaxed); };
+    auto tDel = [](void*) noexcept -> DestroyOutcome
+    {
+        tDeletes.fetch_add (1, std::memory_order_relaxed);
+        return DestroyOutcome::Destroyed;
+    };
+
+    qDeletes.store (0);
+    eDeletes.store (0);
+    tDeletes.store (0);
+
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    std::size_t qBefore = 0;
+    std::size_t eBefore = 0;
+    std::size_t tBefore = 0;
+    // quarantineResidentCount() は Q + EmergencyQ の合算。Q 単独は emergency を引いて求める。
+    auto qOnly = [](convo::isr::ISRRetireRouter& r)
+    {
+        return r.quarantineResidentCount() - r.emergencyQuarantineResidentCount();
+    };
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+
+        // admission を保持して hold 経路へ入れる
+        if (ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "stores") < 0)
+        {
+            std::fprintf(stderr, "[DQ-V1-1] FAIL: admission reservation failed\n");
+            return false;
+        }
+
+        qBefore = qOnly (*routerPtr);
+        eBefore = routerPtr->emergencyQuarantineResidentCount();
+        tBefore = routerPtr->terminalReclaimResidentCount();
+
+        const auto epoch = routerPtr->currentEpoch();
+        const bool qOk = routerPtr->quarantineRetire (&qSentinel, qDel, epoch,
+                                                      DeletionEntryType::World,
+                                                      "dq-v1-q", 0, 0);
+        const bool eOk = routerPtr->emergencyQuarantine (&eSentinel, eDel, epoch,
+                                                         DeletionEntryType::World,
+                                                         "dq-v1-e", 0, 0);
+        const bool tOk = routerPtr->storeWorldRetryableForTest (&tSentinel, tDel, epoch);
+
+        if (! qOk || ! eOk || ! tOk)
+        {
+            std::fprintf(stderr, "[DQ-V1-2] FAIL: store enqueue failed (q=%d e=%d t=%d)\n",
+                         qOk ? 1 : 0, eOk ? 1 : 0, tOk ? 1 : 0);
+            return false;
+        }
+        if (qOnly (*routerPtr) != qBefore + 1u
+            || routerPtr->emergencyQuarantineResidentCount() != eBefore + 1u
+            || routerPtr->terminalReclaimResidentCount() != tBefore + 1u)
+        {
+            std::fprintf(stderr,
+                         "[DQ-V1-3] FAIL: resident before teardown q=%zu e=%zu t=%zu (before %zu/%zu/%zu)\n",
+                         qOnly (*routerPtr),
+                         routerPtr->emergencyQuarantineResidentCount(),
+                         routerPtr->terminalReclaimResidentCount(),
+                         qBefore, eBefore, tBefore);
+            ok = false;
+        }
+        // ここで ~AudioEngine（hold 経路）
+    }
+
+    // 破棄後: router はプロセス寿命へ移っており、Q / E / T の resident は残る。
+    if (routerPtr == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-V1-4] FAIL: router snapshot is null\n");
+        return false;
+    }
+    if (qOnly (*routerPtr) != qBefore + 1u
+        || routerPtr->emergencyQuarantineResidentCount() != eBefore + 1u
+        || routerPtr->terminalReclaimResidentCount() != tBefore + 1u)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V1-5] FAIL: resident after teardown q=%zu e=%zu t=%zu (before %zu/%zu/%zu)\n",
+                     qOnly (*routerPtr),
+                     routerPtr->emergencyQuarantineResidentCount(),
+                     routerPtr->terminalReclaimResidentCount(),
+                     qBefore, eBefore, tBefore);
+        ok = false;
+    }
+    if (qDeletes.load() != 0 || eDeletes.load() != 0 || tDeletes.load() != 0)
+    {
+        std::fprintf(stderr, "[DQ-V1-6] FAIL: deleter ran (q=%d e=%d t=%d)\n",
+                     qDeletes.load(), eDeletes.load(), tDeletes.load());
+        ok = false;
+    }
+    if (ok)
+        std::printf("[DQ-V1] Q/E/T hold ownership: PASS (residents q/e/t +1 retained after teardown "
+                    "(q=%zu e=%zu t=%zu), deleters 0/0/0)\n",
+                    qOnly (*routerPtr),
+                    routerPtr->emergencyQuarantineResidentCount(),
+                    routerPtr->terminalReclaimResidentCount());
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): deferred DSPCore が hold 経路で
+//   再処理（再試行破棄）されないこと。DiagObjectRegistry の destroyedTotal で示す。
+//==============================================================================
+bool checkDeferredCoreNotRetried()
+{
+    bool ok = true;
+
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    juce::ignoreUnused (routerPtr);
+
+    std::uint32_t destroyedBefore = 0;
+    std::size_t deferredBefore = 0;
+    bool deferredSeen = false;
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+
+        if (ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "deferred") < 0)
+        {
+            std::fprintf(stderr, "[DQ-V2-1] FAIL: admission reservation failed\n");
+            return false;
+        }
+
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = engine->registerDSPHandleForRuntime (raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire (raw);
+            std::fprintf(stderr, "[DQ-V2-2] FAIL: handle registration failed\n");
+            return false;
+        }
+
+        {
+            auto pin = engine->tryPinDSPHandle (handle);
+            if (! static_cast<bool>(pin))
+            {
+                std::fprintf(stderr, "[DQ-V2-3] FAIL: could not pin\n");
+                return false;
+            }
+            deferredSeen = (AudioEngine::destroyDSPCoreNodeRetryable (raw)
+                            == DestroyOutcome::Deferred);
+        }
+
+        deferredBefore = ShutdownHoldTestAccess::deferredResident (*engine);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        destroyedBefore = convo::diag::registry().totals().destroyedTotal;
+#endif
+
+        if (! deferredSeen || deferredBefore != 1u)
+        {
+            std::fprintf(stderr, "[DQ-V2-4] FAIL: defer failed (seen=%d resident=%zu)\n",
+                         deferredSeen ? 1 : 0, deferredBefore);
+            // 破棄前に明示的に解放してリークを避ける
+            (void) AudioEngine::destroyDSPCoreNodeRetryable (raw);
+            return false;
+        }
+        // ここで ~AudioEngine（hold 経路 → retryDeferredDestroys は実行されない）
+    }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const auto destroyedAfter = convo::diag::registry().totals().destroyedTotal;
+    if (destroyedAfter != destroyedBefore)
+    {
+        std::fprintf(stderr, "[DQ-V2-5] FAIL: deferred core was destroyed in the hold path (%u -> %u)\n",
+                     static_cast<unsigned>(destroyedBefore), static_cast<unsigned>(destroyedAfter));
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
+                    "destroyedTotal unchanged %u, retry not executed)\n",
+                    deferredBefore, static_cast<unsigned>(destroyedAfter));
+#else
+    // DIAG OFF では DiagObjectRegistry が存在しないため、resident の不変だけを確認する。
+    if (ok)
+        std::printf("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
+                    "destroyedTotal unavailable with DIAG OFF, retry not executed)\n",
+                    deferredBefore);
+#endif
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): proof 不成立時の drain end-to-end。
+//   producer 未 join（bare engine）のため quiescence proof は発行できない。
+//   この検証が見るのは、proof の取得が不成立して checked drain が
+//   **capability 生成より前に停止する経路** である。
+//   tryMakeDrainCapability() の !proof.valid() 分岐を実行したわけではない（Owner 2026-11-18 指摘）。
+//==============================================================================
+bool checkProofUnavailableKeepsOwnership()
+{
+    bool ok = true;
+
+    static std::atomic<int> deletes { 0 };
+    static int sentinel = 0;
+    auto del = [](void*) noexcept { deletes.fetch_add (1, std::memory_order_relaxed); };
+    deletes.store (0);
+
+    auto engine = std::make_unique<AudioEngine>();
+    auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+    if (domainPtr == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-V3-1] FAIL: domain is null\n");
+        return false;
+    }
+
+    if (! domainPtr->enqueueRetire (&sentinel, del, domainPtr->currentEpoch() + 1000))
+    {
+        std::fprintf(stderr, "[DQ-V3-2] FAIL: sentinel enqueue failed\n");
+        return false;
+    }
+
+    const auto pendingBefore = domainPtr->pendingRetireCount();
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const bool queueOwnedBefore = domainPtr->queueAvailable();
+
+    // proof は producer join 未完了のため成立しない（bare engine: rebuildThreadStopped=false）
+    const bool ran = ShutdownHoldTestAccess::runCheckedDrain (*engine);
+
+    if (ran)
+    {
+        std::fprintf(stderr, "[DQ-V3-3] FAIL: checked drain succeeded without a valid proof\n");
+        ok = false;
+    }
+    if (deletes.load() != 0)
+    {
+        std::fprintf(stderr, "[DQ-V3-4] FAIL: deleter ran on proof failure (deleter=%d)\n",
+                     deletes.load());
+        ok = false;
+    }
+    if (domainPtr->pendingRetireCount() != pendingBefore)
+    {
+        std::fprintf(stderr, "[DQ-V3-5] FAIL: queue content changed (pending=%u before=%u)\n",
+                     static_cast<unsigned>(domainPtr->pendingRetireCount()),
+                     static_cast<unsigned>(pendingBefore));
+        ok = false;
+    }
+    if (! domainPtr->queueAvailable() || ! queueOwnedBefore)
+    {
+        std::fprintf(stderr, "[DQ-V3-6] FAIL: queue ownership was transferred\n");
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore)
+    {
+        std::fprintf(stderr, "[DQ-V3-7] FAIL: queue was quarantined on proof failure\n");
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-V3] proof unavailable: PASS (checked drain stops before capability "
+                    "creation, queue retained, deleter 0)\n");
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位 4 補強版): capability は拒否されず発行される。
+//   D を容量 4096 まで、Q と E を各 512 まで埋め、最終 retire の 1 件だけを
+//   D に入れられなくする（D 満杯）→ fallback で T が受領する。
+//   受領は T の**累積 store 回数**で確認する（epoch-safe な entry は T が即時破棄するため、
+//   resident の増減に依存しない）。
+//   並せて、drain が実行されるときに走る deleter（D の各 entry）と、
+//   走ってはいけない deleter（Q / E の entry）を回数で区別する。
+//==============================================================================
+bool checkCapabilityIssuedWithFullFallback()
+{
+    bool ok = true;
+
+    static std::atomic<int> dDeletes { 0 };
+    static std::atomic<int> qDeletes { 0 };
+    static std::atomic<int> eDeletes { 0 };
+    dDeletes.store (0);
+    qDeletes.store (0);
+    eDeletes.store (0);
+
+    auto dNoop = [](void*) noexcept { dDeletes.fetch_add (1, std::memory_order_relaxed); };
+    auto qNoop = [](void*) noexcept { qDeletes.fetch_add (1, std::memory_order_relaxed); };
+    auto eNoop = [](void*) noexcept { eDeletes.fetch_add (1, std::memory_order_relaxed); };
+
+    // ★ fixture 寿命（Owner 指摘 2026-11-18）: sentinel の storage を engine より先に宣言する。
+    //   ローカル変数は逆順で破棄されるため、この順序なら ~AudioEngine() が Q / E を処理する
+    //   時点で sentinel はまだ生存している（deleter へ渡るポインタが有効である）。
+    //   1) D / Q / E を容量まで埋める（D を満杯にして最終 retire の移送を失敗させる）
+    constexpr int kDQueueCapacity = 4096;
+    constexpr int kQCapacity = 512;
+    constexpr int kECapacity = 512;
+    std::vector<int> dSentinels (kDQueueCapacity);
+    std::vector<int> qSentinels (kQCapacity);
+    std::vector<int> eSentinels (kECapacity);
+
+    auto engine = std::make_unique<AudioEngine>();
+    auto* routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+    auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+    if (routerPtr == nullptr || domainPtr == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-V4-1] FAIL: engine substrate is null\n");
+        return false;
+    }
+
+    int filledD = 0;
+    for (int i = 0; i < kDQueueCapacity; ++i)
+    {
+        if (! domainPtr->enqueueRetire (&dSentinels[static_cast<std::size_t>(i)], dNoop,
+                                        domainPtr->currentEpoch() + 100000))
+            break;
+        ++filledD;
+    }
+    int filledQ = 0;
+    for (int i = 0; i < kQCapacity; ++i)
+    {
+        if (! routerPtr->quarantineRetire (&qSentinels[static_cast<std::size_t>(i)], qNoop,
+                                           routerPtr->currentEpoch(),
+                                           DeletionEntryType::Generic, "dq-v4-fill-q", 0, 0))
+            break;
+        ++filledQ;
+    }
+    int filledE = 0;
+    for (int i = 0; i < kECapacity; ++i)
+    {
+        if (! routerPtr->emergencyQuarantine (&eSentinels[static_cast<std::size_t>(i)], eNoop,
+                                              routerPtr->currentEpoch(),
+                                              DeletionEntryType::Generic, "dq-v4-fill-e", 0, 0))
+            break;
+        ++filledE;
+    }
+
+    const std::size_t qResident =
+        routerPtr->quarantineResidentCount() - routerPtr->emergencyQuarantineResidentCount();
+    const std::size_t eResident = routerPtr->emergencyQuarantineResidentCount();
+    const std::uint64_t tStoreBefore = routerPtr->terminalStoreCount();
+    const std::size_t tResidentBefore = routerPtr->terminalReclaimResidentCount();
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+
+    // 2) 生産と同じ順序で terminal shutdown の前提を作る（fence → gate close + epochAtFence）
+    const bool publishersIdle = ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine);
+
+    // 3) 最終 retire の対象を 1 件だけ用意する
+    auto* snapshot = convo::SnapshotFactory::create (convo::SnapshotParams{});
+    if (snapshot == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-V4-2] FAIL: snapshot creation failed\n");
+        return false;
+    }
+    ShutdownHoldTestAccess::installSnapshot (*engine, snapshot);
+
+    // 4) 生産の checked drain（proof → capability → take → drain）
+    const bool ran = ShutdownHoldTestAccess::runCheckedDrain (*engine);
+    const auto counts = ShutdownHoldTestAccess::finalizeCounts (*engine);
+    const std::uint64_t tStoreAfter = routerPtr->terminalStoreCount();
+    const std::size_t tResidentAfter = routerPtr->terminalReclaimResidentCount();
+    // ★ Q / E の resident は checked drain の前後で不変であること（entry が別の場所へ
+    //   移されていないこと）を直接 assert するため、drain 直後の値を取る。
+    const std::size_t qResidentAfter =
+        routerPtr->quarantineResidentCount() - routerPtr->emergencyQuarantineResidentCount();
+    const std::size_t eResidentAfter = routerPtr->emergencyQuarantineResidentCount();
+    const auto pendingAfter = domainPtr->pendingRetireCount();
+    const auto quarantineAfter = convo::EpochDomain::quarantineCount();
+    const auto remainingAfter = domainPtr->drainRemainingAfter();
+
+    // 引き取り後の queue は enqueue できない（takeForShutdown 済みの観測）
+    static int probeSentinel = 0;
+    const bool queueUsableAfter =
+        domainPtr->enqueueRetire (&probeSentinel, dNoop, domainPtr->currentEpoch() + 100000);
+
+    // 前提の実測（満杯到達と gate 停止）
+    if (filledD != kDQueueCapacity)
+    {
+        std::fprintf(stderr, "[DQ-V4-3] FAIL: D did not reach capacity (filled=%d capacity=%d)\n",
+                     filledD, kDQueueCapacity);
+        ok = false;
+    }
+    if (filledQ != kQCapacity || qResident != kQCapacity)
+    {
+        std::fprintf(stderr, "[DQ-V4-4] FAIL: Q did not reach capacity (filled=%d resident=%zu)\n",
+                     filledQ, qResident);
+        ok = false;
+    }
+    if (filledE != kECapacity || eResident != kECapacity)
+    {
+        std::fprintf(stderr, "[DQ-V4-5] FAIL: E did not reach capacity (filled=%d resident=%zu)\n",
+                     filledE, eResident);
+        ok = false;
+    }
+    if (! publishersIdle)
+    {
+        std::fprintf(stderr, "[DQ-V4-6] FAIL: publish gate did not go idle (epochAtFence unsettled)\n");
+        ok = false;
+    }
+
+    // 1. checked drain が完了した（capability は発行された）
+    if (! ran)
+    {
+        std::fprintf(stderr, "[DQ-V4-7] FAIL: checked drain did not complete (capability refused)\n");
+        ok = false;
+    }
+    if (remainingAfter != 0)
+    {
+        std::fprintf(stderr, "[DQ-V4-8] FAIL: drain left entries behind (remaining=%llu)\n",
+                     static_cast<unsigned long long>(remainingAfter));
+        ok = false;
+    }
+    if (pendingAfter != 0 || queueUsableAfter)
+    {
+        std::fprintf(stderr, "[DQ-V4-9] FAIL: queue ownership was not taken (pending=%u usable=%d)\n",
+                     static_cast<unsigned>(pendingAfter), queueUsableAfter ? 1 : 0);
+        ok = false;
+    }
+    if (quarantineAfter != quarantineBefore)
+    {
+        std::fprintf(stderr, "[DQ-V4-10] FAIL: queue was quarantined (count=%llu -> %llu)\n",
+                     static_cast<unsigned long long>(quarantineBefore),
+                     static_cast<unsigned long long>(quarantineAfter));
+        ok = false;
+    }
+
+    // 4. T が受領した（累積 store 回数で +1）
+    if (tStoreAfter != tStoreBefore + 1)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-11] FAIL: terminal store count did not increase by exactly 1 "
+                     "(%llu -> %llu)\n",
+                     static_cast<unsigned long long>(tStoreBefore),
+                     static_cast<unsigned long long>(tStoreAfter));
+        ok = false;
+    }
+    // 4b. Q / E の resident は drain 前後で不変（entry は移動も解放もされていない）
+    if (qResidentAfter != kQCapacity)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-17] FAIL: Q resident changed across the drain (%zu -> %zu)\n",
+                     qResident, qResidentAfter);
+        ok = false;
+    }
+    if (eResidentAfter != kECapacity)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-18] FAIL: E resident changed across the drain (%zu -> %zu)\n",
+                     eResident, eResidentAfter);
+        ok = false;
+    }
+
+    // 5. requests == denqueues + fallbackTransfers（D 満杯で denqueue 失敗、fallback 成立）
+    const auto transfers = counts.denqueues + counts.fallbackTransfers;
+    if (counts.calls != 1 || counts.requests != 1)
+    {
+        std::fprintf(stderr, "[DQ-V4-12] FAIL: finalize counts invalid (calls=%llu requests=%llu)\n",
+                     static_cast<unsigned long long>(counts.calls),
+                     static_cast<unsigned long long>(counts.requests));
+        ok = false;
+    }
+    if (counts.denqueues != 0 || counts.fallbackTransfers != 1)
+    {
+        std::fprintf(stderr, "[DQ-V4-13] FAIL: D was not full (denq=%llu fallback=%llu)\n",
+                     static_cast<unsigned long long>(counts.denqueues),
+                     static_cast<unsigned long long>(counts.fallbackTransfers));
+        ok = false;
+    }
+    if (counts.requests != transfers)
+    {
+        std::fprintf(stderr,
+                     "[DQ-V4-14] FAIL: requests != denqueues + fallbackTransfers "
+                     "(requests=%llu transfers=%llu)\n",
+                     static_cast<unsigned long long>(counts.requests),
+                     static_cast<unsigned long long>(transfers));
+        ok = false;
+    }
+
+    // 6. deleter の区別: D は drain が実行し、Q / E は実行されない
+    if (dDeletes.load() != filledD)
+    {
+        std::fprintf(stderr, "[DQ-V4-15] FAIL: D deleter count %d != filled %d\n",
+                     dDeletes.load(), filledD);
+        ok = false;
+    }
+    if (qDeletes.load() != 0 || eDeletes.load() != 0)
+    {
+        std::fprintf(stderr, "[DQ-V4-16] FAIL: Q/E deleter ran unexpectedly (q=%d e=%d)\n",
+                     qDeletes.load(), eDeletes.load());
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-V4] capability issued: PASS (D=%d/Q=%d/E=%d full, checked drain completed, "
+                    "requests=%llu == denqueues+fallback, T store +1 (%zu -> %zu resident), "
+                    "Q/E resident unchanged (%d/%d), D deleters=%d, Q/E deleters=0)\n",
+                    filledD, filledQ, filledE,
+                    static_cast<unsigned long long>(counts.requests),
+                    tResidentBefore, tResidentAfter,
+                    static_cast<int>(qResidentAfter), static_cast<int>(eResidentAfter),
+                    dDeletes.load());
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -2986,6 +4561,71 @@ int runV11EngineRetireProtectionTests()
     if (!checkDSPHandleResolveStates())
     {
         std::fprintf(stderr, "FAIL: checkDSPHandleResolveStates (P2-1)\n");
+        hdOk = false;
+    }
+    if (!checkDrainGateContract())
+    {
+        std::fprintf(stderr, "FAIL: checkDrainGateContract (DQ-G)\n");
+        hdOk = false;
+    }
+    if (!checkReaderFenceContract())
+    {
+        std::fprintf(stderr, "FAIL: checkReaderFenceContract (DQ-F)\n");
+        hdOk = false;
+    }
+    if (!checkQuarantineContract())
+    {
+        std::fprintf(stderr, "FAIL: checkQuarantineContract (DQ-Q)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldContract())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldContract (DQ-H)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldReaderResume())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldReaderResume (DQ-H2)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldPublisherObserverRace())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldPublisherObserverRace (DQ-H3)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldPublisherTimeout())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldPublisherTimeout (DQ-H4)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldActiveReader())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldActiveReader (DQ-H5)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldEngineReader())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldEngineReader (DQ-H6)\n");
+        hdOk = false;
+    }
+    if (!checkRetainedStoresHoldOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkRetainedStoresHoldOwnership (DQ-V1)\n");
+        hdOk = false;
+    }
+    if (!checkDeferredCoreNotRetried())
+    {
+        std::fprintf(stderr, "FAIL: checkDeferredCoreNotRetried (DQ-V2)\n");
+        hdOk = false;
+    }
+    if (!checkProofUnavailableKeepsOwnership())
+    {
+        std::fprintf(stderr, "FAIL: checkProofUnavailableKeepsOwnership (DQ-V3)\n");
+        hdOk = false;
+    }
+    if (!checkCapabilityIssuedWithFullFallback())
+    {
+        std::fprintf(stderr, "FAIL: checkCapabilityIssuedWithFullFallback (DQ-V4)\n");
         hdOk = false;
     }
     if (!hdOk)

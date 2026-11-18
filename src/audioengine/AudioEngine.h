@@ -79,6 +79,7 @@ struct CoeffSet {
 #include "RuntimeBuildTypes.h"
 #include "RuntimeTransition.h"
 #include "AtomicAccess.h"
+#include "DiagObjectRegistry.h"   // ★ WORK113 変更1: DIAG 専用オブジェクト識別レジストリ
 #include "CrossfadeRuntime.h"
 #include "core/Types.h"
 #include "core/SnapshotCoordinator.h"
@@ -234,6 +235,13 @@ struct RuntimeState : convo::isr::SealedObject<RuntimeState>
         int oversamplingFactor = 1;
         double sampleRate = 48000.0;
         int baseLatencySamples = 0;
+
+        // ★ WORK113 変更2 (DIAG): 公開 world へ運ぶ診断値（provenance 専用）。
+        //   実行時の DSP 判断・互換性判定・hash・buildInputHash には使わない。
+        int irLength = 0;
+        uint64_t convolverFingerprint = 0;
+        uint64_t diagRequestId = 0;
+        bool diagProjectionSealed = false;
     } dspProjection;
 
     // AuthorityClass::Diagnostic (projection freshness metadata)
@@ -656,6 +664,8 @@ public:
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         static std::atomic<uint32_t> liveCount;
+        // ★ WORK113 変更1: UUID 枯渇フラグ（DIAG 専用・プロセス寿命）。
+        [[nodiscard]] static bool uuidExhausted() noexcept;
 #endif
 
         struct DCBlockerRuntimeState
@@ -884,6 +894,8 @@ public:
         const uint32_t oldLive = liveCount.fetch_sub(1, std::memory_order_relaxed);
         (void)oldLive;
         jassert(oldLive > 0);
+        // ★ WORK113 変更1: 識別レジストリへ物理破棄を通知（NonRT・全破棄経路を覆う）。
+        convo::diag::registry().coreDestroyed(runtimeUuid);
 #endif
         // Explicitly clean up convolver resources to ensure no WDL memory is leaked,
         // especially for instances that are destroyed from the trash bin.
@@ -1132,6 +1144,10 @@ public:
     private:
         static std::atomic<std::uint64_t> runtimeUuidCounterStorage_;
         static std::atomic<std::uint64_t>& runtimeUuidCounter() noexcept;
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        // ★ WORK113 変更1: 採番の枯渇を示すフラグ（カウンタと同じ static storage）。
+        static std::atomic<bool> uuidExhaustedStorage_;
+#endif
         [[nodiscard]] static std::uint64_t reserveNextRuntimeUuid() noexcept;
         static double musicalSoftClip(double x, double threshold, double knee, double asymmetry) noexcept;
     };
@@ -1425,6 +1441,8 @@ public:
     void requestEqPreset (int presetIndex);
     void requestEqPresetFromText(const juce::File& file);
     void requestConvolverPreset (const juce::File& irFile);
+    // ★ WORK113 変更2 (DIAG): 診断 step の ID を付けて IR を読み込む。
+    void requestConvolverPreset (const juce::File& irFile, std::uint64_t diagRequestId);
 
     void requestLoadState (const juce::ValueTree& state);
     [[nodiscard]] juce::ValueTree getCurrentState() const;
@@ -1529,6 +1547,48 @@ public:
     void setNoiseShaperType(NoiseShaperType type);
     [[nodiscard]] NoiseShaperType getNoiseShaperType() const;
     void requestRebuild(convo::RebuildKind kind) noexcept;
+
+    // ★ WORK113 変更2 (DIAG): 診断 rebuild の受理結果。
+    enum class RebuildDispatchOutcome : std::uint8_t
+    {
+        Accepted = 0,
+        SuppressedWrongThread,
+        ShutdownInProgress,
+        PressureRejected,
+        AdmissionClosed,
+        InvalidSrBs,
+        DuplicateSuppressed,
+        DiagSlotBusy,
+        StaleAdmission,
+        DiagWindow,
+        NotQuiescent,
+        NoCommitRecord,
+        UpgradeIncomplete
+    };
+
+    // ★ WORK113 変更2 (DIAG): 静止確認のスナップショット（A/B 比較用）。
+    struct DiagConditionsSnapshot
+    {
+        bool hasPendingTask = true;
+        bool workerBusy = true;
+        bool swapPending = true;
+        std::uint64_t publicationResidency = 1;
+        bool deferredAdmission = true;
+        bool recoveryPending = true;
+        std::uint64_t liveRecoveryObligations = 1;
+        bool recoveryAdmissionPending = true;
+        bool publishRetryReady = true;
+        bool pendingDiagTask = true;
+        std::uint64_t phaseTick = 0;
+        std::uint64_t workerActivitySeq = 0;
+    };
+
+    void diagSnapshotConditions(DiagConditionsSnapshot& out) noexcept;
+    [[nodiscard]] static bool diagConditionsMet(const DiagConditionsSnapshot& s) noexcept;
+    [[nodiscard]] RebuildDispatchOutcome beginDiagWindow() noexcept;
+    void endDiagWindow() noexcept;
+    [[nodiscard]] RebuildDispatchOutcome requestRebuildForDiag(std::uint64_t diagRequestId) noexcept;
+    [[nodiscard]] std::timed_mutex& diagPhaseMutex() noexcept { return diagPhaseMutex_; }
     void requestStructuredRebuildIntent(convo::RebuildKind kind) noexcept
     {
         submitRebuildIntent(kind,
@@ -2474,6 +2534,12 @@ public:
         bool irFinalized = false;
         std::uint64_t structuralHash = 0;
         double fadeTimeSec = 0.0;
+
+        // ★ WORK113 変更2 (DIAG): 公開 world から値コピーする診断値。
+        int irLength = 0;
+        std::uint64_t convolverFingerprint = 0;
+        std::uint64_t diagRequestId = 0;
+        bool diagProjectionSealed = false;
     };
 
     [[nodiscard]] inline RuntimeActiveSnapshot getActiveRuntimeSnapshot() const noexcept
@@ -2498,6 +2564,12 @@ public:
         out.irLoaded = world->dspProjection.irLoaded;
         out.irFinalized = world->dspProjection.irFinalized;
         out.structuralHash = world->dspProjection.structuralHash;
+
+        // ★ WORK113 変更2 (DIAG)
+        out.irLength = world->dspProjection.irLength;
+        out.convolverFingerprint = world->dspProjection.convolverFingerprint;
+        out.diagRequestId = world->dspProjection.diagRequestId;
+        out.diagProjectionSealed = world->dspProjection.diagProjectionSealed;
         out.fadeTimeSec = world->overlap.fadeTimeSec;
         return out;
     }
@@ -2885,6 +2957,11 @@ public:
     // such as IR resampling. It MUST only be called from the message thread.
     // prepareToPlay() routes to the message thread before invoking this helper.
     void requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute = false);
+    // ★ WORK113 変更2 (DIAG): 受理点を 1 箇所に集約した実装。diagRequestId != 0 は診断専用スロットへ積む。
+    [[nodiscard]] RebuildDispatchOutcome requestRebuildImpl(double sampleRate, int samplesPerBlock,
+                                                            bool forceMustExecute,
+                                                            std::uint64_t admissionEpoch,
+                                                            std::uint64_t diagRequestId) noexcept;
     // [P1 Phase1-B] PublicationIntent/PublicationLog 完全削除。
     // 直接 commitNewDSP を呼び出す単一スロットの pending commit を使用。
     void enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP, int generation, const convo::RuntimeBuildSnapshot& sealedSnapshot, const convo::BuildAnalysis& buildAnalysis = {}, const convo::OversamplingResult& oversamplingResult = {}, const convo::BuildDiagnostics& buildDiagnostics = {}, std::uint64_t recoveryObligationId = 0);
@@ -3014,6 +3091,19 @@ public:
     void releaseResourcesForReconfigure() noexcept;
     std::thread rebuildThread;
     std::mutex rebuildMutex;
+
+    // ★ WORK113 変更2 (DIAG): 診断 rebuild の同期と状態（Message Thread / CoordinatorLoop 専用）。
+    std::timed_mutex diagPhaseMutex_;
+    std::atomic<std::uint64_t> coordinatorPhaseTick_ { 0 };
+    std::atomic<std::uint64_t> rebuildWorkerActivitySeq_ { 0 };
+    std::atomic<bool> rebuildWorkerBusy_ { false };
+    std::atomic<std::uint64_t> pendingStructuralAdmission_ { 0 };
+    std::atomic<std::uint32_t> nextAdmissionSeq_ { 1 };
+    std::atomic<bool> ticketSeqExhausted_ { false };
+    std::atomic<std::uint64_t> diagWindowEpoch_ { 0 };
+    std::atomic<bool> diagWindowEpochExhausted_ { false };
+    std::atomic<bool> diagWindowActive_ { false };
+    std::atomic<std::uint32_t> diagBudgetLogCount_ { 0 };
     // ★ STG-11-D15-1: OwnerChannel producer serialization (NonRT only).
     //   OwnerChannel is SPSC by design ("Single Producer"), but three NonRT threads
     //   reach worldAuthority_.ownerChannel().enqueue through the single facade
@@ -3083,6 +3173,10 @@ public:
     };
     RebuildTask pendingTask;
     RebuildTask lastQueuedTaskSignature;
+
+    // ★ WORK113 変更2 (DIAG): 診断専用スロット（rebuildMutex 下）。通常要求は触れない。
+    RebuildTask pendingDiagTask;
+    bool hasPendingDiagTask = false;
 
     // --- Adaptiveノイズシェイパー学習用メンバー ---
     struct AdaptiveCoeffBankSlot
@@ -3992,6 +4086,15 @@ public:
             if (world == nullptr)
                 return;
 
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            // ★ WORK113 変更1: world 退役は識別子だけを残す（サイズ帰属は DSPCore 側で行う）。
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[WORLD_RETIRE] gen=%llu runtimeUuid=%llu type=World ptr=%p",
+                (unsigned long long) world->generation,
+                (unsigned long long) world->topology.runtimeUuid,
+                (void*) world));
+#endif
+
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
@@ -4091,6 +4194,11 @@ private:
 
     // テスト専用 Friend Test Access（本番 API は増やさない。Authority 境界を汚染しない）
     friend class DeferredPublicationTestAccess;
+    // ★ WORK113: terminal shutdown の fail-closed 経路（reader admission 保留中）を実 dtor で
+    //   検証するためのテスト専用アクセス。本体は
+    //   src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp に定義する。
+    //   Production ビルドでは宣言のみで、追加メンバも評価分岐も存在しない。
+    friend class ShutdownHoldTestAccess;
     // ★ SR-03 T-SR03: clamp / 単一 publish 関口検証用テストシーム。
     //   本体は src/tests/AudioEngineHarness/ConvolverStateRoundTripTests.cpp に定義。
     //   Production ビルドでは宣言ごと非存在・バイナリ無変更。
@@ -5006,6 +5114,228 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
         handle, dspHandleRuntime_, *m_retireRouter, std::move(*permit));
 }
 
+// ★ WORK113 Queue/Gate/Drain（v4.13 §3/§4）: shutdown の最終 drain。
+//   順序: reader fence → publish gate 閉鎖 + 5 秒待ち → 最終 retire → proof → capability
+//         → queue 取り出し → checked drain → 結果（非成功は隔離して deleter を実行しない）。
+//   NonRT（Message Thread）専用。
+inline bool finalizeAndDrainRetireQueueNonRt() noexcept
+{
+    // 前提: 呼び出し側が reader fence と publish gate を閉じ、最終 retire と
+    //       D / Q / E / T の drain を済ませていること（terminal shutdown の停止状態は解除しない）。
+    // 静止条件: active reader 0・admission（予約〜enter）0・admission 中の slot 0。
+    //   admission は fence 閉鎖後に開始できないため、ここが 0 なら以後の入場は起きない。
+    if (m_epochDomain.activeReaderCount() != 0
+        || m_epochDomain.readerAdmissionsActive() != 0
+        || m_epochDomain.admissionPendingSlots() != 0)
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog("[DRAIN_DIAG] checkedDrain skipped=readers_not_quiescent");
+#endif
+        return false;
+    }
+
+    // 最終 retire は 1 回だけ（drain より前に済んでいること）。未実行ならここで 1 回だけ実行する。
+    auto counts = m_coordinator.finalizeRetireCounts();
+    if (counts.calls == 0)
+        counts = m_coordinator.finalizeRetireOnce();
+
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
+    obs.admissionReservationsZero = (shutdownRuntime_.outstanding() == 0);
+    obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
+                          && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
+    obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
+    obs.activeReadersZero = (m_retireRouter != nullptr)
+        ? (m_retireRouter->activeReaderCount() == 0) : true;
+    obs.epochEvidence = captureEpochQuiescenceEvidence();
+    obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();
+    obs.epochGeneration = obs.epochEvidence.epochGeneration;
+    obs.readerRegistrationGeneration = obs.epochEvidence.readerRegistrationGeneration;
+
+    auto proof = shutdownRuntime_.tryMakeQuiescenceProof(obs);
+    if (! proof.has_value() || ! proof->valid())
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog("[FAULT] shutdown_proof_unavailable (checked drain skipped)");
+#endif
+        return false;
+    }
+
+    auto cap = shutdownRuntime_.tryMakeDrainCapability(
+        *proof, counts.calls, counts.requests, counts.denqueues + counts.fallbackTransfers);
+    if (! cap.has_value())
+    {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[FAULT] drain_capability_unavailable calls=%llu requests=%llu transfers=%llu",
+            static_cast<unsigned long long>(counts.calls),
+            static_cast<unsigned long long>(counts.requests),
+            static_cast<unsigned long long>(counts.denqueues + counts.fallbackTransfers)));
+#endif
+        return false;
+    }
+
+    auto local = m_epochDomain.takeForShutdown();
+    if (! local)
+        return true;   // 既に取り出し済み（二重 shutdown 防御）
+
+    const auto result = m_epochDomain.drainQueue(*local, std::move(*cap));
+    const bool completed = (result == convo::EpochDomain::DrainResult::Completed);
+
+    if (! completed)
+    {
+        // deleter を実行せず、プロセス寿命の隔離リストへ移す（UAF を選ばない）。
+        (void) m_epochDomain.quarantineQueue(local);
+    }
+    local.reset();
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    juce::Logger::writeToLog(juce::String::formatted(
+        "[DRAIN_DIAG] checkedDrain=%d completed=%d finalizeCalls=%llu requests=%llu "
+        "denqueues=%llu fallback=%llu remaining=%llu readerFailures=%llu "
+        "readerAdmissions=%u admissionPending=%u "
+        "quarantineCount=%llu quarantinePending=%llu "
+        "pendingAfter=%u qResident=%zu eResident=%zu tResident=%zu",
+        static_cast<int>(result), completed ? 1 : 0,
+        static_cast<unsigned long long>(counts.calls),
+        static_cast<unsigned long long>(counts.requests),
+        static_cast<unsigned long long>(counts.denqueues),
+        static_cast<unsigned long long>(counts.fallbackTransfers),
+        static_cast<unsigned long long>(m_epochDomain.drainRemainingAfter()),
+        static_cast<unsigned long long>(m_epochDomain.drainReaderFailures()),
+        static_cast<unsigned>(m_epochDomain.readerAdmissionsActive()),
+        static_cast<unsigned>(m_epochDomain.admissionPendingSlots()),
+        static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
+        static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries()),
+        static_cast<unsigned>((m_retireRouter != nullptr) ? m_retireRouter->pendingRetireCount() : 0u),
+        static_cast<std::size_t>((m_retireRouter != nullptr) ? m_retireRouter->quarantineResidentCount() : 0u),
+        static_cast<std::size_t>((m_retireRouter != nullptr) ? m_retireRouter->emergencyQuarantineResidentCount() : 0u),
+        static_cast<std::size_t>((m_retireRouter != nullptr) ? m_retireRouter->terminalReclaimResidentCount() : 0u)));
+
+    if (! completed)
+    {
+        auto evidence = juce::File::getCurrentWorkingDirectory()
+                            .getChildFile("evidence/queue_quarantine.json");
+        evidence.getParentDirectory().createDirectory();
+        juce::String js;
+        js << "{\n  \"schema\": \"queue_quarantine_v1\",\n"
+           << "  \"drainResult\": " << static_cast<int>(result) << ",\n"
+           << "  \"quarantineCount\": " << static_cast<juce::int64>(convo::EpochDomain::quarantineCount()) << ",\n"
+           << "  \"pendingEntries\": " << static_cast<juce::int64>(convo::EpochDomain::quarantinePendingEntries()) << ",\n"
+           << "  \"retainedBytes\": " << static_cast<juce::int64>(convo::EpochDomain::quarantineRetainedBytes()) << "\n}\n";
+        evidence.replaceWithText(js);
+    }
+#endif
+
+    return completed;
+}
+
+// ★ WORK113 (2026-11-18 Owner 指示): admission timeout 時の reader 基盤の寿命延長。
+//   reader が参照する provider（ISRRetireRouter）と admission の所有者（EpochDomain）を
+//   プロセス寿命へ移す。~AudioEngine は残りのメンバーを破棄するが、停止中の reader が再開して
+//   provider を触っても破棄済みメモリにはならない（deleter も実行しない）。
+//   破棄される engine メンバー（reference observer）への参照は先に切る。
+//   NonRT（Message Thread）専用。
+inline void abandonReaderSubstrateForShutdownNonRt() noexcept
+{
+    // ★ observer ポインタは書き換えない。参照はコンストラクタで 1 回だけ設定し、以後は
+    //   読み取り専用である。切断すると、publisher が idle でない場合に残る書き込み経路
+    //   （Q / E / T / D の drain・reclaim）と競合する。指す先を生かすことで競合を作らない。
+    auto* router = m_retireRouter.get();
+    auto* domain = epochDomainOwner_.get();
+    auto* observer = worldRetirementReferenceOwner_.get();
+    auto* telemetry = worldRetirementTelemetryOwner_.get();
+    auto* audioReader = audioThreadRcuReaderOwner_.get();
+    auto* messageReader = messageThreadRcuReaderOwner_.get();
+
+    // 移譲先（プロセス寿命テーブル）へ記録してから所有権を手放す。固定容量・確保なしなので
+    // 記録に失敗する経路は無く、所有権を失ったまま記録だけが欠ける状態にならない。
+    // 書き手は Message Thread の 1 スレッドだけ（engine の破棄は Message Thread 専用）。
+    // スロットを書いてから件数を publish する（読み手が未書き込みスロットを見ない）。
+    const int index = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
+    if (index >= 0 && index < kMaxAbandonedReaderSubstrates)
+    {
+        s_abandonedSubstrates_[index] = AbandonedReaderSubstrate {
+            router, domain, observer, telemetry, audioReader, messageReader };
+        convo::publishAtomic (s_abandonedReaderSubstrates_, index + 1, std::memory_order_release);
+    }
+    else
+    {
+        // 診断索引の容量超過。所有権は下の release でプロセス寿命へ移るため、実体は生存する。
+        (void) convo::fetchAddAtomic (s_abandonedSubstrateOverflow_, 1, std::memory_order_acq_rel);
+    }
+
+    (void) m_retireRouter.release();
+    (void) epochDomainOwner_.release();
+    (void) worldRetirementReferenceOwner_.release();
+    (void) worldRetirementTelemetryOwner_.release();
+    (void) audioThreadRcuReaderOwner_.release();
+    (void) messageThreadRcuReaderOwner_.release();
+}
+
+// ★ WORK113 (2026-11-18 Owner 指示): reader admission の idle を確認できない terminal shutdown の
+//   fail-closed 経路。D queue の所有権を隔離（自己参照）して deleter を実行せず、Q / E / T は
+//   drain しない（各 store は destructor で deleter を実行しない）。安全を証明できない対象は
+//   強制解放せず保持する（リークを選び、UAF を選ばない）。NonRT（Message Thread）専用。
+inline void holdRetireQueuesForShutdownNonRt (const char* reason,
+                                              bool publishersIdle,
+                                              bool readerAdmissionsIdle,
+                                              bool activeReadersIdle,
+                                              bool engineReadersIdle) noexcept
+{
+    auto held = m_epochDomain.takeForShutdown();
+    if (held == nullptr)
+    {
+        return;
+    }
+
+    const auto pending = static_cast<juce::int64>(held->sizeApprox());
+    const auto result = m_epochDomain.quarantineQueue(held);
+    held.reset();
+    juce::ignoreUnused (pending, result, reason, publishersIdle, readerAdmissionsIdle,
+                        activeReadersIdle, engineReadersIdle);   // DIAG OFF では診断出力が無い
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    {
+        juce::Logger::writeToLog(juce::String::formatted(
+            "[WORK113] shutdown hold: reason=%s publishersIdle=%d readerAdmissionsIdle=%d "
+            "activeReaders=%u engineReadersIdle=%d - D queue kept "
+            "result=%d pending=%lld quarantineCount=%llu quarantinePending=%llu",
+            reason != nullptr ? reason : "unknown",
+            publishersIdle ? 1 : 0,
+            readerAdmissionsIdle ? 1 : 0,
+            static_cast<unsigned>(m_retireRouter != nullptr ? m_retireRouter->activeReaderCount() : 0u),
+            engineReadersIdle ? 1 : 0,
+            static_cast<int>(result),
+            pending,
+            static_cast<unsigned long long>(convo::EpochDomain::quarantineCount()),
+            static_cast<unsigned long long>(convo::EpochDomain::quarantinePendingEntries())));
+
+        auto evidence = juce::File::getCurrentWorkingDirectory()
+                            .getChildFile("evidence/shutdown_hold.json");
+        evidence.getParentDirectory().createDirectory();
+        juce::String js;
+        js << "{\n  \"schema\": \"shutdown_hold_v1\",\n"
+           << "  \"reason\": \"" << (reason != nullptr ? reason : "unknown") << "\",\n"
+           << "  \"publishersIdle\": " << (publishersIdle ? "true" : "false") << ",\n"
+           << "  \"readerAdmissionsIdle\": " << (readerAdmissionsIdle ? "true" : "false") << ",\n"
+           << "  \"activeReaders\": "
+           << juce::String(static_cast<int>(m_retireRouter != nullptr ? m_retireRouter->activeReaderCount() : 0u)) << ",\n"
+           << "  \"engineReadersIdle\": " << (engineReadersIdle ? "true" : "false") << ",\n"
+           << "  \"quarantineResult\": " << static_cast<int>(result) << ",\n"
+           << "  \"pendingEntries\": " << pending << ",\n"
+           << "  \"quarantineCount\": "
+           << static_cast<juce::int64>(convo::EpochDomain::quarantineCount()) << ",\n"
+           << "  \"quarantinePending\": "
+           << static_cast<juce::int64>(convo::EpochDomain::quarantinePendingEntries()) << ",\n"
+           << "  \"readerAdmissions\": "
+           << juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive())) << ",\n"
+           << "  \"admissionPendingSlots\": "
+           << juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())) << "\n}\n";
+        evidence.replaceWithText(js);
+    }
+#endif
+}
+
 // ★ work88 (六次レビュー — Recovery 発行経路の配線漏れ修正):
 //   quarantine 検出時に Recovery buildSource として使う「現在の publish 構成 snapshot」を返す。//   QuarantineIntentHandler がこの値を submitRecoveryIntent へ渡す（Recovery = 現在の構成の再 build）。
 [[nodiscard]] inline convo::RuntimeBuildSnapshot getCurrentBuildSnapshotForRecovery() const noexcept
@@ -5469,16 +5799,35 @@ public:
     // スナップショット基盤（Phase 2）
     // ==================================================================
     // ★ domain tag (v2.9): Engine の epoch ドメイン（退役は EngineISR に帰属する）
-    convo::EpochDomain m_epochDomain { convo::RetireDomainId::EngineISR };
+    // ★ WORK113 (2026-11-18 Owner 指示): reader が参照する provider の寿命を engine の寿命から
+    //   切り離せるよう、実体は heap に置き、m_epochDomain は参照のまま残す（既存の
+    //   m_epochDomain. 呼出しは不変）。admission timeout 時は epochDomainOwner_ を release し、
+    //   reader が入場を完了できるようプロセス寿命へ移す。
+    std::unique_ptr<convo::EpochDomain> epochDomainOwner_ {
+        std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EngineISR) };
+    convo::EpochDomain& m_epochDomain { *epochDomainOwner_ };
     // ★ T1 (D98): reference observer — m_retireRouter より前に宣言（初期化順: observer → m_retireRouter・
     //   破棄順: m_retireRouter → observer・D97 invariant を満たす）。measurement only・retirement authority でない。
-    convo::isr::WorldRetirementReferenceObserver worldRetirementReference_;
+    // ★ WORK113 (2026-11-18 Owner 指示): engine 破棄後も保持基盤（router / Q / E / T / D queue）が
+    //   この observer を参照するため、実体を heap に置き、fail-closed 経路では所有権を移す。
+    //   参照（ポインタ）の書き換えは行わない（書き換えると publisher timeout 中の読み取りと競合する）。
+    std::unique_ptr<convo::isr::WorldRetirementReferenceObserver> worldRetirementReferenceOwner_ {
+        std::make_unique<convo::isr::WorldRetirementReferenceObserver>() };
+    convo::isr::WorldRetirementReferenceObserver& worldRetirementReference_ {
+        *worldRetirementReferenceOwner_ };
     // [work21] ISRRetireRouter — 唯一のretire/publication API入口(unique_ptr, forward-declared)
     std::unique_ptr<convo::isr::ISRRetireRouter> m_retireRouter;
     // DSP_THREAD_STATE: AudioEngine process系で使うaudio-thread専用RCU reader。
-    convo::RCUReader audioThreadRcuReader { m_epochDomain };
+    // ★ WORK113 (2026-11-18 Owner 指示): reader オブジェクト自体も shutdown の保持対象にする。
+    //   固定アドレスとし、fail-closed 経路では所有権をプロセス寿命へ移す（reader の exit() が
+    //   破棄後に走っても自分のメンバーに触れるため）。
+    std::unique_ptr<convo::RCUReader> audioThreadRcuReaderOwner_ {
+        std::make_unique<convo::RCUReader> (m_epochDomain) };
+    convo::RCUReader& audioThreadRcuReader { *audioThreadRcuReaderOwner_ };
     // Message Thread + JUCE Timer 専用 RCU reader。
-    convo::RCUReader messageThreadRcuReader { m_epochDomain };
+    std::unique_ptr<convo::RCUReader> messageThreadRcuReaderOwner_ {
+        std::make_unique<convo::RCUReader> (m_epochDomain) };
+    convo::RCUReader& messageThreadRcuReader { *messageThreadRcuReaderOwner_ };
     RTLocalState rtLocalState_ {};
     RTAuxMutable rtAuxMutable_ {};
     convo::SnapshotCoordinator m_coordinator;
@@ -5683,7 +6032,11 @@ public:
     //   (sole owner). AudioEngine reaches them only via worldAuthority_.lifetime().
     convo::isr::ShutdownRuntime shutdownRuntime_;
     convo::isr::EvidenceExporter evidenceExporter_;
-    convo::isr::WorldRetirementTelemetry worldRetirementTelemetry_;   // ★ T1: world retirement 観測 telemetry（観測値のみ・authority でない・D86）
+    // ★ WORK113: observer が指す telemetry も engine 破棄後に参照され得るため heap に置く。
+    std::unique_ptr<convo::isr::WorldRetirementTelemetry> worldRetirementTelemetryOwner_ {
+        std::make_unique<convo::isr::WorldRetirementTelemetry>() };
+    convo::isr::WorldRetirementTelemetry& worldRetirementTelemetry_ {
+        *worldRetirementTelemetryOwner_ };   // ★ T1: world retirement 観測 telemetry（観測値のみ・authority でない・D86）
     convo::isr::WorldLifecycleAudit worldLifecycleAudit_;
     convo::isr::BudgetManager budgetManager_;
     convo::isr::FailureHandler failureHandler_;
@@ -5708,6 +6061,98 @@ public:
     {
         return convo::consumeAtomic(s_engineInstanceCount_, std::memory_order_acquire);
     }
+
+    // ★ WORK113: プロセス寿命へ移した reader 基盤（provider）の累計（テスト・診断用）。
+    static std::atomic<int> s_abandonedReaderSubstrates_;
+    [[nodiscard]] static int abandonedReaderSubstratesForTest() noexcept
+    {
+        return convo::consumeAtomic(s_abandonedReaderSubstrates_, std::memory_order_acquire);
+    }
+
+    // ★ WORK113 (2026-11-18 Owner 指示): 移譲先の到達可能性を明示するための固定容量テーブル。
+    //   abandon した基盤の 4 つの実体を記録し、テスト・診断から同一性を確認できるようにする。
+    //   確保を伴わない（失敗経路が無い）ため、記録に失敗して所有権を失うことはない。
+    struct AbandonedReaderSubstrate
+    {
+        const void* router;
+        const void* domain;
+        const void* observer;
+        const void* telemetry;
+        const void* audioReader;
+        const void* messageReader;
+    };
+    static constexpr int kMaxAbandonedReaderSubstrates = 8;
+    // static storage なのでゼロ初期化される（NSDMI は enclosing class 内では使えない）。
+    inline static AbandonedReaderSubstrate
+        s_abandonedSubstrates_[kMaxAbandonedReaderSubstrates];
+
+    // ★ WORK113: 診断用索引の容量超過（9 件目以降）。所有権の根拠ではなく診断の取りこぼしを数える。
+    static std::atomic<int> s_abandonedSubstrateOverflow_;
+    [[nodiscard]] static int abandonedSubstrateOverflowForTest() noexcept
+    {
+        return convo::consumeAtomic (s_abandonedSubstrateOverflow_, std::memory_order_acquire);
+    }
+
+    // ★ WORK113: shutdown の静止判定の実測（テスト・診断用）。
+    //   publishers idle の失敗と reader admission idle の失敗を別々に数える。
+    static std::atomic<int> s_shutdownPublisherIdleFailures_;
+    static std::atomic<int> s_shutdownReaderAdmissionIdleFailures_;
+    static std::atomic<int> s_shutdownEngineReaderBusy_;
+    // ★ WORK113: 直近の shutdown で hold に入った理由（quiescent なら nullptr）。
+    static std::atomic<const char*> s_lastShutdownHoldReason_;
+    [[nodiscard]] static const char* lastShutdownHoldReasonForTest() noexcept
+    {
+        return convo::consumeAtomic (s_lastShutdownHoldReason_, std::memory_order_acquire);
+    }
+    [[nodiscard]] static int shutdownPublisherIdleFailuresForTest() noexcept
+    {
+        return convo::consumeAtomic (s_shutdownPublisherIdleFailures_, std::memory_order_acquire);
+    }
+    [[nodiscard]] static int shutdownReaderAdmissionIdleFailuresForTest() noexcept
+    {
+        return convo::consumeAtomic (s_shutdownReaderAdmissionIdleFailures_, std::memory_order_acquire);
+    }
+    [[nodiscard]] static int shutdownEngineReaderBusyForTest() noexcept
+    {
+        return convo::consumeAtomic (s_shutdownEngineReaderBusy_, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] static bool abandonedSubstrateContainsReadersForTest (const void* router,
+                                                                        const void* audioReader,
+                                                                        const void* messageReader) noexcept
+    {
+        int n = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
+        if (n > kMaxAbandonedReaderSubstrates)
+            n = kMaxAbandonedReaderSubstrates;
+        for (int i = 0; i < n; ++i)
+        {
+            if (s_abandonedSubstrates_[i].router == router
+                && s_abandonedSubstrates_[i].audioReader == audioReader
+                && s_abandonedSubstrates_[i].messageReader == messageReader)
+                return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] static bool abandonedSubstrateContainsForTest (const void* router,
+                                                                 const void* domain) noexcept
+    {
+        int n = convo::consumeAtomic (s_abandonedReaderSubstrates_, std::memory_order_acquire);
+        if (n > kMaxAbandonedReaderSubstrates)
+            n = kMaxAbandonedReaderSubstrates;
+        for (int i = 0; i < n; ++i)
+        {
+            if (s_abandonedSubstrates_[i].router == router
+                && s_abandonedSubstrates_[i].domain == domain)
+                return true;
+        }
+        return false;
+    }
+
+    // ★ WORK113 テスト専用: terminal shutdown の待機時間（既定 5000 ms）。
+    //   待つ/待たないの判断（同期契約）は変えず、時間だけを差し替える。
+    //   設定経路は friend のテストアクセスだけで、製品コードからは設定できない。
+    std::atomic<int> shutdownWaitTimeoutMs_ { 5000 };
     uint64_t engineInstanceId_{0};
 
     // ==================================================================

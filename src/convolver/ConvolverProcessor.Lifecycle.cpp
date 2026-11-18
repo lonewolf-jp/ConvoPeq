@@ -10,6 +10,7 @@
 #include <mkl.h>
 
 #include "audioengine/AtomicAccess.h"
+#include "audioengine/DiagObjectRegistry.h"   // ★ WORK113 変更1: 識別レジストリ（DIAG 専用）
 
 // ★ work70: StereoConvolver::liveCount 静的定義
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -97,6 +98,12 @@ ConvolverProcessor::ConvolverProcessor()
 
     updateLatencyCache();
     debugCheckAtomicLockFree();
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 生成を識別レジストリへ登録（Convolver は registry が採番）。
+    diagInstanceId_ = convo::diag::registry().nextConvolverId();
+    convo::diag::registry().convolverCreated(diagInstanceId_);
+#endif
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -139,6 +146,11 @@ ConvolverProcessor::~ConvolverProcessor()
     }
 
     // Note: final deferred reclaim is owned by AudioEngine shutdown sequence.
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 物理破棄を識別レジストリへ通知（NonRT・dtor）。
+    convo::diag::registry().convolverDestroyed(diagInstanceId_);
+#endif
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -452,8 +464,11 @@ void ConvolverProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         size_t nucBytes = 0, ippBytes = 0, irDataBytes = 0;
         diagActiveEngineFootprint(nucBytes, ippBytes, irDataBytes);
         diagFootprintLog(juce::String::formatted(
-            "[CONV_FOOTPRINT] conv=%p delay=%zu dry=%zu smoothing=%zu oldDry=%zu wet=%zu fadeRamp=%zu TOTAL=%zu",
+            "[CONV_FOOTPRINT] id=%llu conv=%p delay=%zu dry=%zu smoothing=%zu oldDry=%zu wet=%zu fadeRamp=%zu TOTAL=%zu",
+            (unsigned long long)diagInstanceId_,
             (void*)this, fp.delay, fp.dry, fp.smoothing, fp.oldDry, fp.wet, fp.fadeRamp, fp.total()));
+        // ★ WORK113 変更1: 固定バッファ実測を識別レジストリへ記録する。
+        convo::diag::registry().convolverMeasured(diagInstanceId_, fp.total());
     }
 #endif
 

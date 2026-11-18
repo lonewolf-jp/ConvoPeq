@@ -45,14 +45,43 @@ std::atomic<std::uint64_t>& AudioEngine::DSPCore::runtimeUuidCounter() noexcept
 // ★ work70: DSPCore::liveCount 静的定義
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
 std::atomic<uint32_t> AudioEngine::DSPCore::liveCount { 0 };
+std::atomic<bool> AudioEngine::DSPCore::uuidExhaustedStorage_ { false };
 #endif
 
+// ★ WORK113 変更1: UUID 採番の飽和（0 は未設定の予約値であり wrap させない）。
 [[nodiscard]] std::uint64_t AudioEngine::DSPCore::reserveNextRuntimeUuid() noexcept
 {
-    return convo::fetchAddAtomic(runtimeUuidCounter(),
-                                 static_cast<std::uint64_t>(1),
-                                 std::memory_order_acq_rel);
+    constexpr std::uint64_t kExhausted = std::numeric_limits<std::uint64_t>::max();
+    auto& counter = runtimeUuidCounter();
+    std::uint64_t expected = convo::consumeAtomic(counter, std::memory_order_acquire);
+
+    for (;;)
+    {
+        if (expected == 0 || expected >= kExhausted)
+        {
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+            convo::publishAtomic(uuidExhaustedStorage_, true, std::memory_order_release);
+#endif
+            return 0;   // 未設定として扱う
+        }
+
+        if (convo::compareExchangeAtomic(counter, expected,
+                                         expected + 1,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+        {
+            return expected;   // 1 .. kExhausted-1 のみ払い出す
+        }
+        // 失敗時 expected は最新値へ更新されている（strong CAS）。
+    }
 }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+bool AudioEngine::DSPCore::uuidExhausted() noexcept
+{
+    return convo::consumeAtomic(uuidExhaustedStorage_, std::memory_order_acquire);
+}
+#endif
 
 AudioEngine::DSPCore::DSPCore()
     : dcBlockerState(new DCBlockerRuntimeState())
@@ -64,6 +93,8 @@ AudioEngine::DSPCore::DSPCore()
 {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     liveCount.fetch_add(1, std::memory_order_relaxed);
+    // ★ WORK113 変更1: 生成を識別レジストリへ登録（NonRT・全生成経路）。
+    convo::diag::registry().coreCreated(runtimeUuid);
 #endif
     convolverState->bind(convolver);
     eqState->bind(eq);
@@ -266,6 +297,10 @@ void AudioEngine::DSPCore::prepare(double newSampleRate, int samplesPerBlock, in
     {
         diagFootprint = diagCaptureFootprint();
         diagFootprintCaptured = true;
+        // ★ WORK113 変更1: 実測 footprint を識別レジストリへ記録（未計測は 0 のまま）。
+        convo::diag::registry().coreMeasured(
+            runtimeUuid, diagFootprint.total(),
+            diagGeneration.load(std::memory_order_relaxed));
         diagLog(juce::String::formatted(
             "[DSP_FOOTPRINT] dsp=%p gen=%llu phase=construct convolver=%zu irData=%zu nuc=%zu ipp=%zu latency=%zu eq=%zu other=%zu TOTAL=%zu",
             (void*)this,

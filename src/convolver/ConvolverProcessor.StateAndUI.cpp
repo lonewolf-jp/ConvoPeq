@@ -1053,11 +1053,12 @@ void ConvolverProcessor::forceCleanup()
     loadersToDelete.clear();
 }
 
-void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
+ConvolverProcessor::StateSwapOutcome
+ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
 {
     JUCE_ASSERT_MESSAGE_THREAD;
     jassert(newState != nullptr);
-    if (!newState) return;
+    if (!newState) return StateSwapOutcome::StaleGeneration;
 
     // CAS for writerActive: false→true の遷移を排他的に保証
     // （compareExchangeAtomic により、Release ビルドでも二重取得を防止）
@@ -1072,7 +1073,7 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
         juce::Logger::writeToLog("[ConvolverProcessor] updateConvolverState: writerActive contention, "
             "discarding state gen=" + juce::String((int)newState->generationId));
         std::unique_ptr<convo::ConvolverState> discard{newState};
-        return;
+        return StateSwapOutcome::WriterBusy;
     }
 
     if (!convolverStateGeneration.isCurrentGeneration(newState->generationId))
@@ -1081,7 +1082,7 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
             + juce::String((int)newState->generationId) + ")");
         std::unique_ptr<convo::ConvolverState> owned{newState}; // RAII delete (stale discard)
         convo::publishAtomic(writerActive, false, std::memory_order_release); // release: writerActive=false 公開
-        return;
+        return StateSwapOutcome::StaleGeneration;
     }
 
     rcuSwapper.swap(newState);
@@ -1093,11 +1094,13 @@ void ConvolverProcessor::updateConvolverState(convo::ConvolverState* newState)
         jassertfalse; // provider must be set before state update
 
     convo::publishAtomic(writerActive, false, std::memory_order_release); // release: writerActive=false 公開
+    return StateSwapOutcome::Swapped;
 }
 
-void ConvolverProcessor::updateConvolverState(std::unique_ptr<convo::ConvolverState> newState)
+ConvolverProcessor::StateSwapOutcome
+ConvolverProcessor::updateConvolverState(std::unique_ptr<convo::ConvolverState> newState)
 {
-    updateConvolverState(newState.release());
+    return updateConvolverState(newState.release());
 }
 
 #endif // CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI

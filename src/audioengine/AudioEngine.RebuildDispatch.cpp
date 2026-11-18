@@ -82,6 +82,30 @@ bool shouldRetryWarmupFailure(const AudioEngine::DSPCore& dsp) noexcept
     return dsp.convolverRt().isLoadingIR();
 }
 
+namespace
+{
+constexpr std::uint32_t kMaxAdmissionSeq = 0xFFFFFFFEu;
+
+inline std::uint64_t packAdmissionTicket(std::uint32_t epoch, std::uint32_t seq) noexcept
+{
+    return (static_cast<std::uint64_t>(epoch) << 32) | static_cast<std::uint64_t>(seq);
+}
+inline std::uint32_t admissionTicketEpoch(std::uint64_t ticket) noexcept
+{
+    return static_cast<std::uint32_t>(ticket >> 32);
+}
+inline std::uint32_t admissionTicketSeq(std::uint64_t ticket) noexcept
+{
+    return static_cast<std::uint32_t>(ticket & 0xFFFFFFFFull);
+}
+
+struct DiagBusyGuard
+{
+    std::atomic<bool>& flag;
+    ~DiagBusyGuard() { convo::publishAtomic(flag, false, std::memory_order_release); }
+};
+} // namespace
+
 convo::RuntimeBuildSnapshot captureRuntimeBuildSnapshot(const convo::BuildInput& buildInput,
                                                         const ConvolverProcessor::BuildSnapshot& convolverSnapshot,
                                                         int generation,
@@ -104,6 +128,9 @@ convo::RuntimeBuildSnapshot captureRuntimeBuildSnapshot(const convo::BuildInput&
     snapshot.structuralHash = structuralHash;
     snapshot.oversamplingFactor = buildInput.oversamplingFactor;
     snapshot.sampleRate = buildInput.sampleRate;
+    // ★ WORK113 変更 2 (DIAG): 診断値（比較・hash には含めない）。
+    snapshot.diagRequestId = buildInput.diagRequestId;
+    snapshot.irLength = convolverSnapshot.irLength;
     return snapshot;
 }
 
@@ -375,31 +402,53 @@ void AudioEngine::submitRebuildIntent(convo::RebuildKind kind,
         }
     }
 
-    // 非MTパス: bool フラグをセットして MT へ通知
-    const bool wasNewlyPending = setRebuildReason(RebuildReason::StructuralFromNonMT);
-    if (wasNewlyPending)
+    // ★ WORK113 変更2 (DIAG): 非MTパス。admission ticket を設置し、無条件に trigger する。
+    //   ticket は (epoch, seq)。seq の大小が新旧を表し、古い ticket は新しい ticket を上書きしない。
+    const std::uint32_t epoch = static_cast<std::uint32_t>(
+        convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire));
+
+    std::uint32_t mySeq = 0;
+    std::uint32_t curSeq = convo::consumeAtomic(nextAdmissionSeq_, std::memory_order_acquire);
+    for (;;)
     {
-        emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
-                             intentId,
-                             RebuildTelemetryReason::NonMtTriggerAsync,
-                             RebuildTelemetryDecision::Dispatched,
-                             0,
-                             0,
-                             RebuildTelemetryClass::Structural,
-                             collapsePolicy);
-        triggerAsyncUpdate();
+        if (curSeq > kMaxAdmissionSeq)
+        {
+            convo::publishAtomic(ticketSeqExhausted_, true, std::memory_order_release);
+            break;
+        }
+        if (convo::compareExchangeAtomic(nextAdmissionSeq_, curSeq, curSeq + 1))
+        {
+            mySeq = curSeq;
+            break;
+        }
     }
-    else
+
+    if (mySeq != 0)
     {
-        emitRebuildTelemetry(RebuildTelemetryEvent::Merged,
-                             intentId,
-                             RebuildTelemetryReason::NonMtAlreadyPending,
-                             RebuildTelemetryDecision::Merged,
-                             0,
-                             0,
-                             RebuildTelemetryClass::Structural,
-                             collapsePolicy);
+        const std::uint64_t ticket = packAdmissionTicket(epoch, mySeq);
+        std::uint64_t curTicket = convo::consumeAtomic(pendingStructuralAdmission_, std::memory_order_acquire);
+        for (;;)
+        {
+            if (admissionTicketSeq(curTicket) >= mySeq)
+                break;
+            if (convo::compareExchangeAtomic(pendingStructuralAdmission_, curTicket, ticket))
+                break;
+        }
     }
+
+    (void) setRebuildReason(RebuildReason::StructuralFromNonMT);
+
+    emitRebuildTelemetry(RebuildTelemetryEvent::Dispatched,
+                         intentId,
+                         RebuildTelemetryReason::NonMtTriggerAsync,
+                         RebuildTelemetryDecision::Dispatched,
+                         0,
+                         0,
+                         RebuildTelemetryClass::Structural,
+                         collapsePolicy);
+
+    // ★ wasNewlyPending に依存せず必ず trigger する（新しい要求の取りこぼし防止）。
+    triggerAsyncUpdate();
 }
 
 void AudioEngine::handleAsyncUpdate()
@@ -409,9 +458,19 @@ void AudioEngine::handleAsyncUpdate()
 
     // [PR-3] Old pending commit path removed. Orchestrator handles deferred commits.
 
+    // ★ WORK113 変更2 (DIAG): ticket を 1 回だけ消費する（bit ではなく ticket が権威）。
+    const std::uint64_t diagTicket = convo::exchangeAtomic(pendingStructuralAdmission_,
+                                                           std::uint64_t{0},
+                                                           std::memory_order_acq_rel);
+    const bool hadStructuralReason = clearRebuildReason(RebuildReason::StructuralFromNonMT);
+
     // 非MT起点の Structural rebuild 要求を消費して実行する
-    if (clearRebuildReason(RebuildReason::StructuralFromNonMT))
+    if (diagTicket != 0 || hadStructuralReason)
     {
+        const std::uint64_t ticketEpoch = diagTicket != 0
+            ? admissionTicketEpoch(diagTicket)
+            : convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire);
+
         RebuildTelemetryPolicy collapsePolicy = RebuildTelemetryPolicy::NA;
         {
             std::lock_guard<std::mutex> lock(rebuildAdmissionIntentMutex_);
@@ -442,7 +501,9 @@ void AudioEngine::handleAsyncUpdate()
                                  0,
                                  RebuildTelemetryClass::Structural,
                                  collapsePolicy);
-            requestRebuild(sr, bs, collapsePolicy == RebuildTelemetryPolicy::MustExecute);
+            (void) requestRebuildImpl(sr, bs,
+                                      collapsePolicy == RebuildTelemetryPolicy::MustExecute,
+                                      ticketEpoch, 0);
         }
         else
         {
@@ -457,6 +518,10 @@ void AudioEngine::handleAsyncUpdate()
                                  collapsePolicy);
         }
     }
+
+    // ★ WORK113 変更2 (DIAG): 処理中に新しい ticket が来たら再通知する。
+    if (convo::consumeAtomic(pendingStructuralAdmission_, std::memory_order_acquire) != 0)
+        triggerAsyncUpdate();
 }
 
 void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
@@ -485,6 +550,40 @@ void AudioEngine::requestRebuild(convo::RebuildKind kind) noexcept
 //--------------------------------------------------------------
 void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool forceMustExecute)
 {
+    // ★ WORK113 変更 2 (DIAG): 最初の実行文で MT を実行時判定する（fail-closed）。
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+        mm == nullptr || !mm->isThisTheMessageThread())
+        return;
+
+    (void) requestRebuildImpl(sampleRate, samplesPerBlock, forceMustExecute,
+                              convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire),
+                              0);
+}
+
+AudioEngine::RebuildDispatchOutcome
+AudioEngine::requestRebuildImpl(double sampleRate, int samplesPerBlock, bool forceMustExecute,
+                                std::uint64_t admissionEpoch, std::uint64_t diagRequestId) noexcept
+{
+    // ★ WORK113 変更 2 (DIAG): 二重防御の MT 判定。
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+        mm == nullptr || !mm->isThisTheMessageThread())
+        return RebuildDispatchOutcome::SuppressedWrongThread;
+
+    // ★ WORK113 変更 2 (DIAG): stale の事前判定（telemetry・カウンタ・UI アクセスより前）。
+    if (diagRequestId == 0)
+    {
+        if (convo::consumeAtomic(diagWindowActive_, std::memory_order_acquire))
+            return RebuildDispatchOutcome::DiagWindow;
+
+        const std::uint64_t currentEpoch = convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire);
+        if (admissionEpoch != currentEpoch)
+        {
+            // ウィンドウが閉じている場合だけ、現在の epoch で 1 回だけ再発行する。
+            // （開いている場合は上の分岐で破棄済み。ここは 1 回限りで繰り返さない。）
+            admissionEpoch = currentEpoch;
+        }
+    }
+
     constexpr const char* kPhase5TagKeep = "phase5_keep_target";
 
     // forceMustExecute=true は、重複抑止より実行優先を選ぶ明示的な回避経路。
@@ -515,7 +614,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                              RebuildTelemetryClass::Structural,
                              collapsePolicy,
                              kPhase5TagKeep);
-        return;
+        return RebuildDispatchOutcome::ShutdownInProgress;
     }
 
     if (shouldRejectRebuildAdmissionForPressure())
@@ -530,7 +629,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                              RebuildTelemetryClass::Structural,
                              collapsePolicy,
                              kPhase5TagKeep);
-        return;
+        return RebuildDispatchOutcome::PressureRejected;
     }
 
     convo::fetchAddAtomic(rtAuxMutable_.debugRebuildDispatchRequestCount, 1, std::memory_order_acq_rel);
@@ -552,7 +651,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                      RebuildTelemetryClass::Structural,
                      collapsePolicy,
                      kPhase5TagKeep);
-        return;
+        return RebuildDispatchOutcome::ShutdownInProgress;
     }
 
     // Phase5: 縮退対象（deferred window suppress）は削除済み。
@@ -582,7 +681,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                      RebuildTelemetryClass::Structural,
                  collapsePolicy,
                  kPhase5TagKeep);
-        return;
+        return RebuildDispatchOutcome::DuplicateSuppressed;
     }
 
     // NOTE: 意図的に learner を停止しない。rebuild 中も learner は稼働を継続し、
@@ -615,6 +714,9 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     task.buildInput.outputMakeupGain = paramSnapshot.outputMakeupGain;
     task.buildInput.convolverInputTrimGain = paramSnapshot.convolverInputTrimGain;
     task.buildInput.autoGainStagingEnabled = paramSnapshot.autoGainStagingEnabled;
+    // ★ WORK113 変更2 (DIAG): captureRuntimeBuildSnapshot より前に設定する。
+    //   後から設定すると sealed snapshot に乗らない（公開 world へ伝搬しない）。
+    task.buildInput.diagRequestId = diagRequestId;
     // [WORK113-16 Phase 1] EQ World projection — Message Thread で EQ shadow を値 capture
     //   （uiConvolverProcessor.captureBuildSnapshot() と同一の capture コンテキスト）。
     if (const auto* eqState = uiEqEditor.getEQStateSnapshot())
@@ -625,11 +727,12 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
     DSPCore* currentToRelease = nullptr;
     bool queued = false;
     bool blockedAsDuplicate = false;
+    bool blockedByDiagWindow = false;
     const bool allowDuplicateSuppression = !forceMustExecute;
     {
         std::lock_guard<std::mutex> lock(rebuildMutex);
 
-        if (hasPendingTask)
+        if (hasPendingTask && diagRequestId == 0)
         {
             if (allowDuplicateSuppression)
             {
@@ -671,7 +774,17 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
             }
         }
 
-        if (!blockedAsDuplicate)
+        // ★ WORK113 変更 2 (DIAG): 受理点での権威判定。ウィンドウが開いているか、epoch が古い場合は納入しない。
+        if (!blockedAsDuplicate && diagRequestId == 0)
+        {
+            if (convo::consumeAtomic(diagWindowActive_, std::memory_order_acquire)
+                || admissionEpoch != convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire))
+            {
+                blockedByDiagWindow = true;
+            }
+        }
+
+        if (!blockedAsDuplicate && !blockedByDiagWindow)
         {
             generation = ++rebuildRequestGeneration;
             task.generation = generation;
@@ -753,8 +866,16 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
 
                 task.buildAnalysis = convo::sealBuildAnalysis(analysis, &task.runtimeBuildSnapshot);
             }
-            pendingTask = task;
-            hasPendingTask = true;
+            if (diagRequestId != 0)
+            {
+                pendingDiagTask = task;
+                hasPendingDiagTask = true;
+            }
+            else
+            {
+                pendingTask = task;
+                hasPendingTask = true;
+            }
             convo::publishAtomic(rebuildBacklog_, static_cast<std::uint64_t>(1), std::memory_order_release);
             lastQueuedTaskSignature = task;
             rtAuxMutable_.lastQueuedTaskTicks = juce::Time::getHighResolutionTicks();
@@ -779,6 +900,13 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                  collapsePolicy,
                      "N/A",
                      latencyMs);
+    }
+    else if (blockedByDiagWindow)
+    {
+        // ★ WORK113 変更 2 (DIAG): 診断ウィンドウによる抑止。
+        //   専用 reason を増やさないため telemetry は出さず、DIAG ログのみとする。
+        diagLog("[DIAG][WORK113] requestRebuild(sr,bs): suppressed by diag window SR="
+                + juce::String(sampleRate, 2));
     }
     else
     {
@@ -807,7 +935,8 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
         lifetimeMgr.retire(currentToRelease);
     }
 
-    juce::ignoreUnused(queued);
+    return queued ? RebuildDispatchOutcome::Accepted
+                  : RebuildDispatchOutcome::DuplicateSuppressed;
 }
 
 
@@ -882,6 +1011,9 @@ void AudioEngine::rebuildThreadLoop()
     {
         try
         {
+            // ★ WORK113 変更2 (DIAG): 周回末で busy を解除するスコープガード。
+            DiagBusyGuard diagBusyGuard { rebuildWorkerBusy_ };
+
             RebuildTask task;
             bool doDeferredPublish = false;  // ★ CoordinatorLoop からの deferred publish ハンドオフ
             bool wokeByPendingTask = false;  // ★ D132 (M3-A): wakeup 要因（mutex 保護下で確定）
@@ -897,16 +1029,23 @@ void AudioEngine::rebuildThreadLoop()
                 //   RebuildThread は「rebuild タスク」と「deferred publish ハンドオフ」の2種を待つ。
                 rebuildCV.wait(lock, [this] {
                     return hasPendingTask
+                        || hasPendingDiagTask          // ★ WORK113 変更2 (DIAG)
                         || publishRetryReady
                         || recoveryPending  // ★ 監査指摘 (work88): Recovery Intent 到着で起床
                         || convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire);
                 });
+
+                // ★ WORK113 変更2 (DIAG): 起床を活動として記録する（終了・shutdown 判定より前）。
+                convo::fetchAddAtomic(rebuildWorkerActivitySeq_, std::uint64_t{1}, std::memory_order_acq_rel);
+                convo::publishAtomic(rebuildWorkerBusy_, true, std::memory_order_release);
 
                 if (convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire)) break;
                 if (isShutdownInProgress())
                 {
                     hasPendingTask = false;
                     pendingTask.currentDSP = nullptr;
+                    hasPendingDiagTask = false;
+                    pendingDiagTask.currentDSP = nullptr;
                     publishRetryReady = false;
                     break;
                 }
@@ -914,7 +1053,17 @@ void AudioEngine::rebuildThreadLoop()
                 // ★ D132 (M3-A): wake reason を mutex 保護下で確定してから所有権 transfer。
                 wokeByPendingTask = hasPendingTask;
 
-                if (wokeByPendingTask)
+                if (hasPendingDiagTask)
+                {
+                    // ★ WORK113 変更2 (DIAG): 診断スロットを優先して取り出す。
+                    task = pendingDiagTask;
+                    pendingDiagTask.currentDSP = nullptr;
+                    hasPendingDiagTask = false;
+                    wokeByPendingTask = true;
+                    convo::fetchAddAtomic(rebuildTakeCount_, static_cast<std::uint64_t>(1),
+                                          std::memory_order_acq_rel);
+                }
+                else if (wokeByPendingTask)
                 {
                     // Copy task and clear pendingTask pointers to transfer ownership
                     task = pendingTask;
@@ -1450,4 +1599,180 @@ void AudioEngine::rebuildThreadLoop()
     // ★ R8 (P1): the worker is leaving; drop ownership so no thread can claim it.
     convo::publishAtomic(rebuildThreadToken_, static_cast<std::uint64_t>(0),
                          std::memory_order_release);
+}
+
+// ★ WORK113 変更 2 (DIAG): 静止確認のスナップショット。
+void AudioEngine::diagSnapshotConditions(DiagConditionsSnapshot& out) noexcept
+{
+    std::lock_guard<std::mutex> lock(rebuildMutex);
+
+    out.hasPendingTask = hasPendingTask;
+    out.workerBusy = convo::consumeAtomic(rebuildWorkerBusy_, std::memory_order_acquire);
+    out.publishRetryReady = publishRetryReady;
+    out.recoveryPending = recoveryPending;
+    out.pendingDiagTask = hasPendingDiagTask;
+    out.phaseTick = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_acquire);
+    out.workerActivitySeq = convo::consumeAtomic(rebuildWorkerActivitySeq_, std::memory_order_acquire);
+
+    out.swapPending = runtimePublicationBridge_.isSwapPending();
+    out.publicationResidency = runtimePublicationBridge_.getPublicationIntentResidencyCount();
+    out.deferredAdmission = runtimeOrchestrator_ != nullptr
+                            && runtimeOrchestrator_->hasDeferredRequest();
+    out.liveRecoveryObligations = runtimePublicationBridge_.liveLogicalRecoveryObligationCount();
+    out.recoveryAdmissionPending =
+        runtimePublicationBridge_.collectDrainBreakdown().recoveryAdmissionPending;
+}
+
+// ★ WORK113 変更 2 (DIAG): 10 条件の判定。
+bool AudioEngine::diagConditionsMet(const DiagConditionsSnapshot& s) noexcept
+{
+    return !s.hasPendingTask
+        && !s.workerBusy
+        && !s.swapPending
+        && s.publicationResidency == 0
+        && !s.deferredAdmission
+        && !s.recoveryPending
+        && s.liveRecoveryObligations == 0
+        && !s.recoveryAdmissionPending
+        && !s.publishRetryReady
+        && !s.pendingDiagTask;
+}
+
+// ★ WORK113 変更 2 (DIAG): ウィンドを開き、静止と 2 フェーズ完了を待つ。
+AudioEngine::RebuildDispatchOutcome AudioEngine::beginDiagWindow() noexcept
+{
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+        mm == nullptr || !mm->isThisTheMessageThread())
+        return RebuildDispatchOutcome::SuppressedWrongThread;
+
+    if (isShutdownInProgress())
+        return RebuildDispatchOutcome::ShutdownInProgress;
+
+    bool expected = false;
+    if (!convo::compareExchangeAtomic(diagWindowActive_, expected, true))
+        return RebuildDispatchOutcome::DiagSlotBusy;
+
+    const std::uint64_t epoch = convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire);
+    if (epoch >= 0xFFFFFFFEull)
+    {
+        convo::publishAtomic(diagWindowEpochExhausted_, true, std::memory_order_release);
+        convo::publishAtomic(diagWindowActive_, false, std::memory_order_release);
+        return RebuildDispatchOutcome::NotQuiescent;
+    }
+    convo::publishAtomic(diagWindowEpoch_, epoch + 1, std::memory_order_release);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+
+    for (;;)
+    {
+        DiagConditionsSnapshot snap {};
+        diagSnapshotConditions(snap);
+        if (diagConditionsMet(snap) && (snap.phaseTick % 2) == 0)
+            break;
+
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            endDiagWindow();
+            return RebuildDispatchOutcome::NotQuiescent;
+        }
+        juce::Thread::sleep(10);
+    }
+
+    std::uint64_t t0 = 0;
+    for (;;)
+    {
+        const std::uint64_t t = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_acquire);
+        if ((t % 2) == 0)
+        {
+            t0 = t;
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            endDiagWindow();
+            return RebuildDispatchOutcome::NotQuiescent;
+        }
+        juce::Thread::sleep(1);
+    }
+
+    for (;;)
+    {
+        const std::uint64_t t = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_acquire);
+        if (t >= t0 + 4 && (t % 2) == 0)
+            break;
+
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            endDiagWindow();
+            return RebuildDispatchOutcome::NotQuiescent;
+        }
+        juce::Thread::sleep(1);
+    }
+
+    DiagConditionsSnapshot again {};
+    diagSnapshotConditions(again);
+    if (!diagConditionsMet(again))
+    {
+        endDiagWindow();
+        return RebuildDispatchOutcome::NotQuiescent;
+    }
+
+    return RebuildDispatchOutcome::Accepted;
+}
+
+// ★ WORK113 変更 2 (DIAG): ウィンドを閉じる（epoch をもう 1 つ進める）。
+void AudioEngine::endDiagWindow() noexcept
+{
+    bool expected = true;
+    if (!convo::compareExchangeAtomic(diagWindowActive_, expected, false))
+        return;
+
+    const std::uint64_t epoch = convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire);
+    if (epoch < 0xFFFFFFFFull)
+        convo::publishAtomic(diagWindowEpoch_, epoch + 1, std::memory_order_release);
+    else
+        convo::publishAtomic(diagWindowEpochExhausted_, true, std::memory_order_release);
+}
+
+// ★ WORK113 変更 2 (DIAG): 記録を照合・消費し、診断タスクを受理する（1 回限り）。
+AudioEngine::RebuildDispatchOutcome
+AudioEngine::requestRebuildForDiag(std::uint64_t diagRequestId) noexcept
+{
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+        mm == nullptr || !mm->isThisTheMessageThread())
+        return RebuildDispatchOutcome::SuppressedWrongThread;
+
+    if (diagRequestId == 0)
+        return RebuildDispatchOutcome::NoCommitRecord;
+
+    if (!convo::consumeAtomic(diagWindowActive_, std::memory_order_acquire))
+        return RebuildDispatchOutcome::DiagWindow;
+
+    if (isShutdownInProgress())
+        return RebuildDispatchOutcome::ShutdownInProgress;
+
+    ConvolverProcessor::DiagCommitRecord rec {};
+    if (!uiConvolverProcessor.peekCommitRecord(diagRequestId, rec))
+        return RebuildDispatchOutcome::NoCommitRecord;
+
+    if (rec.requestGenId != uiConvolverProcessor.getActiveStateGenerationForDiag())
+        return RebuildDispatchOutcome::StaleAdmission;
+
+    if (!uiConvolverProcessor.isConvolverGenerationCurrent(rec.requestGenId))
+        return RebuildDispatchOutcome::StaleAdmission;
+
+    if (rec.fftSize < uiConvolverProcessor.getTargetUpgradeFFTSize())
+        return RebuildDispatchOutcome::UpgradeIncomplete;
+
+    if (!uiConvolverProcessor.consumeCommitRecord(diagRequestId, rec))
+        return RebuildDispatchOutcome::NoCommitRecord;
+
+    const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+    const int bs = convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire);
+    if (!(sr > 0.0 && bs > 0))
+        return RebuildDispatchOutcome::InvalidSrBs;
+
+    return requestRebuildImpl(sr, bs, true,
+                              convo::consumeAtomic(diagWindowEpoch_, std::memory_order_acquire),
+                              diagRequestId);
 }

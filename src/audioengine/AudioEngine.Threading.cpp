@@ -79,6 +79,10 @@ void AudioEngine::deferDestroyRetry(DSPCore* core) noexcept
     }
     deferredDestroy_.push_back(core);
     convo::fetchAddAtomic(deferredDestroyCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    // ★ WORK113 変更1: 遅延破棄への遷移を識別レジストリへ記録。
+    convo::diag::registry().coreDeferred(core->runtimeUuid);
+#endif
     // ★ F1'-b 監査対応: ロックフリー在住数（早期 return 判定用）を更新。
     convo::publishAtomic(deferredDestroyResidentAtomic_,
                          static_cast<std::uint32_t>(deferredDestroy_.size()),
@@ -422,8 +426,70 @@ void AudioEngine::shutdownCoordinatorLoop() noexcept
     }
 }
 
+namespace
+{
+// ★ WORK113 変更 2 (DIAG): フェーズ完了時に tick を偶数へ戻すスコープガード。
+struct DiagPhaseTickGuard
+{
+    std::atomic<std::uint64_t>& tick;
+    ~DiagPhaseTickGuard()
+    {
+        convo::fetchAddAtomic(tick, 1, std::memory_order_acq_rel);
+    }
+};
+} // namespace
+
 void AudioEngine::runCoordinatorPhase() noexcept
 {
+    // ★ WORK113 変更 2 (DIAG): フェーズの開始（奇数）と完了（偶数）。
+    //   完了側はスコープガードで保証する。
+    std::unique_lock<std::timed_mutex> diagPhaseLock(diagPhaseMutex_, std::defer_lock);
+    DiagPhaseTickGuard diagTickGuard { coordinatorPhaseTick_ };
+    convo::fetchAddAtomic(coordinatorPhaseTick_, std::uint64_t{1}, std::memory_order_acq_rel);
+
+    // ★ WORK113 変更 2 (DIAG): 2 ms 反復・100 ms 目標予算の有界取得。
+    //   取得前・取得後に shutdown と期限を確認する。
+    {
+        using DiagClock = std::chrono::steady_clock;
+        const auto diagDeadline = DiagClock::now() + std::chrono::milliseconds(100);
+
+        for (;;)
+        {
+            if (isShutdownInProgress())
+                return;
+
+            const auto now = DiagClock::now();
+            if (now >= diagDeadline)
+            {
+                const std::uint32_t count = convo::fetchAddAtomic(diagBudgetLogCount_, std::uint32_t{1},
+                                                                  std::memory_order_acq_rel) + 1;
+                if (count == 1 || (count % 100) == 0)
+                    juce::Logger::writeToLog("[DIAG][WORK113] diag_phase_lock_budget_exhausted count="
+                                             + juce::String(static_cast<int>(count)));
+                return;
+            }
+
+            const auto remaining = diagDeadline - now; // DiagClock::duration
+            const auto maxSlice = std::chrono::duration_cast<DiagClock::duration>(
+                std::chrono::milliseconds(2));
+            const auto slice = std::min(maxSlice, remaining);
+
+            if (diagPhaseLock.try_lock_for(slice))
+                break;
+        }
+
+        if (DiagClock::now() >= diagDeadline)
+        {
+            diagPhaseLock.unlock();
+            return;
+        }
+        if (isShutdownInProgress())
+        {
+            diagPhaseLock.unlock();
+            return;
+        }
+    }
+
     // R-06 / U2: 1 秒ごとの非 RT 集計（計画書 §6）。CoordinatorLoop は非 RT スレッドであり、
     //   この関数の中でリングの drain・統計・`[RTM]` 出力を行う。計測 OFF のときは即 false を返す。
     (void) convo::rtmeasure::pollIfDue();
