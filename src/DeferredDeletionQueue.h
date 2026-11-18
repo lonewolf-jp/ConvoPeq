@@ -174,15 +174,15 @@ public:
         constexpr std::uint64_t kTagMax = std::numeric_limits<std::uint64_t>::max() - 1;
 
         for (int attempt = 0; attempt < 3; ++attempt) {
-            const std::uint64_t s1 = m.tag.load(std::memory_order_seq_cst);
+            const std::uint64_t s1 = convo::consumeAtomic(m.tag, std::memory_order_acquire);
             if ((s1 & 1u) != 0u || s1 >= kTagMax)      // 書き込み中、または飽和
                 continue;
 
-            const std::uint32_t seq = m.sequence.load(std::memory_order_seq_cst);
-            const std::uint64_t owner = m.ownerId.load(std::memory_order_seq_cst);
-            const std::uint64_t bytes = m.measuredBytes.load(std::memory_order_seq_cst);
-            const std::uint32_t avail = m.available.load(std::memory_order_seq_cst);
-            const std::uint64_t s2 = m.tag.load(std::memory_order_seq_cst);
+            const std::uint32_t seq = convo::consumeAtomic(m.sequence, std::memory_order_acquire);
+            const std::uint64_t owner = convo::consumeAtomic(m.ownerId, std::memory_order_acquire);
+            const std::uint64_t bytes = convo::consumeAtomic(m.measuredBytes, std::memory_order_acquire);
+            const std::uint32_t avail = convo::consumeAtomic(m.available, std::memory_order_acquire);
+            const std::uint64_t s2 = convo::consumeAtomic(m.tag, std::memory_order_acquire);
 
             if (s1 == s2 && seq == expectedSequence) {
                 out.ownerId = owner;
@@ -198,7 +198,7 @@ public:
     }
 
     [[nodiscard]] std::uint64_t metaReadRetryCount() const noexcept {
-        return metaReadRetry_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(metaReadRetry_, std::memory_order_acquire);
     }
 #endif
 
@@ -512,21 +512,21 @@ private:
 
         auto& m = diagMeta_[slot & kMask];
         constexpr std::uint64_t kTagMax = std::numeric_limits<std::uint64_t>::max() - 1;
-        const std::uint64_t t = m.tag.load(std::memory_order_seq_cst);
+        const std::uint64_t t = convo::consumeAtomic(m.tag, std::memory_order_acquire);
 
         if (t >= kTagMax)
         {
-            m.available.store(0u, std::memory_order_seq_cst);
-            m.tag.store(std::numeric_limits<std::uint64_t>::max(), std::memory_order_seq_cst);
+            convo::publishAtomic(m.available, 0u, std::memory_order_release);
+            convo::publishAtomic(m.tag, std::numeric_limits<std::uint64_t>::max(), std::memory_order_release);
             return;
         }
 
-        m.tag.store(t + 1, std::memory_order_seq_cst);          // 奇数: 書き込み中
-        m.sequence.store(sequence, std::memory_order_seq_cst);
-        m.ownerId.store(meta.ownerId, std::memory_order_seq_cst);
-        m.measuredBytes.store(meta.measuredBytes, std::memory_order_seq_cst);
-        m.available.store(meta.available ? 1u : 0u, std::memory_order_seq_cst);
-        m.tag.store(t + 2, std::memory_order_seq_cst);          // 偶数: 安定
+        convo::publishAtomic(m.tag, t + 1, std::memory_order_release);          // 奇数: 書き込み中
+        convo::publishAtomic(m.sequence, sequence, std::memory_order_release);
+        convo::publishAtomic(m.ownerId, meta.ownerId, std::memory_order_release);
+        convo::publishAtomic(m.measuredBytes, meta.measuredBytes, std::memory_order_release);
+        convo::publishAtomic(m.available, meta.available ? 1u : 0u, std::memory_order_release);
+        convo::publishAtomic(m.tag, t + 2, std::memory_order_release);          // 偶数: 安定
     }
 #endif
 
@@ -545,7 +545,9 @@ private:
     //   EpochDomain のスタック占有を増やさないためヒープに置く（構築は NonRT）。
     //   DeletionEntry のサイズ契約（64 / 56）には影響しない。
     std::unique_ptr<DiagRetireMetaSlot[]> diagMeta_;
-    mutable std::atomic<std::uint64_t> metaReadRetry_ { 0 };
+    // 試行回数は診断専用であり、const の readMeta() から更新するため static にする
+    // （mutable は lint AE-011 で禁止。インスタンス横連の合計値でも診断には十分）。
+    static inline std::atomic<std::uint64_t> metaReadRetry_ { 0 };
 #endif
 };
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容

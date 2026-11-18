@@ -102,7 +102,10 @@ public:
     static constexpr std::size_t kConvolverSlots = 8;
     static constexpr std::size_t kHistorySlots = 128;
 
-    using LogSink = void (*)(const char*);
+    // lint AE-014 は `(*)` と const が同一行にある形を C キャスト疑いとして拒否するため、
+    // 関数型とポインタに分ける。
+    using LogSinkFn = void (const char*);
+    using LogSink = LogSinkFn*;
 
     static ObjectRegistry& instance() noexcept
     {
@@ -116,7 +119,7 @@ public:
     void setLogSink (LogSink sink) noexcept
     {
         std::lock_guard<std::mutex> lock (mutex_);
-        logSink_.store (sink, std::memory_order_release);
+        convo::publishAtomic(logSink_, sink, std::memory_order_release);
         if (sink == nullptr)
             return;
 
@@ -131,7 +134,7 @@ public:
     {
         if (line == nullptr)
             return;
-        const LogSink sink = logSink_.load (std::memory_order_acquire);
+        const LogSink sink = convo::consumeAtomic(logSink_, std::memory_order_acquire);
         if (sink != nullptr)
             sink (line);
     }
@@ -141,7 +144,7 @@ public:
     void flushRecentLog() noexcept
     {
         std::lock_guard<std::mutex> lock (mutex_);
-        const LogSink sink = logSink_.load (std::memory_order_acquire);
+        const LogSink sink = convo::consumeAtomic(logSink_, std::memory_order_acquire);
         if (sink == nullptr || recentCount_ == 0)
             return;
 
@@ -532,7 +535,7 @@ private:
         if (recentCount_ < kRecentLogSlots)
             ++recentCount_;
 
-        const LogSink sink = logSink_.load (std::memory_order_acquire);
+        const LogSink sink = convo::consumeAtomic(logSink_, std::memory_order_acquire);
         if (sink == nullptr)
         {
             // sink 設定前は固定長バッファに退避し、設定時にまとめて出す（取りこぼさない）。

@@ -1307,7 +1307,7 @@ void AudioEngine::timerCallback()
         {
             // 起動初期（CLI ログファイルが開く前）のイベントを 1 回だけ吐き出す。
             static std::atomic<bool> s_recentFlushed { false };
-            if (! s_recentFlushed.exchange (true, std::memory_order_acq_rel))
+            if (! convo::exchangeAtomic(s_recentFlushed, true, std::memory_order_acq_rel))
                 convo::diag::registry().flushRecentLog();
 
             const auto totals = convo::diag::registry().totals();

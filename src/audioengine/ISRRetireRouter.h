@@ -532,12 +532,12 @@ private:
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ WORK113 変更1: 帰属メタの disposition カウンタ（router 所有・engine 寿命）。
     //   恒等式: sized == stored + lostQuarantine + lostEmergency + lostTerminal + unsupportedProvider
-    mutable std::atomic<std::uint64_t> metaSizedCount_ { 0 };
-    mutable std::atomic<std::uint64_t> metaStoredCount_ { 0 };
-    mutable std::atomic<std::uint64_t> metaLostQuarantineCount_ { 0 };
-    mutable std::atomic<std::uint64_t> metaLostEmergencyCount_ { 0 };
-    mutable std::atomic<std::uint64_t> metaLostTerminalCount_ { 0 };
-    mutable std::atomic<std::uint64_t> metaUnsupportedProviderCount_ { 0 };
+    std::atomic<std::uint64_t> metaSizedCount_ { 0 };
+    std::atomic<std::uint64_t> metaStoredCount_ { 0 };
+    std::atomic<std::uint64_t> metaLostQuarantineCount_ { 0 };
+    std::atomic<std::uint64_t> metaLostEmergencyCount_ { 0 };
+    std::atomic<std::uint64_t> metaLostTerminalCount_ { 0 };
+    std::atomic<std::uint64_t> metaUnsupportedProviderCount_ { 0 };
 #endif
     std::atomic<uint64_t> m_lastForcedReclaimTimeUs_{0};
 

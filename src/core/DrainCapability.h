@@ -42,7 +42,7 @@ public:
         , finalizeRequests_ (other.finalizeRequests_)
     {
         other.valid_ = false;
-        other.consumed_.store (true, std::memory_order_release);
+        convo::publishAtomic(other.consumed_, true, std::memory_order_release);
     }
 
     DrainCapability& operator= (DrainCapability&&) = delete;
@@ -52,9 +52,7 @@ public:
         if (! valid_)
             return false;
         bool expected = false;
-        return consumed_.compare_exchange_strong (expected, true,
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_acquire);
+        return convo::compareExchangeAtomic(consumed_, expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
     }
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }

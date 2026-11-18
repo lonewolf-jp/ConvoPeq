@@ -61,7 +61,7 @@ public:
 
     [[nodiscard]] uint64_t metaDroppedCount() const noexcept
     {
-        return metaDroppedCount_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(metaDroppedCount_, std::memory_order_acquire);
     }
 
 private:

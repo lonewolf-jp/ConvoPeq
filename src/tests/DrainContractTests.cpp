@@ -83,7 +83,7 @@ void testReaderFence (convo::EpochDomain& domain)
 
     // fence は reader の入場だけを止める。NonRT の enqueue は継続できる。
     static int sentinel = 0;
-    const auto noopDeleter = [] (void*) noexcept {};
+    auto noopDeleter = [] (void*) noexcept {};
     check (domain.enqueueRetire (&sentinel, noopDeleter, domain.currentEpoch()),
            "fence: enqueueRetire must still succeed");
     domain.drainAll();

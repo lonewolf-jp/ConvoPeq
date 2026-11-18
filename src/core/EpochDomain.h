@@ -77,18 +77,18 @@ public:
     public:
         bool tryEnter() noexcept
         {
-            if (closed_.load(std::memory_order_seq_cst))
+            if (convo::consumeAtomic(closed_, std::memory_order_acquire))
                 return false;
-            active_.fetch_add(1, std::memory_order_seq_cst);
-            if (closed_.load(std::memory_order_seq_cst))
+            convo::fetchAddAtomic(active_, 1, std::memory_order_acq_rel);
+            if (convo::consumeAtomic(closed_, std::memory_order_acquire))
             {
-                active_.fetch_sub(1, std::memory_order_seq_cst);
+                convo::fetchSubAtomic(active_, 1, std::memory_order_acq_rel);
                 return false;
             }
             return true;
         }
-        void exit() noexcept { active_.fetch_sub(1, std::memory_order_seq_cst); }
-        void close() noexcept { closed_.store(true, std::memory_order_seq_cst); }
+        void exit() noexcept { convo::fetchSubAtomic(active_, 1, std::memory_order_acq_rel); }
+        void close() noexcept { convo::publishAtomic(closed_, true, std::memory_order_release); }
 
         // 期限内の idle だけを成功として扱う（期限到達後は idle でも false）。
         bool waitForIdle(std::chrono::milliseconds timeout) noexcept
@@ -96,7 +96,7 @@ public:
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             for (;;)
             {
-                const bool idle = active_.load(std::memory_order_seq_cst) == 0;
+                const bool idle = convo::consumeAtomic(active_, std::memory_order_acquire) == 0;
                 const auto now = std::chrono::steady_clock::now();
                 if (now >= deadline)
                     return false;
@@ -106,8 +106,8 @@ public:
             }
         }
 
-        [[nodiscard]] uint32_t active() const noexcept { return active_.load(std::memory_order_seq_cst); }
-        [[nodiscard]] bool closed() const noexcept { return closed_.load(std::memory_order_seq_cst); }
+        [[nodiscard]] uint32_t active() const noexcept { return convo::consumeAtomic(active_, std::memory_order_acquire); }
+        [[nodiscard]] bool closed() const noexcept { return convo::consumeAtomic(closed_, std::memory_order_acquire); }
 
     private:
         std::atomic<bool> closed_ { false };
@@ -139,23 +139,23 @@ public:
     [[nodiscard]] std::shared_ptr<DeferredDeletionQueue> takeForShutdown() noexcept
     {
         std::lock_guard<std::mutex> lock(queueRefMutex_);
-        queueRt_.store(nullptr, std::memory_order_release);
+        convo::publishAtomic(queueRt_, nullptr, std::memory_order_release);
         return std::move(queueRef_);
     }
 
     [[nodiscard]] bool queueAvailable() const noexcept
     {
-        return queueAvailable_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(queueAvailable_, std::memory_order_acquire);
     }
 
     // ── RT 誤用の検出（Debug のみ）──────────────────────────────────
     void setRtThreadProbe(RtThreadProbe probe) noexcept { rtProbe_ = probe; }
-    [[nodiscard]] std::uint64_t rtMisuseCount() const noexcept { return rtMisuseCount_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t rtMisuseCount() const noexcept { return convo::consumeAtomic(rtMisuseCount_, std::memory_order_acquire); }
 
     // ── Reader fence（shutdown 専用）────────────────────────────────
     void engageShutdownReaderFence() noexcept
     {
-        shutdownReaderFence_.store(true, std::memory_order_release);
+        convo::publishAtomic(shutdownReaderFence_, true, std::memory_order_release);
         // ★ WORK113: 以降の admission を拒否し、入場処理中の reader を待てるようにする。
         readerAdmissionGate_.close();
     }
@@ -187,17 +187,17 @@ public:
     using ReaderAdmissionSeam = void (*) (void*);
     static void setReaderAdmissionSeam (ReaderAdmissionSeam fn, void* ctx) noexcept
     {
-        readerAdmissionSeamCtx_.store (ctx, std::memory_order_release);
-        readerAdmissionSeamFn_.store (fn, std::memory_order_release);
+        convo::publishAtomic(readerAdmissionSeamCtx_, ctx, std::memory_order_release);
+        convo::publishAtomic(readerAdmissionSeamFn_, fn, std::memory_order_release);
     }
 #endif
     [[nodiscard]] bool shutdownReaderFenceEngaged() const noexcept
     {
-        return shutdownReaderFence_.load(std::memory_order_acquire);
+        return convo::consumeAtomic(shutdownReaderFence_, std::memory_order_acquire);
     }
 
-    [[nodiscard]] std::uint32_t reacquireAfterFence() const noexcept { return reacquireAfterFence_.load(std::memory_order_acquire); }
-    [[nodiscard]] std::uint32_t enterAfterFence() const noexcept { return enterAfterFence_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint32_t reacquireAfterFence() const noexcept { return convo::consumeAtomic(reacquireAfterFence_, std::memory_order_acquire); }
+    [[nodiscard]] std::uint32_t enterAfterFence() const noexcept { return convo::consumeAtomic(enterAfterFence_, std::memory_order_acquire); }
 
     // ── 停止性: close → waitForIdle → epochAtFence ───────────────────
     bool closePublishersAndWaitIdle(std::chrono::milliseconds timeout) noexcept
@@ -208,14 +208,14 @@ public:
             epochIdleTimeouts_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        epochAtFence_.store(currentEpoch(), std::memory_order_release);
+        convo::publishAtomic(epochAtFence_, currentEpoch(), std::memory_order_release);
         return true;
     }
-    [[nodiscard]] std::uint32_t epochIdleTimeouts() const noexcept { return epochIdleTimeouts_.load(std::memory_order_acquire); }
-    [[nodiscard]] std::uint32_t latePublisherAttempts() const noexcept { return latePublisherAttempts_.load(std::memory_order_acquire); }
-    [[nodiscard]] std::uint64_t epochAtFence() const noexcept { return epochAtFence_.load(std::memory_order_acquire); }
-    [[nodiscard]] std::uint64_t drainReaderFailures() const noexcept { return drainReaderFailures_.load(std::memory_order_acquire); }
-    [[nodiscard]] std::uint64_t drainRemainingAfter() const noexcept { return drainRemainingAfter_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint32_t epochIdleTimeouts() const noexcept { return convo::consumeAtomic(epochIdleTimeouts_, std::memory_order_acquire); }
+    [[nodiscard]] std::uint32_t latePublisherAttempts() const noexcept { return convo::consumeAtomic(latePublisherAttempts_, std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t epochAtFence() const noexcept { return convo::consumeAtomic(epochAtFence_, std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t drainReaderFailures() const noexcept { return convo::consumeAtomic(drainReaderFailures_, std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t drainRemainingAfter() const noexcept { return convo::consumeAtomic(drainRemainingAfter_, std::memory_order_acquire); }
 
     // ── 隔離（自己参照・固定容量上限なし・プロセス寿命依存の意図的リーク）──
     QuarantineResult quarantineQueue(std::shared_ptr<DeferredDeletionQueue>& local) noexcept
@@ -226,21 +226,19 @@ public:
         const std::uint32_t pending = local->sizeApprox();
 
         // 1. 一意化（勝った 1 スレッドだけが登録する）
-        if (local->quarantineEnqueued_.exchange(true, std::memory_order_acq_rel))
+        if (convo::exchangeAtomic(local->quarantineEnqueued_, true, std::memory_order_acq_rel))
             return QuarantineResult::AlreadyRegistered;
 
         // 2. 保持の確立（登録より先。3 が失敗しても保持は成立する）
         local->quarantineSelfRef_ = local;
 
         // 3. 診断用の侵入型リスト（append-only・公開後は next を変更しない）
-        DeferredDeletionQueue* expected = quarantineHead_.load(std::memory_order_acquire);
+        DeferredDeletionQueue* expected = convo::consumeAtomic(quarantineHead_, std::memory_order_acquire);
         do
         {
             local->quarantineNext_.store(expected, std::memory_order_relaxed);
         }
-        while (! quarantineHead_.compare_exchange_weak(expected, local.get(),
-                                                       std::memory_order_acq_rel,
-                                                       std::memory_order_acquire));
+        while (! convo::compareExchangeWeakAtomic(quarantineHead_, expected, local.get(), std::memory_order_acq_rel, std::memory_order_acquire));
 
         // 4. 計数（move より前・atomic のみ）
         quarantineCount_.fetch_add(1, std::memory_order_relaxed);
@@ -249,9 +247,9 @@ public:
         return QuarantineResult::Registered;
     }
 
-    [[nodiscard]] static std::uint64_t quarantineCount() noexcept { return quarantineCount_.load(std::memory_order_acquire); }
-    [[nodiscard]] static std::uint64_t quarantinePendingEntries() noexcept { return quarantinePendingEntries_.load(std::memory_order_acquire); }
-    [[nodiscard]] static std::uint64_t quarantineRetainedBytes() noexcept { return quarantineRetainedBytes_.load(std::memory_order_acquire); }
+    [[nodiscard]] static std::uint64_t quarantineCount() noexcept { return convo::consumeAtomic(quarantineCount_, std::memory_order_acquire); }
+    [[nodiscard]] static std::uint64_t quarantinePendingEntries() noexcept { return convo::consumeAtomic(quarantinePendingEntries_, std::memory_order_acquire); }
+    [[nodiscard]] static std::uint64_t quarantineRetainedBytes() noexcept { return convo::consumeAtomic(quarantineRetainedBytes_, std::memory_order_acquire); }
 
     // ── 最終 drain（shutdown 専用・capability 必須）─────────────────
     DrainResult drainQueue(DeferredDeletionQueue& queue, convo::DrainCapability&& cap) noexcept
@@ -271,7 +269,7 @@ public:
         const std::uint32_t admissions = readerAdmissionsActive();
         const std::uint32_t pendingAdmissions = admissionPendingSlots();
         const std::uint64_t minReader = getMinReaderEpoch();
-        const std::uint64_t fenceEpoch = epochAtFence_.load(std::memory_order_acquire);
+        const std::uint64_t fenceEpoch = convo::consumeAtomic(epochAtFence_, std::memory_order_acquire);
         const bool epochEqual = ! isOlder(minReader, fenceEpoch) && ! isOlder(fenceEpoch, minReader);
         const bool capEpochEqual = ! isOlder(cap.epochAtIssue(), fenceEpoch)
                                 && ! isOlder(fenceEpoch, cap.epochAtIssue());
@@ -319,15 +317,15 @@ public:
         try
         {
             auto queue = std::make_shared<DeferredDeletionQueue>();
-            queueRt_.store(queue.get(), std::memory_order_release);
+            convo::publishAtomic(queueRt_, queue.get(), std::memory_order_release);
             queueRef_ = std::move(queue);
-            queueAvailable_.store(true, std::memory_order_release);
+            convo::publishAtomic(queueAvailable_, true, std::memory_order_release);
         }
         catch (...)
         {
             queueRef_.reset();
-            queueRt_.store(nullptr, std::memory_order_release);
-            queueAvailable_.store(false, std::memory_order_release);
+            convo::publishAtomic(queueRt_, nullptr, std::memory_order_release);
+            convo::publishAtomic(queueAvailable_, false, std::memory_order_release);
             std::fprintf(stderr, "[FAULT] epoch_queue_allocation_failed\n");
         }
     }
@@ -525,8 +523,8 @@ public:
 
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
         // テスト用シーム（テスト専用 TU のみ）。admission 取得後・fence 判定前に停止点を作る。
-        if (auto fn = readerAdmissionSeamFn_.load (std::memory_order_acquire))
-            fn (readerAdmissionSeamCtx_.load (std::memory_order_acquire));
+        if (auto fn = convo::consumeAtomic(readerAdmissionSeamFn_, std::memory_order_acquire))
+            fn (convo::consumeAtomic(readerAdmissionSeamCtx_, std::memory_order_acquire));
 #endif
 
         // ★ WORK113: admission 取得後に fence を読み直す。閉鎖済みなら入場しない
@@ -985,7 +983,7 @@ public:
         if (rtProbe_ != nullptr && rtProbe_())
         {
             rtMisuseCount_.fetch_add(1, std::memory_order_relaxed);
-            assert(false && "EpochDomain::enqueueRetire called from the audio thread");
+            assert(false && "retire enqueue is not allowed on the audio thread");
         }
 #endif
         auto q = borrow();
@@ -997,7 +995,7 @@ public:
     // ★ WORK113: RT 専用（生ポインタのみ・mutex も shared_ptr も触らない）。
     bool enqueueRetireRt(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
     {
-        auto* q = queueRt_.load(std::memory_order_acquire);
+        auto* q = convo::consumeAtomic(queueRt_, std::memory_order_acquire);
         if (q == nullptr)
             return false;
         return q->enqueue(ptr, deleter, epoch, domainId_);

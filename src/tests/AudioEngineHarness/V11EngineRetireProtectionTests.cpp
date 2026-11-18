@@ -3030,8 +3030,8 @@ public:
     static bool enqueueFutureEpochSentinel (AudioEngine& engine, void* ptr,
                                             void (*deleter) (void*)) noexcept
     {
-        return engine.m_epochDomain.enqueueRetire (ptr, deleter,
-                                                   engine.m_epochDomain.currentEpoch() + 1000);
+        auto& domain = engine.m_epochDomain;
+        return domain.enqueueRetire (ptr, deleter, domain.currentEpoch() + 1000);
     }
 
     static convo::EpochDomain& epochDomain (AudioEngine& engine) noexcept
@@ -3716,7 +3716,7 @@ bool checkShutdownHoldActiveReader()
 
     if (! entered.load())
     {
-        std::fprintf(stderr, "[DQ-H5-2] FAIL: reader did not enter the critical section\n");
+        std::fprintf(stderr, "[DQ-H5-2] FAIL: reader did not enter the protected section\n");
         ok = false;
     }
     if (! exited.load())
@@ -3742,7 +3742,7 @@ bool checkShutdownHoldActiveReader()
     if (deleteCalls.load (std::memory_order_acquire) != 0)
     {
         std::fprintf(stderr,
-                     "[DQ-H5-7] FAIL: deleter ran while an active reader was inside the critical section "
+                     "[DQ-H5-7] FAIL: deleter ran while an active reader was inside the protected section "
                      "(deleter=%d)\n",
                      deleteCalls.load (std::memory_order_acquire));
         ok = false;

@@ -434,7 +434,7 @@ struct DiagPhaseTickGuard
     std::atomic<std::uint64_t>& tick;
     ~DiagPhaseTickGuard()
     {
-        tick.fetch_add(1, std::memory_order_seq_cst);
+        convo::fetchAddAtomic(tick, 1, std::memory_order_acq_rel);
     }
 };
 } // namespace
@@ -445,7 +445,7 @@ void AudioEngine::runCoordinatorPhase() noexcept
     //   完了側はスコープガードで保証する。
     std::unique_lock<std::timed_mutex> diagPhaseLock(diagPhaseMutex_, std::defer_lock);
     DiagPhaseTickGuard diagTickGuard { coordinatorPhaseTick_ };
-    convo::fetchAddAtomic(coordinatorPhaseTick_, std::uint64_t{1}, std::memory_order_seq_cst);
+    convo::fetchAddAtomic(coordinatorPhaseTick_, std::uint64_t{1}, std::memory_order_acq_rel);
 
     // ★ WORK113 変更 2 (DIAG): 2 ms 反復・100 ms 目標予算の有界取得。
     //   取得前・取得後に shutdown と期限を確認する。

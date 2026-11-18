@@ -102,7 +102,7 @@ inline std::uint32_t admissionTicketSeq(std::uint64_t ticket) noexcept
 struct DiagBusyGuard
 {
     std::atomic<bool>& flag;
-    ~DiagBusyGuard() { flag.store(false, std::memory_order_release); }
+    ~DiagBusyGuard() { convo::publishAtomic(flag, false, std::memory_order_release); }
 };
 } // namespace
 
@@ -1036,7 +1036,7 @@ void AudioEngine::rebuildThreadLoop()
                 });
 
                 // ★ WORK113 変更2 (DIAG): 起床を活動として記録する（終了・shutdown 判定より前）。
-                convo::fetchAddAtomic(rebuildWorkerActivitySeq_, std::uint64_t{1}, std::memory_order_seq_cst);
+                convo::fetchAddAtomic(rebuildWorkerActivitySeq_, std::uint64_t{1}, std::memory_order_acq_rel);
                 convo::publishAtomic(rebuildWorkerBusy_, true, std::memory_order_release);
 
                 if (convo::consumeAtomic(rebuildThreadShouldExit, std::memory_order_acquire)) break;
@@ -1611,8 +1611,8 @@ void AudioEngine::diagSnapshotConditions(DiagConditionsSnapshot& out) noexcept
     out.publishRetryReady = publishRetryReady;
     out.recoveryPending = recoveryPending;
     out.pendingDiagTask = hasPendingDiagTask;
-    out.phaseTick = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_seq_cst);
-    out.workerActivitySeq = convo::consumeAtomic(rebuildWorkerActivitySeq_, std::memory_order_seq_cst);
+    out.phaseTick = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_acquire);
+    out.workerActivitySeq = convo::consumeAtomic(rebuildWorkerActivitySeq_, std::memory_order_acquire);
 
     out.swapPending = runtimePublicationBridge_.isSwapPending();
     out.publicationResidency = runtimePublicationBridge_.getPublicationIntentResidencyCount();
@@ -1681,7 +1681,7 @@ AudioEngine::RebuildDispatchOutcome AudioEngine::beginDiagWindow() noexcept
     std::uint64_t t0 = 0;
     for (;;)
     {
-        const std::uint64_t t = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_seq_cst);
+        const std::uint64_t t = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_acquire);
         if ((t % 2) == 0)
         {
             t0 = t;
@@ -1697,7 +1697,7 @@ AudioEngine::RebuildDispatchOutcome AudioEngine::beginDiagWindow() noexcept
 
     for (;;)
     {
-        const std::uint64_t t = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_seq_cst);
+        const std::uint64_t t = convo::consumeAtomic(coordinatorPhaseTick_, std::memory_order_acquire);
         if (t >= t0 + 4 && (t % 2) == 0)
             break;
 
