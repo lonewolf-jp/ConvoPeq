@@ -3067,6 +3067,12 @@ public:
     {
         return engine.worldRetirementReferenceOwner_.get();
     }
+
+    // ★ WORK113: publish gate の admission をテストから取得する（PublishScope で停止させる）。
+    static convo::EpochDomain::EpochPublishGate& publishGate (convo::EpochDomain& domain) noexcept
+    {
+        return domain.publishGate_;
+    }
 };
 
 bool checkShutdownHoldContract()
@@ -3443,6 +3449,131 @@ bool checkShutdownHoldPublisherObserverRace()
     return ok;
 }
 
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): publisher timeout 時の fail-closed [DQ-H4]。
+//   reader admission は idle のまま、publisher だけを EpochPublishGate 内に停止させ、
+//   ~AudioEngine の publisher 待機を timeout させる。基盤（domain / router / observer /
+//   telemetry）が保持され、破棄後に publisher が scope を安全に終了できることを確認する。
+//==============================================================================
+bool checkShutdownHoldPublisherTimeout()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    static std::atomic<int> deleteCalls { 0 };
+    static int sentinel = 0;
+    auto sentinelDeleter = [](void*) noexcept
+    {
+        deleteCalls.fetch_add (1, std::memory_order_relaxed);
+    };
+
+    deleteCalls.store (0, std::memory_order_relaxed);
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto abandonedBefore = AudioEngine::abandonedReaderSubstratesForTest();
+    const auto publisherFailuresBefore = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    const auto admissionFailuresBefore = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
+
+    convo::EpochDomain* domainPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+
+    std::atomic<bool> publisherEntered { false };
+    std::atomic<bool> releasePublisher { false };
+    std::atomic<bool> publisherCompleted { false };
+    std::atomic<std::uint32_t> gateActiveAfterExit { 999 };
+    std::thread publisher;
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+
+        if (domainPtr == nullptr || routerPtr == nullptr
+            || ! ShutdownHoldTestAccess::enqueueFutureEpochSentinel (*engine, &sentinel, sentinelDeleter))
+        {
+            std::fprintf(stderr, "[DQ-H4-1] FAIL: setup failed\n");
+            return false;
+        }
+
+        publisher = std::thread ([&]
+        {
+            auto& gate = ShutdownHoldTestAccess::publishGate (*domainPtr);
+            {
+                convo::EpochDomain::PublishScope scope (gate);
+                publisherEntered.store (scope.entered(), std::memory_order_release);
+                if (! scope.entered())
+                    return;
+
+                while (! releasePublisher.load (std::memory_order_acquire))
+                    std::this_thread::yield();
+
+                // engine 破棄後に scope を終了する（gate_.exit() が破棄済み gate を触れば UAF）
+            }
+            gateActiveAfterExit.store (gate.active(), std::memory_order_release);
+            publisherCompleted.store (true, std::memory_order_release);
+        });
+
+        while (! publisherEntered.load (std::memory_order_acquire))
+            std::this_thread::yield();
+
+        // ここで ~AudioEngine（publisher は gate 内 → publishers idle は timeout）
+    }
+
+    releasePublisher.store (true, std::memory_order_release);
+    publisher.join();
+
+    if (! publisherCompleted.load())
+    {
+        std::fprintf(stderr, "[DQ-H4-2] FAIL: publisher did not finish the scope after teardown\n");
+        ok = false;
+    }
+    if (gateActiveAfterExit.load() != 0u)
+    {
+        std::fprintf(stderr, "[DQ-H4-3] FAIL: gate active did not return to 0 (active=%u)\n",
+                     static_cast<unsigned>(gateActiveAfterExit.load()));
+        ok = false;
+    }
+    if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publisherFailuresBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H4-4] FAIL: publishers idle timeout was not observed (count=%d)\n",
+                     AudioEngine::shutdownPublisherIdleFailuresForTest());
+        ok = false;
+    }
+    if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() != admissionFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-H4-5] FAIL: reader admission was not idle during this test\n");
+        ok = false;
+    }
+    if (deleteCalls.load (std::memory_order_acquire) != 0)
+    {
+        std::fprintf(stderr, "[DQ-H4-6] FAIL: deleter ran with a stuck publisher (deleter=%d)\n",
+                     deleteCalls.load (std::memory_order_acquire));
+        ok = false;
+    }
+    if (convo::EpochDomain::quarantineCount() != quarantineBefore + 1u)
+    {
+        std::fprintf(stderr, "[DQ-H4-7] FAIL: D queue was not quarantined\n");
+        ok = false;
+    }
+    if (! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+    {
+        std::fprintf(stderr, "[DQ-H4-8] FAIL: substrate was not retained on the publisher timeout\n");
+        ok = false;
+    }
+    if (AudioEngine::abandonedReaderSubstratesForTest() != abandonedBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-H4-9] FAIL: retained substrate count mismatch (count=%d)\n",
+                     AudioEngine::abandonedReaderSubstratesForTest());
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-H4] publisher timeout: PASS (publishers not idle, reader admissions idle, "
+                    "no destructive drain, substrate retained, publisher exits safely)\n");
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -3597,6 +3728,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkShutdownHoldPublisherObserverRace())
     {
         std::fprintf(stderr, "FAIL: checkShutdownHoldPublisherObserverRace (DQ-H3)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldPublisherTimeout())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldPublisherTimeout (DQ-H4)\n");
         hdOk = false;
     }
     if (!hdOk)

@@ -26,6 +26,9 @@ std::atomic<int> AudioEngine::s_engineInstanceCount_{0};
 
 // ★ WORK113: reader 基盤をプロセス寿命へ移した累計（shutdown の fail-closed 経路）。
 std::atomic<int> AudioEngine::s_abandonedReaderSubstrates_{0};
+std::atomic<int> AudioEngine::s_abandonedSubstrateOverflow_{0};
+std::atomic<int> AudioEngine::s_shutdownPublisherIdleFailures_{0};
+std::atomic<int> AudioEngine::s_shutdownReaderAdmissionIdleFailures_{0};
 
 namespace
 {
@@ -334,6 +337,7 @@ AudioEngine::~AudioEngine()
         m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(shutdownWaitMs));
     if (! terminalPublishersIdle)
     {
+        (void) convo::fetchAddAtomic(s_shutdownPublisherIdleFailures_, 1, std::memory_order_acq_rel);
         diagLog("[FAULT] epoch_publishers_not_idle timeouts="
                 + juce::String(static_cast<int>(m_epochDomain.epochIdleTimeouts())));
     }
@@ -345,17 +349,19 @@ AudioEngine::~AudioEngine()
         m_epochDomain.waitForReaderAdmissions(std::chrono::milliseconds(shutdownWaitMs));
     if (! terminalReaderAdmissionsIdle)
     {
+        (void) convo::fetchAddAtomic(s_shutdownReaderAdmissionIdleFailures_, 1, std::memory_order_acq_rel);
         diagLog("[FAULT] reader_admissions_not_idle active="
                 + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
                 + " pendingSlots="
                 + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots())));
     }
 
-    // ★ WORK113 (2026-11-18 Owner 指示): reader の静止を確認できない場合は、reader quiescence を
-    //   前提とする破棄・回収を一切実行しない（fail-closed）。予約中（depth 0・未 enter）の reader は
-    //   activeReaderCount() に現れないため、activeReaderCount() == 0 だけを根拠に force drain しては
-    //   ならない。安全を証明できない対象は強制解放せず保持する（リークを選び、UAF を選ばない）。
-    const bool readerQuiescent = terminalReaderAdmissionsIdle;
+    // ★ WORK113 (2026-11-18 Owner 指示): 破棄・回収の前提は「publisher と reader の両方が静止」である。
+    //   terminalPublishersIdle == false は、publisher がまだ EpochPublishGate の active scope 内に
+    //   いることを意味する。その scope のデストラクタは gate_.exit() を呼ぶため、domain を破棄すると
+    //   破棄済み gate へのアクセスになる。reader admission だけでは不十分である。
+    //   安全性を証明できない対象は強制解放せず保持する（リークを選び、UAF を選ばない）。
+    const bool shutdownSubstrateQuiescent = terminalPublishersIdle && terminalReaderAdmissionsIdle;
 
     // 最終 retire は 1 回だけ（releaseResources で実行済みなら 0 回）。
     //   ここは retire 要求の移送のみで、ポインタの解放は行わない。
@@ -371,15 +377,15 @@ AudioEngine::~AudioEngine()
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
 
-    // 解放を伴う deferred queue の回収は reader 静止時だけ実行する。
-    if (readerQuiescent)
+    // 解放を伴う deferred queue の回収は publisher と reader の静止時だけ実行する。
+    if (shutdownSubstrateQuiescent)
     {
         drainDeferredRetireQueues(true);
     }
     else
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        diagLog("[WORK113] shutdown hold: deferred retire queues retained (reader admission in flight)");
+        diagLog("[WORK113] shutdown hold: deferred retire queues retained (publisher or reader not idle)");
 #endif
     }
 
@@ -388,9 +394,9 @@ AudioEngine::~AudioEngine()
     //   path (the only caller of dequeuePendingRetireIntents()) has stopped.
     // ★ WORK113 (2026-11-18 Owner 指示): この関数は retire 要求を移送するだけで物理解放は
     //   しないが、EpochControl::reclaim() によって slot の lifecycle lane を
-    //   ReclaimEligible → Reclaimed へ進める。reader の静止を確認できない状態で slot の
-    //   再利用可能性を動かさないため、fail-closed 経路では実行しない（残存要求は保持する）。
-    if (readerQuiescent)
+    //   ReclaimEligible → Reclaimed へ進める。静止を確認できない状態で slot の再利用可能性を
+    //   動かさないため、fail-closed 経路では実行しない（残存要求は保持する）。
+    if (shutdownSubstrateQuiescent)
     {
         drainPendingRetireIntentsForShutdown();
     }
@@ -409,10 +415,11 @@ AudioEngine::~AudioEngine()
     // ★ 15-P-5 FIX: stuck-reader fallback は D のみにしない。Audio Thread は停止済みのため、
     //   Q + E + T の drainAllQuarantineStore（drainAllUnsafe ベース、epoch 非依存）も強制実行する。
     //   drainAllUnsafe は Audio Thread 停止後のみ呼ばれる契約を満たす（RetireQuarantineStore.h:59参照）。
-    // ★ WORK113 (2026-11-18 Owner 指示): reader の静止を確認できない場合は、この force drain を
-    //   行わない。activeReaderCount()==0 だけでは、予約中（depth 0）の reader が後から入場する
-    //   可能性を排除できないため、所有権を保持する fail-closed 経路に切り替える。
-    if (! readerQuiescent)
+    // ★ WORK113 (2026-11-18 Owner 指示): publisher と reader の静止を確認できない場合は、この
+    //   force drain を行わない。activeReaderCount()==0 だけでは、予約中（depth 0）の reader が
+    //   後から入場する可能性を排除できず、publisher が gate 内に残る場合は PublishScope の
+    //   終了（gate_.exit）が破棄済み gate に触れる。所有権を保持する fail-closed 経路に切り替える。
+    if (! shutdownSubstrateQuiescent)
     {
         holdRetireQueuesForShutdownNonRt();
     }
@@ -436,13 +443,13 @@ AudioEngine::~AudioEngine()
         const auto deferredBefore = deferredDestroyResidentCount();
         if (deferredBefore > 0)
         {
-            if (readerQuiescent)
+            if (shutdownSubstrateQuiescent)
             {
                 (void)retryDeferredDestroys();
             }
             else
             {
-                // ★ WORK113: reader 静止を確認できないため、pin が解放済みに見えても回収しない。
+                // ★ WORK113: 静止を確認できないため、pin が解放済みに見えても回収しない。
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
                 diagLog("[WORK113] shutdown hold: deferred DSPCore retry skipped (retained)");
 #endif
@@ -483,9 +490,9 @@ AudioEngine::~AudioEngine()
         if (residualPending != 0)
             diagLog("[D162-2E] INV-D162-8: EBR residual pending=" + juce::String((int)residualPending)
                 + " after drainAll — DSPCore destruction may carry into member teardown");
-        if (readerQuiescent)
+        if (shutdownSubstrateQuiescent)
             jassert(residualPending == 0); // Debug のみ assert（Release では diagLog のみ）
-        // reader 静止を確認できない場合は残留が想定内（fail-closed で保持している）。
+        // 静止を確認できない場合は残留が想定内（fail-closed で保持している）。
     }
 #endif
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
@@ -545,13 +552,13 @@ AudioEngine::~AudioEngine()
     //   この時点では shutdownRuntime_ / m_retireRouter / dspHandleRuntime_ 等が全て生存しているため、
     //   dspHandleRuntime_.retire + resolve + delete が安全に実行できる。
     //   呼び出し後は ~CacheMap が engine member 非依存の no-op となる（UAF 排除）。
-    if (readerQuiescent)
+    if (shutdownSubstrateQuiescent)
     {
         eqCacheManager.drainForShutdown();
     }
     else
     {
-        // ★ WORK113: reader 静止を確認できないため、EQ cache の強制破棄は行わない。
+        // ★ WORK113: 静止を確認できないため、EQ cache の強制破棄は行わない。
         //   （~EQCacheManager は CacheMap のみを破棄し、EQCoeffCache の実体は解放しない）
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         diagLog("[WORK113] shutdown hold: EQ cache drain skipped (retained)");
@@ -560,7 +567,7 @@ AudioEngine::~AudioEngine()
 
     // ★ WORK113 Queue/Gate/Drain: 全 retire source の処理後、最後に checked drain（終端）。
     //   fence / gate は閉じたまま（解除しない）。idle 不成立なら drain しない。
-    if (terminalPublishersIdle && readerQuiescent)
+    if (shutdownSubstrateQuiescent)
     {
         const bool checkedDrainCompleted = finalizeAndDrainRetireQueueNonRt();
         juce::ignoreUnused(checkedDrainCompleted);
@@ -574,10 +581,11 @@ AudioEngine::~AudioEngine()
 #endif
     }
 
-    // ★ WORK113 (2026-11-18 Owner 指示): reader の静止を確認できない場合、reader が参照する
-    //   基盤（provider と EpochDomain）をプロセス寿命へ移してから engine を破棄する。
-    //   停止中の reader が再開して入場を完了しても、provider は生存している。
-    if (! readerQuiescent)
+    // ★ WORK113 (2026-11-18 Owner 指示): 静止を確認できない場合、参照され得る基盤
+    //   （EpochDomain / ISRRetireRouter / observer / telemetry）をプロセス寿命へ移してから
+    //   engine を破棄する。停止中の reader が再開しても、publisher が破棄後に gate scope を
+    //   終了しても、参照先は生存している。
+    if (! shutdownSubstrateQuiescent)
     {
         abandonReaderSubstrateForShutdownNonRt();
     }

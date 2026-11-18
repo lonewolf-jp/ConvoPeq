@@ -31,11 +31,22 @@
     #endif
 #endif
 
+// ★ WORK113 (2026-11-18 Owner 指示): shutdown の publisher timeout 検証用テストアクセス。
+//   本体は src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp に定義する。
+//   Production ビルドでは前方宣言と friend 宣言のみで、追加メンバも評価分岐も存在しない。
+class ShutdownHoldTestAccess;
+
 namespace convo {
 
 class EpochDomain : public IEpochProvider
 {
 public:
+    // ★ WORK113 (2026-11-18 Owner 指示): shutdown の publisher timeout を検証するための
+    //   テスト専用アクセス（publish gate の admission を取得して gate 内に停止する）。
+    //   本体は src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp に定義する。
+    //   Production ビルドでは friend 宣言のみで、追加メンバも評価分岐も存在しない。
+    friend class ::ShutdownHoldTestAccess;
+
     static constexpr int kMaxReaders = 64;
     static constexpr uint64_t kInactiveEpoch = std::numeric_limits<uint64_t>::max();
     static constexpr uint64_t kReservedEpoch = std::numeric_limits<uint64_t>::max() - 1;

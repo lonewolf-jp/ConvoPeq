@@ -5253,8 +5253,13 @@ inline void abandonReaderSubstrateForShutdownNonRt() noexcept
     if (index >= 0 && index < kMaxAbandonedReaderSubstrates)
     {
         s_abandonedSubstrates_[index] = AbandonedReaderSubstrate { router, domain, observer, telemetry };
+        convo::publishAtomic (s_abandonedReaderSubstrates_, index + 1, std::memory_order_release);
     }
-    convo::publishAtomic (s_abandonedReaderSubstrates_, index + 1, std::memory_order_release);
+    else
+    {
+        // 診断索引の容量超過。所有権は下の release でプロセス寿命へ移るため、実体は生存する。
+        (void) convo::fetchAddAtomic (s_abandonedSubstrateOverflow_, 1, std::memory_order_acq_rel);
+    }
 
     (void) m_retireRouter.release();
     (void) epochDomainOwner_.release();
@@ -6050,6 +6055,26 @@ public:
     // static storage なのでゼロ初期化される（NSDMI は enclosing class 内では使えない）。
     inline static AbandonedReaderSubstrate
         s_abandonedSubstrates_[kMaxAbandonedReaderSubstrates];
+
+    // ★ WORK113: 診断用索引の容量超過（9 件目以降）。所有権の根拠ではなく診断の取りこぼしを数える。
+    static std::atomic<int> s_abandonedSubstrateOverflow_;
+    [[nodiscard]] static int abandonedSubstrateOverflowForTest() noexcept
+    {
+        return convo::consumeAtomic (s_abandonedSubstrateOverflow_, std::memory_order_acquire);
+    }
+
+    // ★ WORK113: shutdown の静止判定の実測（テスト・診断用）。
+    //   publishers idle の失敗と reader admission idle の失敗を別々に数える。
+    static std::atomic<int> s_shutdownPublisherIdleFailures_;
+    static std::atomic<int> s_shutdownReaderAdmissionIdleFailures_;
+    [[nodiscard]] static int shutdownPublisherIdleFailuresForTest() noexcept
+    {
+        return convo::consumeAtomic (s_shutdownPublisherIdleFailures_, std::memory_order_acquire);
+    }
+    [[nodiscard]] static int shutdownReaderAdmissionIdleFailuresForTest() noexcept
+    {
+        return convo::consumeAtomic (s_shutdownReaderAdmissionIdleFailures_, std::memory_order_acquire);
+    }
 
     [[nodiscard]] static bool abandonedSubstrateContainsForTest (const void* router,
                                                                  const void* domain) noexcept
