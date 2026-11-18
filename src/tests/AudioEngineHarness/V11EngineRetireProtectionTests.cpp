@@ -3349,6 +3349,100 @@ bool checkShutdownHoldReaderResume()
     return ok;
 }
 
+//==============================================================================
+// ★ WORK113 (2026-11-18 Owner 指示): publisher timeout と observer callback の競合確認。
+//   reader admission を保持したまま engine を破棄し、その間ずっと別スレッドが Q/E/T の
+//   解放経路（World 型）を回して referenceObserver_->onRelease() を呼ぶ。
+//   observer を切断しない方式では、通知回数が publisher の完了回数と一致する。
+//   切断する方式（8 本目）では、切断後の通知が失われて不一致になる。
+//==============================================================================
+bool checkShutdownHoldPublisherObserverRace()
+{
+    using namespace std::chrono_literals;
+
+    bool ok = true;
+
+    convo::isr::WorldRetirementReferenceObserver* observerPtr = nullptr;
+    convo::isr::ISRRetireRouter* routerPtr = nullptr;
+    std::uint64_t releaseBefore = 0;
+
+    std::atomic<bool> stop { false };
+    std::atomic<long long> completed { 0 };
+    std::thread publisher;
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 100);
+        observerPtr = ShutdownHoldTestAccess::referenceObserver (*engine);
+        routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+
+        // admission を保持したまま破棄する（hold 経路 = observer を切断しない）
+        const int slot = ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "publisher-race");
+        if (slot < 0 || observerPtr == nullptr || routerPtr == nullptr)
+        {
+            std::fprintf(stderr, "[DQ-H3-1] FAIL: setup failed\n");
+            return false;
+        }
+
+        releaseBefore = observerPtr->referenceReleaseCount();
+
+        publisher = std::thread ([&]
+        {
+            static int worldProbe = 0;
+            auto worldRetryable = [](void*) noexcept -> DestroyOutcome
+            {
+                return DestroyOutcome::Destroyed;
+            };
+
+            long long n = 0;
+            while (! stop.load (std::memory_order_acquire))
+            {
+                if (routerPtr->storeWorldRetryableForTest (&worldProbe, worldRetryable,
+                                                           routerPtr->currentEpoch()))
+                {
+                    routerPtr->drainAllTerminalForTest();
+                    ++n;
+                    completed.store (n, std::memory_order_release);   // 進捗の公開
+                }
+            }
+        });
+
+        // 少なくとも 1 回は publisher を回してから破棄する
+        while (completed.load (std::memory_order_acquire) == 0 && ! stop.load())
+            std::this_thread::sleep_for (1ms);
+
+        // ここで ~AudioEngine（admission 保留 → 待機失敗 → 保持経路）
+    }
+
+    // engine 破棄後も publish を続けられること（保持された基盤の利用）を確認してから止める
+    std::this_thread::sleep_for (5ms);
+    stop.store (true, std::memory_order_release);
+    publisher.join();
+
+    const auto n = completed.load (std::memory_order_acquire);
+    const auto releaseAfter = observerPtr->referenceReleaseCount();
+
+    if (n <= 0)
+    {
+        std::fprintf(stderr, "[DQ-H3-2] FAIL: publisher did not complete any iteration\n");
+        ok = false;
+    }
+    if (releaseAfter != releaseBefore + static_cast<std::uint64_t>(n))
+    {
+        std::fprintf(stderr,
+                     "[DQ-H3-3] FAIL: observer notifications were lost or duplicated "
+                     "(completed=%lld delta=%llu)\n",
+                     n,
+                     static_cast<unsigned long long>(releaseAfter - releaseBefore));
+        ok = false;
+    }
+
+    if (ok)
+        std::printf("[DQ-H3] publisher vs observer: PASS (%lld concurrent World releases during teardown, "
+                    "notifications match, observer retained)\n", n);
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -3498,6 +3592,11 @@ int runV11EngineRetireProtectionTests()
     if (!checkShutdownHoldReaderResume())
     {
         std::fprintf(stderr, "FAIL: checkShutdownHoldReaderResume (DQ-H2)\n");
+        hdOk = false;
+    }
+    if (!checkShutdownHoldPublisherObserverRace())
+    {
+        std::fprintf(stderr, "FAIL: checkShutdownHoldPublisherObserverRace (DQ-H3)\n");
         hdOk = false;
     }
     if (!hdOk)
