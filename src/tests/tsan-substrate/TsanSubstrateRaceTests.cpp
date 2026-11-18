@@ -236,15 +236,22 @@ void t5_checkedDrainWithReaders()
 
     std::atomic<bool> stop { false };
     std::atomic<int> refused { 0 };
+    std::atomic<int> attempts { 0 };
     std::thread lateReader ([&]
     {
         while (! stop.load (std::memory_order_acquire))
         {
+            attempts.fetch_add (1, std::memory_order_relaxed);
             if (domain->registerReaderThread ("late") < 0)
                 refused.fetch_add (1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
     });
+
+    // ★ 決定性: TSan 無効のビルドでは main が速く、reader が 1 回も試行しないうちに
+    //   stop されることがある（refused == 0 で誤判定になる）。最低 1 回試行するまで待つ。
+    for (int spin = 0; spin < 20000 && attempts.load (std::memory_order_acquire) == 0; ++spin)
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
 
     auto queue = domain->borrow();
     bool completed = false;
@@ -263,6 +270,7 @@ void t5_checkedDrainWithReaders()
     check (publishersIdle, "T5: publishers must be idle before the drain");
     check (queue != nullptr, "T5: queue must be borrowable");
     check (completed, "T5: checked drain must complete");
+    check (attempts.load() > 0, "T5: the late reader must have attempted registration");
     check (refused.load() > 0, "T5: late reader registration must be refused");
     check (domain->drainRemainingAfter() == 0, "T5: nothing must remain in the queue");
     std::printf ("T5 drain: completed=%d remaining=%llu refused=%d deleted=%d\n",

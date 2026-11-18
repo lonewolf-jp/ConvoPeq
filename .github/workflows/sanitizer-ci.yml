@@ -264,7 +264,9 @@ jobs:
   #   JUCE/MKL/IPP 無依存）をビルドし、次の 2 つを検証する。どちらかが崩れれば
   #   ジョブは失敗する（skip を success として扱わない）。
   #     1. TsanSubstrateRaceTests が 6 シナリオを警告 0 件で完走する（exit 0）。
-  #     2. TsanPositiveControl が意図的な data race を検出する（exit != 0）。
+  #     2. TsanPositiveControl が意図的な data race を検出する。
+  #        成功条件は exit 99 と "WARNING: ThreadSanitizer: data race" の両方であり、
+  #        それ以外の非 0 終了（runtime 起動失敗・無関係なクラッシュ）は失敗。
   #-----------------------------------------------------------
   debug-tsan:
     name: "Debug TSan (Clang, substrate harness)"
@@ -303,19 +305,29 @@ jobs:
         run: |
           ./build-tsan/TsanSubstrateRaceTests
 
-      - name: Positive control (TSan must detect the injected race)
+      - name: Positive control (TSan must report a data race)
         env:
           TSAN_OPTIONS: "halt_on_error=1:exitcode=99:detect_leaks=0"
         run: |
+          # 成功条件は 2 つの合合:
+          #   1. 終了コードが TSAN_OPTIONS で指定した 99 であること。
+          #   2. 出力に "WARNING: ThreadSanitizer: data race" があること。
+          # それ以外の非 0 終了（runtime の起動失敗や無関係なクラッシュ）は失敗にする。
+          log=positive_control.log
           set +e
-          ./build-tsan/TsanPositiveControl
+          ./build-tsan/TsanPositiveControl > "$log" 2>&1
           rc=$?
           set -e
-          if [ "$rc" -eq 0 ]; then
-            echo "::error::positive control did not trip TSan (exit 0) - ThreadSanitizer is not detecting races on this runner"
+          cat "$log"
+          if [ "$rc" -ne 99 ]; then
+            echo "::error::positive control exited $rc (expected 99 from TSAN_OPTIONS exitcode) - this is not a TSan detection"
             exit 1
           fi
-          echo "positive control tripped TSan as expected (exit $rc)"
+          if ! grep -q "WARNING: ThreadSanitizer: data race" "$log"; then
+            echo "::error::positive control exited 99 but no 'WARNING: ThreadSanitizer: data race' was found in the output"
+            exit 1
+          fi
+          echo "positive control: TSan reported a data race (exit 99)"
 
       - name: Report TSan status
         if: always()
