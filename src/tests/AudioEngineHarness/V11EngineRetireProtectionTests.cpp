@@ -4186,6 +4186,13 @@ bool checkDeferredCoreNotRetried()
             ok = false;
         }
 
+        // 解放経路で観測対象が外れていること（アドレス再利用の前に解除される）。
+        if (convo::testobs::hasTarget())
+        {
+            std::fprintf(stderr, "[DQ-V2-7b] FAIL: target was not cleared by the release path\n");
+            ok = false;
+        }
+
         // 観測を解除する（解放済みポインタを保持し続けない）。
         convo::testobs::clearTarget();
         if (convo::testobs::hasTarget())

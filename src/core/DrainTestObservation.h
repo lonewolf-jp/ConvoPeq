@@ -108,10 +108,15 @@ inline void noteDestroyed (const void* p) noexcept
 }
 
 // 解放経路に到達したことの記録。aligned_free の直前に呼ぶ（ポインタはまだ有効）。
+// 照合したら target を外す。解放後に同じアドレスが別の DSPCore に再利用されても、
+// 古い観測対象として誤計数しない。targetId と各計数は残す（テストは読める）。
 inline void noteReleaseImminent (const void* p) noexcept
 {
-    if (matches (p))
-        convo::publishAtomic (log().released, true, std::memory_order_release);
+    auto& l = log();
+    if (! matches (p))
+        return;
+    convo::publishAtomic (l.target, static_cast<const void*>(nullptr), std::memory_order_release);
+    convo::publishAtomic (l.released, true, std::memory_order_release);
 }
 
 } // namespace convo::testobs
