@@ -102,10 +102,12 @@ public:
         return epochProvider->currentEpoch();
     }
 
-    /** アクティブなReader数を診断用に取得 */
+    /** アクティブなReader数を診断用に取得。
+     *  診断の件数なので depth のみを返す。静止判定には
+     *  epochProvider->activeReaderCount()（活動数）を使うこと。 */
     uint32_t activeReaders() noexcept
     {
-        return epochProvider->activeReaderCount();
+        return epochProvider->activeDepthReaderCount();
     }
 
     /** ★ P1-A: 今回の enter() が成功し epoch 保護下有効かを返す */
