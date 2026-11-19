@@ -72,7 +72,8 @@ struct TrendSnapshot {
     uint64_t pendingRetire{0};
     uint64_t publicationSeq{0};
     uint64_t maxRetireAgeUs{0};
-    uint32_t activeReaderCount{0};
+    uint32_t activeReaderCount{0};   // 活動数（depth + exit 実行中）。静止判定用。
+    uint32_t activeDepthReaders{0};  // depth のみ。容量の閄値判定用。
     uint32_t readerStuckCount{0};
     bool     freezeDetected{false};
     uint32_t activeFaultMask{0};

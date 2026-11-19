@@ -630,11 +630,10 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
         snap.pendingRetire = m_retireRouter->pendingRetireCount();
         const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
         snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
-        // ★ WORK113 R1: ここは回復判断の入力なので活動数を使う。
-        //   depth のみにすると、exit 実行中の reader が 0 と見えて
-        //   computeTrend が Worsening を選び、実際には改善中のときに回復動作を引き起こす。
-        //   slot 使用率の監視（checkReaderSlotUsage）とは用途が違う。
+        // ★ WORK113 R1: 活動数（exit 実行中を含む）は reader が静止していないことの判定に使う。
+        //   容量（64）との比較は depth のみで行う（活動数は exit 中を二重計上する）。
         snap.activeReaderCount = m_retireRouter->activeReaderCount();
+        snap.activeDepthReaders = m_retireRouter->activeDepthReaderCount();
         // ★ D101-9 Step 5-VI-C: retire-chain raw observations (sole raw-read site)
         snap.terminalStoreCount = m_retireRouter->terminalStoreCount();
         snap.terminalReclaimResidentCount = m_retireRouter->terminalReclaimResidentCount();
@@ -817,7 +816,7 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
         && (pubDelta > 0 || idleRecovered)
         && (retireTrendImproving || retireWithinLimit)
         && ageDelta <= 0
-        && now.readerStuckCount == 0 && now.activeReaderCount < 64)
+        && now.readerStuckCount == 0 && now.activeDepthReaders < 64)
         return RecoveryOutcome::Recovered;
 
     // Step 3: reader異常（Improvingより優先）
