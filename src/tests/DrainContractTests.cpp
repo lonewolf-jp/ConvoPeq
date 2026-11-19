@@ -393,6 +393,145 @@ void testQuarantine()
 
 } // namespace
 
+//==============================================================================
+// \u2605 WORK113 R1 (2026-11-19 Owner \u627f\u8a8d): exit \u51e6\u7406\u4e2d\uff08depth==0\u30fbprovider \u5f8c\u51e6\u7406\u304c\u6b8b\u308b\uff09\u306b
+//   drainQueue \u304c\u9759\u6b62\u3092\u4e3b\u5f35\u3057\u306a\u3044\u3053\u3068\u3002
+//   seam \u3067 depth \u30c7\u30af\u30ea\u30e1\u30f3\u30c8\u76f4\u5f8c\u306b\u6b62\u3081\u3001\u540c\u3058\u69cb\u6210\u3067 exit \u5b8c\u4e86\u5f8c\u306b
+//   Completed \u306b\u306a\u308b\u3053\u3068\u3092\u5bfe\u7167\u306b\u53d6\u308b\uff08\u4ed6\u306e\u6761\u4ef6\u304c\u6210\u7acb\u3057\u3066\u3044\u308b\u3053\u3068\u306e\u8a3c\u62e0\uff09\u3002
+//==============================================================================
+void testExitInProgressBlocksDrain()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+
+    struct Seam
+    {
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+    };
+
+    static Seam seam;
+    seam.reached.store (false);
+    seam.release.store (false);
+
+    convo::EpochDomain::setReaderExitSeam ([] (void* p) noexcept
+    {
+        // ★ 1 回だけ止める（他の exit を止めない）。
+        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        auto* s2 = static_cast<Seam*> (p);
+        s2->reached.store (true, std::memory_order_release);
+        while (! s2->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    }, &seam);
+
+    std::atomic<int> slot { -1 };
+    std::atomic<bool> entered { false };
+    std::atomic<bool> goExit { false };
+
+    std::thread reader ([&]
+    {
+        const int idx = domain->registerReaderThread ("exit-window");
+        slot.store (idx, std::memory_order_release);
+        if (idx < 0)
+            return;
+        domain->enterReader (idx);
+        entered.store (true, std::memory_order_release);
+        waitUntil (goExit);
+        domain->exitReader (idx);          // seam \u3067 depth \u30c7\u30af\u30ea\u30e1\u30f3\u30c8\u76f4\u5f8c\u306b\u6b62\u307e\u308b
+    });
+
+    waitUntil (entered);
+    check (slot.load() >= 0, "exit-window: registration");
+
+    // shutdown \u5074\u306e\u524d\u63d0\u3092\u6574\u3048\u308b\uff08fence\u30fb\u767b\u9332\u9589\u9396\u30fbbublisher idle\uff09\u3002
+    domain->engageShutdownReaderFence();
+    domain->closeReaderRegistration();
+    check (domain->closePublishersAndWaitIdle (std::chrono::milliseconds (50)),
+           "exit-window: publishers must become idle");
+
+    auto queue = domain->borrow();
+    check (queue != nullptr, "exit-window: borrow");
+    if (queue == nullptr)
+    {
+        goExit.store (true, std::memory_order_release);
+        seam.release.store (true, std::memory_order_release);
+        reader.join();
+        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        return;
+    }
+
+    goExit.store (true, std::memory_order_release);
+    waitUntil (seam.reached);
+
+    // \u7a93\u306e\u89b3\u6e2c\uff1adepth \u306f 0\u3001\u6d3b\u52d5\u6570\u306f 1 \u4ee5\u4e0a\u3001admission \u306f idle\u3002
+    const std::uint32_t depthReaders = domain->activeDepthReaderCount();
+    const std::uint32_t activity = domain->activeReaderCount();
+    check (depthReaders == 0u, "exit-window: depth is 0 inside the window");
+    check (activity >= 1u, "exit-window: exit-in-progress is counted as activity");
+    check (domain->readerAdmissionsActive() == 0u, "exit-window: admission active is 0");
+    check (domain->admissionPendingSlots() == 0u, "exit-window: no pending admission slot");
+
+    {
+        auto cap = convo::DrainCapability::makeForTest (true, true, true, true,
+                                                        domain->epochAtFence(), 1, 1);
+        check (domain->drainQueue (*queue, std::move (cap))
+                   == convo::EpochDomain::DrainResult::ReadersNotQuiescent,
+               "exit-window: checked drain must fail while exit is in progress");
+    }
+
+    // exit \u3092\u5b8c\u4e86\u3055\u305b\u308b\u3002\u540c\u3058\u69cb\u6210\u3067 Completed \u306b\u306a\u308c\u3070\u3001\u4e0a\u306e\u62d2\u5426\u306f exit \u30ab\u30a6\u30f3\u30bf\u304c\u7406\u7531\u3060\u3002
+    seam.release.store (true, std::memory_order_release);
+    reader.join();
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+
+    check (domain->activeReaderCount() == 0u, "exit-window: activity returns to 0 after exit");
+
+    {
+        auto cap = convo::DrainCapability::makeForTest (true, true, true, true,
+                                                        domain->epochAtFence(), 1, 1);
+        check (domain->drainQueue (*queue, std::move (cap))
+                   == convo::EpochDomain::DrainResult::Completed,
+               "exit-window: checked drain succeeds after exit completes");
+    }
+}
+
+//==============================================================================
+// \u2605 WORK113 R1: exitReader \u306e\u65e9\u671f return\uff08previousDepth == 0 / > 1\uff09\u3067\u3082
+//   exit \u30ab\u30a6\u30f3\u30bf\u304c\u5143\u306b\u623b\u308b\u3053\u3068\u3002
+//   \u5dee\uff08activeReaderCount - activeDepthReaderCount\uff09\u304c exit \u5b9f\u884c\u4e2d\u306e\u4ef6\u6570\u3067\u3042\u308b\u3002
+//==============================================================================
+void testExitCounterRestoredOnEarlyReturns()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+
+    const int idx = domain->registerReaderThread ("early-return");
+    check (idx >= 0, "early: registration");
+    if (idx < 0)
+        return;
+
+    auto exitInProgress = [&domain]() -> std::uint32_t
+    {
+        const std::uint32_t activity = domain->activeReaderCount();
+        const std::uint32_t depthReaders = domain->activeDepthReaderCount();
+        return activity > depthReaders ? activity - depthReaders : 0u;
+    };
+
+    domain->enterReader (idx);          // depth 1
+    domain->enterReader (idx);          // depth 2\uff08\u30cd\u30b9\u30c8\uff09
+    check (domain->activeDepthReaderCount() == 1u, "early: nested reader counts once");
+
+    domain->exitReader (idx);           // previousDepth == 2 \u2192 \u65e9\u671f return
+    check (exitInProgress() == 0u, "early: nested exit restores the counter");
+    check (domain->activeReaderCount() == 1u, "early: nested exit keeps activity 1");
+
+    domain->exitReader (idx);           // previousDepth == 1 \u2192 \u901a\u5e38\u7d42\u4e86
+    check (exitInProgress() == 0u, "early: outer exit restores the counter");
+    check (domain->activeReaderCount() == 0u, "early: activity returns to 0");
+
+    domain->exitReader (idx);           // previousDepth == 0 \u2192 underflow \u306e\u65e9\u671f return
+    check (exitInProgress() == 0u, "early: underflow exit restores the counter");
+    check (domain->activeReaderCount() == 0u, "early: activity stays 0 after underflow");
+}
+
 int main()
 {
     testPublishGate();
@@ -404,6 +543,8 @@ int main()
 
     testAdmissionRace();
     testReservedNotEntered();
+    testExitInProgressBlocksDrain();
+    testExitCounterRestoredOnEarlyReturns();
     testDrainContract();
     testQuarantine();
 

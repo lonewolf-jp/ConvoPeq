@@ -633,7 +633,24 @@ public:
     void exitReader(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
-            return;
+            return;   // slot に触らないため計数しない
+
+        // ★ WORK113 R1: depth のデクリメントより前に増やす。
+        //   relaxed でよい。直後の depth の acq_rel RMW がこの増加を公開する。
+        (void)convo::fetchAddAtomic(readerExitInProgress_, static_cast<std::uint32_t>(1),
+                                    std::memory_order_relaxed);
+
+        // 減算は最後の provider アクセスの後（release）。早期 return（previousDepth == 0 /
+        // > 1）でもこのスコープのデストラクタで必ず 1 回だけ戻る。
+        struct ExitInProgressScope
+        {
+            std::atomic<std::uint32_t>& counter;
+            ~ExitInProgressScope() noexcept
+            {
+                (void)convo::fetchSubAtomic(counter, static_cast<std::uint32_t>(1),
+                                            std::memory_order_release);
+            }
+        } exitInProgressScope { readerExitInProgress_ };
 
         auto& slot = readers[static_cast<size_t>(readerIndex)];
         // acq_rel: 取得側 acquire で enterReader 以降の読み取りが完了していることを観測し、
@@ -777,7 +794,30 @@ public:
         return minEpoch;
     }
 
+    // ★ WORK113 R1 (2026-11-19 Owner 承認): 戻り値は reader の実人数ではなく、
+    //   「この domain をまだ触っている reader の活動数」である。
+    //   - depth > 0 のスロット数
+    //   - exitReader() 実行中の件数（depth が 0 でも provider の後処理が残る）
+    //   exit 中の reader は両方に現れることがある（一時的な二重計上）。
+    //   静止判定は「0 か否か」しか使わないため、この保守性は安全側に倒れる。
+    //   読み取り順序は depth（acquire）→ exit カウンタ（acquire）の順で固定する。
+    //   depth の acq_rel RMW を観測してから exit カウンタを読むことで、
+    //   depth を 0 にした exit の先行する増加を見落とさない。
     uint32_t activeReaderCount() const noexcept override
+    {
+        const uint32_t depthReaders = activeDepthReaderCount();
+
+        // ★ 順序固定: depth を先に読む。逆にすると「exit 開始前に 0 を読み、
+        //   depth 0 を観測する」並びで増加を見落とす。
+        const uint32_t exiting =
+            convo::consumeAtomic(readerExitInProgress_, std::memory_order_acquire);
+
+        return depthReaders + exiting;
+    }
+
+    // depth > 0 のスロット数（reader の実人数）。診断・証跡用。
+    // ゲート判定には activeReaderCount() を使うこと。
+    uint32_t activeDepthReaderCount() const noexcept
     {
         uint32_t count = 0;
 
@@ -1270,6 +1310,12 @@ private:
     std::atomic<std::uint64_t> epochAtFence_ { 0 };
     std::atomic<std::uint64_t> drainReaderFailures_ { 0 };
     std::atomic<std::uint64_t> drainRemainingAfter_ { 0 };
+
+    // ★ WORK113 R1 (2026-11-19 Owner 承認): exitReader() を実行中の件数。
+    //   depth が 0 でも provider の後処理（residency / holdWitness / slot.epoch /
+    //   quarantineFlags）が残っている reader を数える。増加は depth のデクリメント前、
+    //   減算は最後の provider アクセス後（release）。詳細は exitReader() を参照。
+    std::atomic<std::uint32_t> readerExitInProgress_ { 0 };
 
     // 隔離（append-only・自己参照で寿命を保つ）
     inline static std::atomic<DeferredDeletionQueue*> quarantineHead_ { nullptr };

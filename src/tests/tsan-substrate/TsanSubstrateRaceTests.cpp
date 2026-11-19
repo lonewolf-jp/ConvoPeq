@@ -16,6 +16,7 @@
 //   同じコマンドに -DTSAN_POSITIVE_CONTROL を追加する。
 // ============================================================================
 #include "core/EpochDomain.h"
+#include "core/RCUReader.h"
 #include "audioengine/RetireQuarantineStore.h"
 
 #include <atomic>
@@ -351,6 +352,63 @@ void t6_quarantineStoreConcurrency()
                  store.residentCount(), static_cast<unsigned> (store.overflowCount()));
 }
 
+// \u2500\u2500 T7: reader exit \u3068 shutdown \u5074\u89b3\u6e2c\u306e\u7af6\u5408 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+//   reader \u304c enter/exit \u3092\u7e70\u308a\u8fd4\u3059\u9593\u306b\u3001shutdown \u5074\u306e\u8aad\u307f\u53d6\u308a\uff08activeReaderCount /
+//   activeDepthReaderCount / admission\uff09\u3068 epoch \u524d\u9032\u3092\u540c\u6642\u306b\u56de\u3059\u3002
+//   exitReader \u306e provider \u30a2\u30af\u30bb\u30b9\u3068\u9759\u6b62\u5224\u5b9a\u306e\u8aad\u307f\u53d6\u308a\u304c\u7af6\u5408\u3057\u306a\u3044\u3053\u3068\u3092
+//   TSan \u3067\u898b\u308b\u3002\u7d42\u4e86\u5f8c\u306b\u6d3b\u52d5\u6570\u304c 0 \u306b\u623b\u308b\u3053\u3068\u3082\u78ba\u304b\u3081\u308b\u3002
+void t7_exitVsShutdownObservation()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EngineISR);
+
+    std::atomic<bool> stop { false };
+    std::atomic<int> exitsDone { 0 };
+
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 3; ++t)
+        readers.emplace_back ([&]
+        {
+            convo::RCUReader reader (*domain);
+            while (! stop.load (std::memory_order_acquire))
+            {
+                if (! reader.enter())
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+                reader.exit();
+                (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
+            }
+        });
+
+    std::thread shutdownSide ([&]
+    {
+        while (! stop.load (std::memory_order_acquire))
+        {
+            (void) domain->publishEpoch();
+            (void) domain->activeReaderCount();
+            (void) domain->activeDepthReaderCount();
+            (void) domain->readerAdmissionsActive();
+            (void) domain->admissionPendingSlots();
+        }
+    });
+
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    stop.store (true, std::memory_order_release);
+
+    for (auto& r : readers)
+        r.join();
+    shutdownSide.join();
+
+    check (exitsDone.load() > 0, "T7: readers must complete exits");
+    check (domain->activeReaderCount() == 0, "T7: activity must return to 0");
+    check (domain->activeDepthReaderCount() == 0, "T7: depth must return to 0");
+    std::printf ("T7 exit vs shutdown: exits=%d activity=%u depth=%u\n",
+                 exitsDone.load(),
+                 static_cast<unsigned> (domain->activeReaderCount()),
+                 static_cast<unsigned> (domain->activeDepthReaderCount()));
+}
+
 } // namespace
 
 #if defined(TSAN_POSITIVE_CONTROL)
@@ -380,6 +438,7 @@ int main()
     t4_takeDuringEnqueue();
     t5_checkedDrainWithReaders();
     t6_quarantineStoreConcurrency();
+    t7_exitVsShutdownObservation();
 
     std::printf ("== failures=%d deleted=%d ==\n", g_failures, g_del.load());
     return g_failures == 0 ? 0 : 1;

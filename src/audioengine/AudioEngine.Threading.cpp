@@ -11,6 +11,10 @@
 #include "ISRCoordinatorLoop.h"            // ★ FUTURE-9: coordinatorLoop_ complete type
 #include "RtMeasureRing.h"                 // R-06 / U2: 1 秒ごとの非 RT 集計
 
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    #include "core/DrainTestObservation.h"   // ★ WORK113 DQ-V2 v2: テスト専用の破棄観測
+#endif
+
 //==============================================================================
 // [P0-15] AudioEngine.Threading.cpp — 3PR分割済み.
 // 共通定数は AudioEngine.Retire.cpp に移動.
@@ -21,6 +25,10 @@
 //   **解放しない**（所有権は呼び出し側に残る）。void 版は後方互換のラッパー。
 DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 {
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ WORK113 DQ-V2 v2: 再試行の入口を観測する（対象ポインタのみ計数）。
+    convo::testobs::noteEntry (p);
+#endif
     if (p == nullptr)
         return DestroyOutcome::Destroyed;
 
@@ -47,6 +55,9 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             owner->deferDestroyRetry(static_cast<DSPCore*>(p));
             juce::Logger::writeToLog(juce::String::formatted(
                 "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+            convo::testobs::noteDeferred (p);
+#endif
             return DestroyOutcome::Deferred;
         }
     }
@@ -56,6 +67,10 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
     convo::aligned_free(core);
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    convo::testobs::noteReleased (core);
+    convo::testobs::noteDestroyed (core);
+#endif
     return DestroyOutcome::Destroyed;
 }
 

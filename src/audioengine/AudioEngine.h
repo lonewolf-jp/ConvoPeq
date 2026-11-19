@@ -5053,6 +5053,8 @@ captureEpochQuiescenceEvidence() const noexcept
     evidence.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
     if (m_retireRouter != nullptr)
     {
+        // ★ WORK113 R1: 保守的な活動数（exit 処理中を含む）。
+        //   0 は「この domain を触っている reader が居ない」。
         evidence.activeReaders = m_retireRouter->activeReaderCount();
         evidence.minReaderEpoch = m_retireRouter->minReaderEpoch();
         evidence.captured = true;
@@ -5085,8 +5087,8 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
     obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
                           && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
-    obs.activeReadersZero = (m_retireRouter != nullptr)
-        ? (m_retireRouter->activeReaderCount() == 0) : true;                  // Q4
+    // ★ WORK113 R1: Q4 も単一判定を使う（exit 処理中は 0 にならない）。
+    obs.activeReadersZero = readerActivityZeroNonRt();                        // Q4
     // ★ Q5 (2026-11-08): EpochQuiescenceEvidence（H.11.13.3）。bool ではなく観測束で渡し、
     //   ShutdownRuntime が quiescent() と generation 一致を検証する。
     obs.epochEvidence = captureEpochQuiescenceEvidence();
@@ -5114,6 +5116,14 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
         handle, dspHandleRuntime_, *m_retireRouter, std::move(*permit));
 }
 
+// ★ WORK113 R1 (2026-11-19 Owner 承認): reader 静止の単一判定。
+//   値は EpochDomain::activeReaderCount()（depth > 0 のスロット数＋exitReader 実行中の件数）。
+//   Q4（proof の入力）と checked drain の前提が同じ判定を使う。
+[[nodiscard]] bool readerActivityZeroNonRt() const noexcept
+{
+    return m_epochDomain.activeReaderCount() == 0;
+}
+
 // ★ WORK113 Queue/Gate/Drain（v4.13 §3/§4）: shutdown の最終 drain。
 //   順序: reader fence → publish gate 閉鎖 + 5 秒待ち → 最終 retire → proof → capability
 //         → queue 取り出し → checked drain → 結果（非成功は隔離して deleter を実行しない）。
@@ -5124,7 +5134,7 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     //       D / Q / E / T の drain を済ませていること（terminal shutdown の停止状態は解除しない）。
     // 静止条件: active reader 0・admission（予約〜enter）0・admission 中の slot 0。
     //   admission は fence 閉鎖後に開始できないため、ここが 0 なら以後の入場は起きない。
-    if (m_epochDomain.activeReaderCount() != 0
+    if (! readerActivityZeroNonRt()
         || m_epochDomain.readerAdmissionsActive() != 0
         || m_epochDomain.admissionPendingSlots() != 0)
     {
@@ -5144,8 +5154,7 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
                           && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
-    obs.activeReadersZero = (m_retireRouter != nullptr)
-        ? (m_retireRouter->activeReaderCount() == 0) : true;
+    obs.activeReadersZero = readerActivityZeroNonRt();
     obs.epochEvidence = captureEpochQuiescenceEvidence();
     obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();
     obs.epochGeneration = obs.epochEvidence.epochGeneration;
