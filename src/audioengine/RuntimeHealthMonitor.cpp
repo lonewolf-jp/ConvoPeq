@@ -630,7 +630,8 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
         snap.pendingRetire = m_retireRouter->pendingRetireCount();
         const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
         snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
-        snap.activeReaderCount = m_retireRouter->activeReaderCount();
+        // ★ WORK113 R1: trend の件数は depth のみ（activity は exit 中を含む）。
+        snap.activeReaderCount = m_retireRouter->activeDepthReaderCount();
         // ★ D101-9 Step 5-VI-C: retire-chain raw observations (sole raw-read site)
         snap.terminalStoreCount = m_retireRouter->terminalStoreCount();
         snap.terminalReclaimResidentCount = m_retireRouter->terminalReclaimResidentCount();
@@ -845,7 +846,9 @@ void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
     if (m_readerSlotRef) {
         activeCount = convo::consumeAtomic(*m_readerSlotRef, std::memory_order_acquire);
     } else if (m_retireRouter) {
-        activeCount = m_retireRouter->activeReaderCount();
+        // ★ WORK113 R1: slot 使用率は depth のみで数える（activity は exit 中を二重計上し、
+        //   90% 閾値を誤って超えさせる）。
+        activeCount = m_retireRouter->activeDepthReaderCount();
     } else {
         return;
     }

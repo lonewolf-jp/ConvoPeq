@@ -20,5 +20,6 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 
 [[nodiscard]] uint32_t AudioEngine::activeEpochObserverCount() const noexcept
 {
-    return m_retireRouter->activeReaderCount();
+    // ★ WORK113 R1: 診断用の件数なので depth のみ（activity は exit 中を二重計上する）。
+    return m_retireRouter->activeDepthReaderCount();
 }

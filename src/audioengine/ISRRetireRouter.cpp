@@ -360,6 +360,12 @@ uint32_t ISRRetireRouter::activeReaderCount() const noexcept
     return provider_->activeReaderCount();
 }
 
+uint32_t ISRRetireRouter::activeDepthReaderCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->activeDepthReaderCount();
+}
+
 uint64_t ISRRetireRouter::currentEpoch() const noexcept
 {
     return snapshotEpoch();

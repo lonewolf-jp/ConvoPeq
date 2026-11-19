@@ -78,8 +78,21 @@ public:
     /** Get the current global epoch. */
     virtual uint64_t currentEpoch() const noexcept = 0;
 
-    /** Count of active (non-zero depth) reader slots. */
+    /** Conservative reader activity count.
+
+     *  Number of slots with non-zero depth plus the readers whose exitReader() is still
+     *  running (they have already decremented depth but still touch provider state).
+     *  This is NOT the number of readers: a reader that is exiting can be counted twice.
+     *  Use it only for quiescence decisions (zero or not).
+     */
     virtual uint32_t activeReaderCount() const noexcept = 0;
+
+    /** Depth-only count of reader slots (excludes readers still in exitReader()).
+     *  Use this for slot-occupancy telemetry. Quiescence must use activeReaderCount().
+     *  Default implementation is the conservative activity count (fail-safe for
+     *  providers that do not separate the two).
+     */
+    virtual uint32_t activeDepthReaderCount() const noexcept { return activeReaderCount(); }
 
     /** Maximum number of reader slots available. */
     virtual int readerCapacity() const noexcept = 0;

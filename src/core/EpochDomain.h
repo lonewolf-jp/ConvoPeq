@@ -275,9 +275,12 @@ public:
 
         const bool regClosed = convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
         const bool fence = shutdownReaderFenceEngaged();
-        const std::uint32_t active = activeReaderCount();
+        // ★ 順序固定: admission（予約〜enter）を先に読み、活動数を最後に読む。
+        //   逆順だと「活動数 0 を読む → admission の reader が enter → admission 0」の
+        //   並びで、入場中の reader を見落とす。
         const std::uint32_t admissions = readerAdmissionsActive();
         const std::uint32_t pendingAdmissions = admissionPendingSlots();
+        const std::uint32_t active = activeReaderCount();
         const std::uint64_t minReader = getMinReaderEpoch();
         const std::uint64_t fenceEpoch = convo::consumeAtomic(epochAtFence_, std::memory_order_acquire);
         const bool epochEqual = ! isOlder(minReader, fenceEpoch) && ! isOlder(fenceEpoch, minReader);
@@ -817,7 +820,7 @@ public:
 
     // depth > 0 のスロット数（reader の実人数）。診断・証跡用。
     // ゲート判定には activeReaderCount() を使うこと。
-    uint32_t activeDepthReaderCount() const noexcept
+    uint32_t activeDepthReaderCount() const noexcept override
     {
         uint32_t count = 0;
 

@@ -223,6 +223,8 @@ public:
     uint64_t snapshotEpoch() const noexcept;
     uint64_t publishEpoch() noexcept override;
     uint32_t activeReaderCount() const noexcept override;
+    // ★ WORK113 R1: depth のみの件数（slot 使用率の監視用）。
+    uint32_t activeDepthReaderCount() const noexcept override;
     int readerCapacity() const noexcept override;
     uint64_t currentEpoch() const noexcept override;
     uint64_t getMinReaderEpoch() const noexcept override;

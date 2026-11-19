@@ -1897,8 +1897,10 @@ public:
         const auto terminalResident = (m_retireRouter != nullptr)
             ? m_retireRouter->terminalReclaimResidentCount() : static_cast<std::size_t>(0);
         // ★ Step 5-III-A: Q/E/D observation snapshot (single-call consistency)
+        // ★ WORK113 R1: ここは slot 占有の観測なので depth のみを使う
+        //   （activity は exit 中の reader を含み、実人数と一致しない）。
         const auto readerCount = (m_retireRouter != nullptr)
-            ? m_retireRouter->activeReaderCount() : 0u;
+            ? m_retireRouter->activeDepthReaderCount() : 0u;
         const auto minReader = (m_retireRouter != nullptr)
             ? m_retireRouter->minReaderEpoch() : std::uint64_t{0};
         const auto pendingRetire = (m_retireRouter != nullptr)
@@ -5121,6 +5123,13 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 //   Q4（proof の入力）と checked drain の前提が同じ判定を使う。
 [[nodiscard]] bool readerActivityZeroNonRt() const noexcept
 {
+    // ★ 順序固定: admission（予約〜enter）を先に読み、活動数を最後に読む。
+    //   逆順だと「活動数 0 を読む → admission の reader が enter → admission 0」の
+    //   並びで、入場中の reader を見落とす。
+    if (m_epochDomain.readerAdmissionsActive() != 0)
+        return false;
+    if (m_epochDomain.admissionPendingSlots() != 0)
+        return false;
     return m_epochDomain.activeReaderCount() == 0;
 }
 
@@ -5134,9 +5143,10 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     //       D / Q / E / T の drain を済ませていること（terminal shutdown の停止状態は解除しない）。
     // 静止条件: active reader 0・admission（予約〜enter）0・admission 中の slot 0。
     //   admission は fence 閉鎖後に開始できないため、ここが 0 なら以後の入場は起きない。
-    if (! readerActivityZeroNonRt()
-        || m_epochDomain.readerAdmissionsActive() != 0
-        || m_epochDomain.admissionPendingSlots() != 0)
+    // ★ 順序固定: admission を先に読み、活動数を最後に読む（enter 完了の取りこぼし防止）。
+    const std::uint32_t readerAdmissions = m_epochDomain.readerAdmissionsActive();
+    const std::uint32_t pendingAdmissionSlots = m_epochDomain.admissionPendingSlots();
+    if (readerAdmissions != 0 || pendingAdmissionSlots != 0 || ! readerActivityZeroNonRt())
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         juce::Logger::writeToLog("[DRAIN_DIAG] checkedDrain skipped=readers_not_quiescent");

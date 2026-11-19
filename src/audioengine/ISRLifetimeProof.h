@@ -85,7 +85,7 @@ struct EpochQuiescenceEvidence {
     std::uint64_t epochGeneration{0};                 // EpochDomain::epochGeneration()
     std::uint64_t readerRegistrationGeneration{0};    // EpochDomain::readerRegistrationGeneration()
     bool          readerRegistrationClosed{false};    // EpochDomain::readerRegistrationClosed()
-    std::uint32_t activeReaders{0};                   // ISRRetireRouter::activeReaderCount()
+    std::uint32_t activeReaders{0};                   // reader 活動数（depth + exit 実行中）
     std::uint64_t minReaderEpoch{0};                  // ISRRetireRouter::minReaderEpoch()
 
     // quiescence の実体（登録閉鎖 + active reader ゼロ）。generation 一致は呼出側で照合する。
