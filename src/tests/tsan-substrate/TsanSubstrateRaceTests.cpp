@@ -375,8 +375,10 @@ void t7_exitVsShutdownObservation()
             warmup.exit();
         const std::uint64_t closedAfter =
             convo::consumeAtomic (convo::ReaderMeasureRegistry::closed_, std::memory_order_acquire);
-        check (closedAfter == closedBefore + 1,
-               "T7: warmup must close a measure record (tag registration)");
+        const bool warmupClosed = (closedAfter == closedBefore + 1);
+        check (warmupClosed, "T7: warmup must close a measure record (tag registration)");
+        if (! warmupClosed)
+            return;   // タグが未登録のまま並行 claim を始めない（別 Issue の race を混ぜない）
     }
 
     std::atomic<bool> stop { false };

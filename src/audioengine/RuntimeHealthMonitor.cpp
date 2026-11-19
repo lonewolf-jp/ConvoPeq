@@ -822,7 +822,12 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
     // Step 3: reader異常（Improvingより優先）
     if (now.readerStuckCount > before.readerStuckCount)
         return RecoveryOutcome::Worsening;
-    if (now.pendingRetire > 0 && now.activeReaderCount == 0 && before.activeReaderCount > 0)
+    // ★ WORK113 R1: 「reader が離脱した」ことは slot の depth で見る。活動数は exit 実行中を
+    //   含むため、baseline が exit 中の reader を掴むと、離脱していないのに Worsening になる。
+    //   また、retire が実際に減っているサンプルでは Worsening にしない（計測できた
+    //   改善を上書きしない）。
+    const bool readersDeparted = (now.activeDepthReaders == 0 && before.activeDepthReaders > 0);
+    if (now.pendingRetire > 0 && retireDelta >= 0 && readersDeparted)
         return RecoveryOutcome::Worsening;
 
     // Step 4: Worsening

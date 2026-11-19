@@ -439,6 +439,9 @@ void AudioEngine::releaseResources()
     //    残っている可能性がある。Q/E/T の強制解放は epoch 非依存なので、参照中の World / DSP を
     //    解放し得る。Owner 指示（2026-11-18）の fail-closed（所有権を保持し、解放しない）に
     //    合わせ、reader の活動が 0 のときだけ解放する。
+    //    ★ 活動数だけでは足りない。予約済みで未 enter の slot は depth 0・活動数 0 だが、
+    //      チェックの後に enter してくる。admission（実行中・予約済み）も idle であることを
+    //      readerActivityZeroNonRt() でまとめて確認する。
     {
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
         m_retireRouter->unquarantineAllReaders();
@@ -446,19 +449,22 @@ void AudioEngine::releaseResources()
         // ★ BUG-015/027 (work88): RetireQuarantineStore の全強制解放（Audio Thread 停止後 — drainAllUnsafe 契約）
         //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
-        const auto quarantineReaders = m_retireRouter->activeReaderCount();
         if (quarantinedRetireResident > 0) {
-            if (quarantineReaders == 0) {
+            if (readerActivityZeroNonRt()) {
                 diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
                         + juce::String(static_cast<int64>(quarantinedRetireResident))
                         + " -- performing shutdown drain");
                 m_retireRouter->drainAllQuarantineStore();
             } else {
-                // fail-closed: reader が残るため所有権を保持する（解放しない）。
+                // fail-closed: reader の活動または admission が残るため所有権を保持する。
                 diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
                         + juce::String(static_cast<int64>(quarantinedRetireResident))
-                        + " -- reader still active (readers="
-                        + juce::String(static_cast<int>(quarantineReaders))
+                        + " -- readers or admissions remain (activity="
+                        + juce::String(static_cast<int>(m_retireRouter->activeReaderCount()))
+                        + " pendingSlots="
+                        + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots()))
+                        + " admissions="
+                        + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
                         + "), skipping shutdown drain (fail-closed)");
             }
         }
@@ -631,7 +637,8 @@ void AudioEngine::releaseResources()
     //   を強制 drain し、Terminal 残留 World のリークを防ぐ。stuck reader が残る場合は
     //   UAF 回避のため強制 drain をスキップし、epoch-gated drain（waitForDrain 内の
     //   drainTerminalReclaim）に委ねる。
-    if (m_retireRouter->activeReaderCount() == 0)
+    //   ★ 活動数だけでなく admission（実行中・予約済み）も idle であることを要求する。
+    if (readerActivityZeroNonRt())
         m_retireRouter->drainAllQuarantineStore();
 
     // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。

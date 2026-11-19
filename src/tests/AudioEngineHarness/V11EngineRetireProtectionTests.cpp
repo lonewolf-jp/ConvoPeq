@@ -4584,9 +4584,18 @@ bool checkReaderExitQuiescenceWindow()
 
     // proof → capability → checked drain の前提を整える。準備自体の成功を必須にする
     //   （publisher 停止のタイムアウトなど、reader 以外の理由で拒否される状態を除外する）。
-    if (! ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine))
+    const bool prepared = ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine);
+    if (! prepared)
     {
         std::fprintf(stderr, "[DQ-W1-8] FAIL: terminal shutdown preparation failed\n");
+        ok = false;
+    }
+    else if (ShutdownHoldTestAccess::readerActivityZero (*engine))
+    {
+        // ★ 準備後（registration 閉鎖 + reader fence 済み）でも、seam 保持中は Q4 が false で
+        //   あること。ここを見ないと「fence までは false だが、fence 後は exit 活動を
+        //   無視する」退行を見逃す。
+        std::fprintf(stderr, "[DQ-W1-8b] FAIL: Q4 is true after preparation while the seam is held\n");
         ok = false;
     }
     if (ShutdownHoldTestAccess::runCheckedDrain (*engine))
@@ -4608,6 +4617,16 @@ bool checkReaderExitQuiescenceWindow()
     if (! exitDone.load (std::memory_order_acquire))
     {
         std::fprintf(stderr, "[DQ-W1-12] FAIL: exit did not complete after the seam\n");
+        ok = false;
+    }
+    // exit 完了後（admission も idle）は Q4 が true に戻ること。
+    if (! ShutdownHoldTestAccess::readerActivityZero (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-12b] FAIL: Q4 is still false after the exit completed "
+                             "(activity=%u pendingSlots=%u admissions=%u)\n",
+                     static_cast<unsigned> (routerPtr->activeReaderCount()),
+                     static_cast<unsigned> (domainPtr->admissionPendingSlots()),
+                     static_cast<unsigned> (domainPtr->readerAdmissionsActive()));
         ok = false;
     }
 
@@ -4712,6 +4731,25 @@ bool checkReaderExitShutdownRace()
         worker.join();
         convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
         return false;
+    }
+
+    // ★ 破壊前の状態を固定する。depth 0 かつ活動数 > 0（exit 実行中）でなければ、
+    //   DQ-W3 は「exit 実行中の破棄」を検証していない（既存の active-reader hold 経路を
+    //   通るだけになる）。状態が違う場合は破棄せずに片付ける。
+    {
+        const std::uint32_t depthBeforeDestroy = domainPtr->activeDepthReaderCount();
+        const std::uint32_t activityBeforeDestroy = routerPtr->activeReaderCount();
+        if (depthBeforeDestroy != 0 || activityBeforeDestroy == 0)
+        {
+            std::fprintf(stderr, "[DQ-W3-2b] FAIL: unexpected state before destruction "
+                                 "(depth=%u activity=%u)\n",
+                         static_cast<unsigned> (depthBeforeDestroy),
+                         static_cast<unsigned> (activityBeforeDestroy));
+            seam.release.store (true, std::memory_order_release);
+            worker.join();
+            convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+            return false;
+        }
     }
 
     // ★ ここが破壊的な操作：exit 実行中に engine を破棄する。
