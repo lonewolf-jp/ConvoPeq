@@ -49,6 +49,20 @@ void waitUntil (const std::atomic<bool>& flag)
         std::this_thread::yield();
 }
 
+// ★ 上限付きの待機。タイムアウトは false。
+//   チェックポイントに到達しない回帰でテストがハングしないように使う。
+bool waitUntilBounded (const std::atomic<bool>& flag, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (flag.load (std::memory_order_acquire))
+            return true;
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+    }
+    return flag.load (std::memory_order_acquire);
+}
+
 void testPublishGate()
 {
     convo::EpochDomain::EpochPublishGate gate;
@@ -439,7 +453,22 @@ void testExitInProgressBlocksDrain()
         domain->exitReader (idx);          // seam \u3067 depth \u30c7\u30af\u30ea\u30e1\u30f3\u30c8\u76f4\u5f8c\u306b\u6b62\u307e\u308b
     });
 
-    waitUntil (entered);
+    // タイムアウト時は worker を解放して join し、seam を外してから FAIL にする。
+    auto cleanupWorker = [&]
+    {
+        goExit.store (true, std::memory_order_release);
+        seam.release.store (true, std::memory_order_release);
+        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        if (reader.joinable())
+            reader.join();
+    };
+
+    if (! waitUntilBounded (entered, std::chrono::milliseconds (2000)))
+    {
+        check (false, "exit-window: reader did not enter (registration failed or enter stalled)");
+        cleanupWorker();
+        return;
+    }
     check (slot.load() >= 0, "exit-window: registration");
 
     // shutdown \u5074\u306e\u524d\u63d0\u3092\u6574\u3048\u308b\uff08fence\u30fb\u767b\u9332\u9589\u9396\u30fbbublisher idle\uff09\u3002
@@ -452,15 +481,17 @@ void testExitInProgressBlocksDrain()
     check (queue != nullptr, "exit-window: borrow");
     if (queue == nullptr)
     {
-        goExit.store (true, std::memory_order_release);
-        seam.release.store (true, std::memory_order_release);
-        reader.join();
-        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        cleanupWorker();
         return;
     }
 
     goExit.store (true, std::memory_order_release);
-    waitUntil (seam.reached);
+    if (! waitUntilBounded (seam.reached, std::chrono::milliseconds (2000)))
+    {
+        check (false, "exit-window: exit seam was not reached");
+        cleanupWorker();
+        return;
+    }
 
     // \u7a93\u306e\u89b3\u6e2c\uff1adepth \u306f 0\u3001\u6d3b\u52d5\u6570\u306f 1 \u4ee5\u4e0a\u3001admission \u306f idle\u3002
     const std::uint32_t depthReaders = domain->activeDepthReaderCount();

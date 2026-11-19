@@ -363,6 +363,7 @@ void t7_exitVsShutdownObservation()
 
     std::atomic<bool> stop { false };
     std::atomic<int> exitsDone { 0 };
+    std::atomic<int> observations { 0 };
 
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
@@ -390,10 +391,19 @@ void t7_exitVsShutdownObservation()
             (void) domain->activeDepthReaderCount();
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
+            (void) observations.fetch_add (1, std::memory_order_release);
         }
     });
 
-    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    // ★ observer が reader の稼働中に実際の観測を完了したことを確認してから停める。
+    //   これが無いと、observer が一度も実行されなくてもカウンタが 0 に戻るだけで PASS してしまう。
+    const bool observedWhileRunning = waitUntil ([&]
+    {
+        return observations.load (std::memory_order_acquire) > 0
+            && exitsDone.load (std::memory_order_acquire) > 0;
+    }, std::chrono::milliseconds (2000));
+    check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
+
     stop.store (true, std::memory_order_release);
 
     for (auto& r : readers)
@@ -401,10 +411,11 @@ void t7_exitVsShutdownObservation()
     shutdownSide.join();
 
     check (exitsDone.load() > 0, "T7: readers must complete exits");
+    check (observations.load() > 0, "T7: observer iterations must be recorded");
     check (domain->activeReaderCount() == 0, "T7: activity must return to 0");
     check (domain->activeDepthReaderCount() == 0, "T7: depth must return to 0");
-    std::printf ("T7 exit vs shutdown: exits=%d activity=%u depth=%u\n",
-                 exitsDone.load(),
+    std::printf ("T7 exit vs shutdown: exits=%d observations=%d activity=%u depth=%u\n",
+                 exitsDone.load(), observations.load(),
                  static_cast<unsigned> (domain->activeReaderCount()),
                  static_cast<unsigned> (domain->activeDepthReaderCount()));
 }

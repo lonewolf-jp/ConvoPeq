@@ -4692,11 +4692,16 @@ bool checkReaderExitQuiescenceWindow()
         ok = false;
     }
 
-    // proof → capability → checked drain の経路が完了しないこと。
-    (void) ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine);
+    // proof → capability → checked drain の前提を整える。準備自体の成功を必須にする
+    //   （publisher 停止のタイムアウトなど、reader 以外の理由で拒否される状態を除外する）。
+    if (! ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-8] FAIL: terminal shutdown preparation failed\n");
+        ok = false;
+    }
     if (ShutdownHoldTestAccess::runCheckedDrain (*engine))
     {
-        std::fprintf(stderr, "[DQ-W1-8] FAIL: checked drain completed inside the window\n");
+        std::fprintf(stderr, "[DQ-W1-9] FAIL: checked drain completed inside the window\n");
         ok = false;
     }
 
@@ -4707,25 +4712,33 @@ bool checkReaderExitQuiescenceWindow()
 
     if (! entered.load (std::memory_order_acquire))
     {
-        std::fprintf(stderr, "[DQ-W1-6] FAIL: reader.enter() failed\n");
+        std::fprintf(stderr, "[DQ-W1-11] FAIL: reader.enter() failed\n");
         ok = false;
     }
     if (! exitDone.load (std::memory_order_acquire))
     {
-        std::fprintf(stderr, "[DQ-W1-7] FAIL: exit did not complete after the seam\n");
+        std::fprintf(stderr, "[DQ-W1-12] FAIL: exit did not complete after the seam\n");
+        ok = false;
+    }
+
+    // 同じ fixture で checked drain が完了すること。これで、上の拒否の理由が
+    // 「exit 中の活動数」だけだったことを切り分けられる。
+    if (! ShutdownHoldTestAccess::runCheckedDrain (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-13] FAIL: checked drain did not complete after the exit\n");
         ok = false;
     }
 
     if (routerPtr->activeReaderCount() != 0)
     {
-        std::fprintf(stderr, "[DQ-W1-9] FAIL: activity not released after exit (%u)\n",
+        std::fprintf(stderr, "[DQ-W1-14] FAIL: activity not released after exit (%u)\n",
                      static_cast<unsigned> (routerPtr->activeReaderCount()));
         ok = false;
     }
 
     if (ok)
         std::printf ("[DQ-W1] exit window: PASS (depth=%u activity=%u exiting=%u; "
-                     "Q4 false, checked drain refused; activity 0 after exit)\n",
+                     "Q4 false, checked drain refused inside the window and completed after the exit)\n",
                      static_cast<unsigned> (depthReaders),
                      static_cast<unsigned> (activity),
                      static_cast<unsigned> (exiting));
