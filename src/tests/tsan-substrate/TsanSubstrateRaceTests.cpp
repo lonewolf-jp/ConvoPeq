@@ -366,14 +366,23 @@ void t7_exitVsShutdownObservation()
     //   同名タグの初回 claim を複数スレッドで競合させると strncmp 嵌めで
     //   data race になる（別 Issue で管理。ここでは T7 が目的とする競合だけを実行する）。
     {
+        // 記録を閉じたこと（タグの登録ができたこと）を closed_ で確かめる。
+        // claim に失敗すると close されず、同名タグの初回 claim 競合が残る。
+        const std::uint64_t closedBefore =
+            convo::consumeAtomic (convo::ReaderMeasureRegistry::closed_, std::memory_order_acquire);
         convo::RCUReader warmup (*domain);
         if (warmup.enter())
             warmup.exit();
+        const std::uint64_t closedAfter =
+            convo::consumeAtomic (convo::ReaderMeasureRegistry::closed_, std::memory_order_acquire);
+        check (closedAfter == closedBefore + 1,
+               "T7: warmup must close a measure record (tag registration)");
     }
 
     std::atomic<bool> stop { false };
     std::atomic<int> exitsDone { 0 };
     std::atomic<int> observations { 0 };
+    std::atomic<bool> sawActivity { false };
 
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
@@ -397,7 +406,9 @@ void t7_exitVsShutdownObservation()
         while (! stop.load (std::memory_order_acquire))
         {
             (void) domain->publishEpoch();
-            (void) domain->activeReaderCount();
+            const std::uint32_t observedActivity = domain->activeReaderCount();
+            if (observedActivity > 0)
+                sawActivity.store (true, std::memory_order_release);
             (void) domain->activeDepthReaderCount();
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
@@ -410,9 +421,12 @@ void t7_exitVsShutdownObservation()
     const bool observedWhileRunning = waitUntil ([&]
     {
         return observations.load (std::memory_order_acquire) > 0
-            && exitsDone.load (std::memory_order_acquire) > 0;
+            && exitsDone.load (std::memory_order_acquire) > 0
+            && sawActivity.load (std::memory_order_acquire);
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
+    check (sawActivity.load (std::memory_order_acquire),
+           "T7: the observer must see non-zero reader activity");
 
     stop.store (true, std::memory_order_release);
 

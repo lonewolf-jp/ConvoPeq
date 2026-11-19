@@ -630,8 +630,11 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
         snap.pendingRetire = m_retireRouter->pendingRetireCount();
         const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
         snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
-        // ★ WORK113 R1: trend の件数は depth のみ（activity は exit 中を含む）。
-        snap.activeReaderCount = m_retireRouter->activeDepthReaderCount();
+        // ★ WORK113 R1: ここは回復判断の入力なので活動数を使う。
+        //   depth のみにすると、exit 実行中の reader が 0 と見えて
+        //   computeTrend が Worsening を選び、実際には改善中のときに回復動作を引き起こす。
+        //   slot 使用率の監視（checkReaderSlotUsage）とは用途が違う。
+        snap.activeReaderCount = m_retireRouter->activeReaderCount();
         // ★ D101-9 Step 5-VI-C: retire-chain raw observations (sole raw-read site)
         snap.terminalStoreCount = m_retireRouter->terminalStoreCount();
         snap.terminalReclaimResidentCount = m_retireRouter->terminalReclaimResidentCount();

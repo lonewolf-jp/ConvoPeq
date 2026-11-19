@@ -494,6 +494,12 @@ void testExitInProgressBlocksDrain()
         return;
     }
 
+    // 拒否が「entry を処理しない」ことの証拠として sentinel を 1 件積む。
+    static int sentinel = 0;
+    g_deleted.store (0, std::memory_order_relaxed);
+    check (domain->enqueueRetire (&sentinel, countingDeleter, domain->currentEpoch()),
+           "exit-window: enqueue sentinel");
+
     goExit.store (true, std::memory_order_release);
     if (! waitUntilBounded (seam.reached, std::chrono::milliseconds (2000)))
     {
@@ -517,6 +523,8 @@ void testExitInProgressBlocksDrain()
                    == convo::EpochDomain::DrainResult::ReadersNotQuiescent,
                "exit-window: checked drain must fail while exit is in progress");
     }
+    check (g_deleted.load() == 0, "exit-window: rejected drain must not run the deleter");
+    check (queue->sizeApprox() == 1u, "exit-window: rejected drain must retain the entry");
 
     // exit を完了させる。同じ構成で Completed になれば、上の拒否は exit カウンタが理由だ。
     seam.release.store (true, std::memory_order_release);
@@ -532,6 +540,8 @@ void testExitInProgressBlocksDrain()
                    == convo::EpochDomain::DrainResult::Completed,
                "exit-window: checked drain succeeds after exit completes");
     }
+    check (g_deleted.load() == 1, "exit-window: completed drain must run the deleter exactly once");
+    check (queue->sizeApprox() == 0u, "exit-window: queue must be empty after the drain");
 }
 
 //==============================================================================
