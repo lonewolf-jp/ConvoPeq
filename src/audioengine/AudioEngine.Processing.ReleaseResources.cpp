@@ -435,7 +435,10 @@ void AudioEngine::releaseResources()
     }
 
     // ★★★ PR2: Quarantine 全スロット強制解放（シャットダウン専用）
-    //    この時点で GracefulDrain が activeReaderCount==0 を確認済み（※ 前提：実行時確認は未検証。別確認項目）
+    //    ★ WORK113 R1: 直前の GracefulDrain がタイムアウトした場合、この時点で reader が
+    //    残っている可能性がある。Q/E/T の強制解放は epoch 非依存なので、参照中の World / DSP を
+    //    解放し得る。Owner 指示（2026-11-18）の fail-closed（所有権を保持し、解放しない）に
+    //    合わせ、reader の活動が 0 のときだけ解放する。
     {
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
         m_retireRouter->unquarantineAllReaders();
@@ -443,11 +446,21 @@ void AudioEngine::releaseResources()
         // ★ BUG-015/027 (work88): RetireQuarantineStore の全強制解放（Audio Thread 停止後 — drainAllUnsafe 契約）
         //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
+        const auto quarantineReaders = m_retireRouter->activeReaderCount();
         if (quarantinedRetireResident > 0) {
-            diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
-                    + juce::String(static_cast<int64>(quarantinedRetireResident))
-                    + " -- performing shutdown drain");
-            m_retireRouter->drainAllQuarantineStore();
+            if (quarantineReaders == 0) {
+                diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
+                        + juce::String(static_cast<int64>(quarantinedRetireResident))
+                        + " -- performing shutdown drain");
+                m_retireRouter->drainAllQuarantineStore();
+            } else {
+                // fail-closed: reader が残るため所有権を保持する（解放しない）。
+                diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
+                        + juce::String(static_cast<int64>(quarantinedRetireResident))
+                        + " -- reader still active (readers="
+                        + juce::String(static_cast<int>(quarantineReaders))
+                        + "), skipping shutdown drain (fail-closed)");
+            }
         }
 
         // F-2 (2026-10-25): last chance to finish quarantine-slot destruction that was

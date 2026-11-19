@@ -902,6 +902,13 @@ void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
         emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,
             activeCount, maxSlots);
+    } else {
+        // ★ WORK113 R1: 閾値を下回ったら Normal へ戻す。Error / Warning から戻る経路が
+        //    無いと、使用率が下がっても状態が固まり、updateHealthState と reader の
+        //    fault mask に古い状態が残る。emitOnTransition は Normal では通知しない。
+        emitOnTransition(m_prevReaderSlotState, MonitorState::Normal,
+            HealthEvent::Severity::Info, EVENT_READER_SLOT_USAGE,
+            activeCount, maxSlots);
     }
 }
 
