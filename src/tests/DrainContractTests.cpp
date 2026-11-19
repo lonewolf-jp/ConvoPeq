@@ -408,10 +408,10 @@ void testQuarantine()
 } // namespace
 
 //==============================================================================
-// \u2605 WORK113 R1 (2026-11-19 Owner \u627f\u8a8d): exit \u51e6\u7406\u4e2d\uff08depth==0\u30fbprovider \u5f8c\u51e6\u7406\u304c\u6b8b\u308b\uff09\u306b
-//   drainQueue \u304c\u9759\u6b62\u3092\u4e3b\u5f35\u3057\u306a\u3044\u3053\u3068\u3002
-//   seam \u3067 depth \u30c7\u30af\u30ea\u30e1\u30f3\u30c8\u76f4\u5f8c\u306b\u6b62\u3081\u3001\u540c\u3058\u69cb\u6210\u3067 exit \u5b8c\u4e86\u5f8c\u306b
-//   Completed \u306b\u306a\u308b\u3053\u3068\u3092\u5bfe\u7167\u306b\u53d6\u308b\uff08\u4ed6\u306e\u6761\u4ef6\u304c\u6210\u7acb\u3057\u3066\u3044\u308b\u3053\u3068\u306e\u8a3c\u62e0\uff09\u3002
+// ★ WORK113 R1 (2026-11-19 Owner 承認): exit 処理中（depth==0・provider 後処理が残る）に
+//   drainQueue が静止を主張しないこと。
+//   seam で depth デクリメント直後に止め、同じ構成で exit 完了後に
+//   Completed になることを対照に取る（他の条件が成立していることの証拠）。
 //==============================================================================
 void testExitInProgressBlocksDrain()
 {
@@ -457,7 +457,7 @@ void testExitInProgressBlocksDrain()
         domain->enterReader (idx);
         entered.store (true, std::memory_order_release);
         waitUntil (goExit);
-        domain->exitReader (idx);          // seam \u3067 depth \u30c7\u30af\u30ea\u30e1\u30f3\u30c8\u76f4\u5f8c\u306b\u6b62\u307e\u308b
+        domain->exitReader (idx);          // seam で depth デクリメント直後に止まる
     });
 
     // タイムアウト時は worker を解放して join し、seam を外してから FAIL にする。
@@ -480,7 +480,7 @@ void testExitInProgressBlocksDrain()
     }
     check (slot.load() >= 0, "exit-window: registration");
 
-    // shutdown \u5074\u306e\u524d\u63d0\u3092\u6574\u3048\u308b\uff08fence\u30fb\u767b\u9332\u9589\u9396\u30fbbublisher idle\uff09\u3002
+    // shutdown 側の前提を整える（fence・登録閉鎖・bublisher idle）。
     domain->engageShutdownReaderFence();
     domain->closeReaderRegistration();
     check (domain->closePublishersAndWaitIdle (std::chrono::milliseconds (50)),
@@ -502,7 +502,7 @@ void testExitInProgressBlocksDrain()
         return;
     }
 
-    // \u7a93\u306e\u89b3\u6e2c\uff1adepth \u306f 0\u3001\u6d3b\u52d5\u6570\u306f 1 \u4ee5\u4e0a\u3001admission \u306f idle\u3002
+    // 窓の観測：depth は 0、活動数は 1 以上、admission は idle。
     const std::uint32_t depthReaders = domain->activeDepthReaderCount();
     const std::uint32_t activity = domain->activeReaderCount();
     check (depthReaders == 0u, "exit-window: depth is 0 inside the window");
@@ -518,7 +518,7 @@ void testExitInProgressBlocksDrain()
                "exit-window: checked drain must fail while exit is in progress");
     }
 
-    // exit \u3092\u5b8c\u4e86\u3055\u305b\u308b\u3002\u540c\u3058\u69cb\u6210\u3067 Completed \u306b\u306a\u308c\u3070\u3001\u4e0a\u306e\u62d2\u5426\u306f exit \u30ab\u30a6\u30f3\u30bf\u304c\u7406\u7531\u3060\u3002
+    // exit を完了させる。同じ構成で Completed になれば、上の拒否は exit カウンタが理由だ。
     seam.release.store (true, std::memory_order_release);
     reader.join();
     convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
@@ -535,9 +535,9 @@ void testExitInProgressBlocksDrain()
 }
 
 //==============================================================================
-// \u2605 WORK113 R1: exitReader \u306e\u65e9\u671f return\uff08previousDepth == 0 / > 1\uff09\u3067\u3082
-//   exit \u30ab\u30a6\u30f3\u30bf\u304c\u5143\u306b\u623b\u308b\u3053\u3068\u3002
-//   \u5dee\uff08activeReaderCount - activeDepthReaderCount\uff09\u304c exit \u5b9f\u884c\u4e2d\u306e\u4ef6\u6570\u3067\u3042\u308b\u3002
+// ★ WORK113 R1: exitReader の早期 return（previousDepth == 0 / > 1）でも
+//   exit カウンタが元に戻ること。
+//   差（activeReaderCount - activeDepthReaderCount）が exit 実行中の件数である。
 //==============================================================================
 void testExitCounterRestoredOnEarlyReturns()
 {
@@ -556,18 +556,18 @@ void testExitCounterRestoredOnEarlyReturns()
     };
 
     domain->enterReader (idx);          // depth 1
-    domain->enterReader (idx);          // depth 2\uff08\u30cd\u30b9\u30c8\uff09
+    domain->enterReader (idx);          // depth 2（ネスト）
     check (domain->activeDepthReaderCount() == 1u, "early: nested reader counts once");
 
-    domain->exitReader (idx);           // previousDepth == 2 \u2192 \u65e9\u671f return
+    domain->exitReader (idx);           // previousDepth == 2 → 早期 return
     check (exitInProgress() == 0u, "early: nested exit restores the counter");
     check (domain->activeReaderCount() == 1u, "early: nested exit keeps activity 1");
 
-    domain->exitReader (idx);           // previousDepth == 1 \u2192 \u901a\u5e38\u7d42\u4e86
+    domain->exitReader (idx);           // previousDepth == 1 → 通常終了
     check (exitInProgress() == 0u, "early: outer exit restores the counter");
     check (domain->activeReaderCount() == 0u, "early: activity returns to 0");
 
-    domain->exitReader (idx);           // previousDepth == 0 \u2192 underflow \u306e\u65e9\u671f return
+    domain->exitReader (idx);           // previousDepth == 0 → underflow の早期 return
     check (exitInProgress() == 0u, "early: underflow exit restores the counter");
     check (domain->activeReaderCount() == 0u, "early: activity stays 0 after underflow");
 }
