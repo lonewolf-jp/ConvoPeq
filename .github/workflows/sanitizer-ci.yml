@@ -13,10 +13,15 @@
 #
 # Practical Stable 設計:
 # - ASan: Windows MSVC で完全実行（RelWithDebInfo + /MD）。動的CRT切替でASan互換。
-# - TSan: Linux Clang で best-effort 実行。MKL/IPP 非依存のテストのみ対象。
-#         環境不足時は graceful skip（PR ブロックしない）。
+# - TSan: Linux Clang で src/tests/tsan-substrate（JUCE/MKL/IPP 無依存の shutdown
+#         基盤ハーネス）を実行する。fail-closed（skip は success にしない）。
 
 name: Sanitizer CI
+
+# ★ 2026-11-19: GitHub Advanced Security の指摘（過剰な GITHUB_TOKEN 権限）に対応。
+#   このワークフローは読み取りのみで足りるため、既定を contents: read にする。
+permissions:
+  contents: read
 
 on:
   push:
@@ -254,21 +259,24 @@ jobs:
 
 
   #-----------------------------------------------------------
-  # Debug-TSan: Linux Clang, best-effort ThreadSanitizer
+  #-----------------------------------------------------------
+  # Debug-TSan: Linux Clang, shutdown substrate ThreadSanitizer
   #
-  # TSan detects data races in multi-threaded code.
-  # MSVC does not support TSan; Clang on Linux is required.
-  #
-  # Practical Stable: このプロジェクトは MKL/IPP/JUCE ASIO に
-  # 依存するため Linux でのフルビルドは不可能。そのため
-  # MKL/IPP に依存しないテスト（ISRRetire テスト等）のみを
-  # 対象とし、ビルド困難な場合は graceful skip する。
+  # ★ WORK113 (2026-11-18 Owner 承認): fail-closed 化。
+  #   旧構成は job-level continue-on-error と exit 0 の握りつぶしにより、何も実行
+  #   しなくても success になっていた（PR #219 で 33 秒 success を実測）。
+  #   新構成は src/tests/tsan-substrate の独立ハーネス（ルートのフルビルド不要・
+  #   JUCE/MKL/IPP 無依存）をビルドし、次の 2 つを検証する。どちらかが崩れれば
+  #   ジョブは失敗する（skip を success として扱わない）。
+  #     1. TsanSubstrateRaceTests が 6 シナリオを警告 0 件で完走する（exit 0）。
+  #     2. TsanPositiveControl が意図的な data race を検出する。
+  #        成功条件は exit 99 と "WARNING: ThreadSanitizer: data race" の両方であり、
+  #        それ以外の非 0 終了（runtime 起動失敗・無関係なクラッシュ）は失敗。
   #-----------------------------------------------------------
   debug-tsan:
-    name: "Debug TSan (Clang, best-effort)"
+    name: "Debug TSan (Clang, substrate harness)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true  # ISR: 環境不足でも PR をブロックしない
 
     steps:
       - uses: actions/checkout@v5
@@ -282,47 +290,54 @@ jobs:
               sleep 10
             }
           done
-          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev cmake
+          sudo apt-get install -y ninja-build clang cmake
 
-      - name: Check MKL/IPP availability
-        id: check_deps
+      - name: Configure substrate TSan harness (standalone)
         run: |
-          if ! command -v clang++ &> /dev/null; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "reason=clang not found"
-            exit 0
-          fi
-          echo "skip=false" >> $GITHUB_OUTPUT
-
-      - name: Configure CMake with TSan (minimal target)
-        if: steps.check_deps.outputs.skip != 'true'
-        run: |
-          cmake -B ${{ env.BUILD_DIR }} \
-            -G "Ninja Multi-Config" \
-            -DCMAKE_C_COMPILER=clang \
+          cmake -S src/tests/tsan-substrate -B build-tsan -G Ninja \
             -DCMAKE_CXX_COMPILER=clang++ \
-            -DENABLE_TSAN=ON \
-            -DCMAKE_BUILD_TYPE=Debug \
-            2>&1 || echo "CMake configuration failed (expected on Linux without MKL/IPP)"
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -O1 -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 
-      - name: Build and test (best-effort)
-        if: steps.check_deps.outputs.skip != 'true'
+      - name: Build substrate TSan harness
         run: |
-          # Practical Stable ISR: MKL/IPP 非依存の ISR テストのみを対象とする。
-          # configure が失敗していたら graceful skip。
-          if [ ! -f "${{ env.BUILD_DIR }}/build.ninja" ]; then
-            echo "[TSan] Skipped (no build configured — MKL/IPP not available on Linux)"
-            exit 0
+          cmake --build build-tsan
+
+      - name: Run substrate TSan harness (must be race-free)
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:exitcode=99:detect_leaks=0"
+        run: |
+          ./build-tsan/TsanSubstrateRaceTests
+
+      - name: Positive control (TSan must report a data race)
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:exitcode=99:detect_leaks=0"
+        run: |
+          # 成功条件は 2 つの合合:
+          #   1. 終了コードが TSAN_OPTIONS で指定した 99 であること。
+          #   2. 出力に "WARNING: ThreadSanitizer: data race" があること。
+          # それ以外の非 0 終了（runtime の起動失敗や無関係なクラッシュ）は失敗にする。
+          log=positive_control.log
+          set +e
+          ./build-tsan/TsanPositiveControl > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          if [ "$rc" -ne 99 ]; then
+            echo "::error::positive control exited $rc (expected 99 from TSAN_OPTIONS exitcode) - this is not a TSan detection"
+            exit 1
           fi
-          # 利用可能な ISR テストをビルド
-          cmake --build "${{ env.BUILD_DIR }}" --config Debug --target ISRSemanticValidationTests 2>/dev/null || \
-          { echo "[TSan] Build failed (expected without MKL)"; exit 0; }
-          ctest --test-dir "${{ env.BUILD_DIR }}" -C Debug --output-on-failure 2>/dev/null || \
-          echo "[TSan] No TSan-compatible tests executed"
+          if ! grep -q "WARNING: ThreadSanitizer: data race" "$log"; then
+            echo "::error::positive control exited 99 but no 'WARNING: ThreadSanitizer: data race' was found in the output"
+            exit 1
+          fi
+          echo "positive control: TSan reported a data race (exit 99)"
 
       - name: Report TSan status
         if: always()
         run: |
-          echo "## TSan (best-effort) results" >> $GITHUB_STEP_SUMMARY
-          echo "- Environment: ubuntu-latest, Clang" >> $GITHUB_STEP_SUMMARY
-          echo "- Note: Full build requires MKL/IPP (Windows-only). TSan runs on available targets." >> $GITHUB_STEP_SUMMARY
+          echo "## TSan (substrate harness, fail-closed) results" >> $GITHUB_STEP_SUMMARY
+          echo "- Harness: src/tests/tsan-substrate (standalone, JUCE/MKL/IPP free)" >> $GITHUB_STEP_SUMMARY
+          echo "- TsanSubstrateRaceTests: 6 scenarios, race-free required" >> $GITHUB_STEP_SUMMARY
+          echo "- TsanPositiveControl: detection capability check (fails if it does not trip)" >> $GITHUB_STEP_SUMMARY
