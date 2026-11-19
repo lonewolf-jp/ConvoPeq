@@ -361,6 +361,16 @@ void t7_exitVsShutdownObservation()
 {
     auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EngineISR);
 
+    // ★ 前処理: ReaderMeasureRegistry の同名タグの枠を単スレッドで作っておく。
+    //   既存の計測レジストリは、タグを書く前に used を公開するため、
+    //   同名タグの初回 claim を複数スレッドで競合させると strncmp 嵌めで
+    //   data race になる（別 Issue で管理。ここでは T7 が目的とする競合だけを実行する）。
+    {
+        convo::RCUReader warmup (*domain);
+        if (warmup.enter())
+            warmup.exit();
+    }
+
     std::atomic<bool> stop { false };
     std::atomic<int> exitsDone { 0 };
     std::atomic<int> observations { 0 };

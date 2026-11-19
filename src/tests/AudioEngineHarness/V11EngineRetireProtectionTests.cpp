@@ -4591,20 +4591,27 @@ bool checkReaderExitQuiescenceWindow()
 
     struct Seam
     {
+        std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
         std::atomic<bool> reached { false };
         std::atomic<bool> release { false };
     };
 
     static Seam seam;
+    seam.fired.store (false);
     seam.reached.store (false);
     seam.release.store (false);
 
     auto seamFn = [] (void* ctx) noexcept
     {
-        // ★ 1 回だけ止める。~AudioEngine や他の reader の exit を止めないため、
-        //   呼ばれた瞬間に seam 自体を外す。
-        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        // ★ 1 回だけ止める（~AudioEngine や他の reader の exit は止めない）。
+        //   seam 自体はここで解除しない。解除と競合すると、旧関数ポインタと
+        //   nullptr の ctx の組で呼ばれる経路ができる。解除は join 後に行う。
         auto* s = static_cast<Seam*> (ctx);
+        if (s == nullptr)
+            return;
+        bool expected = false;
+        if (! s->fired.compare_exchange_strong (expected, true))
+            return;
         s->reached.store (true, std::memory_order_release);
         while (! s->release.load (std::memory_order_acquire))
             std::this_thread::yield();
@@ -4757,20 +4764,27 @@ bool checkReaderExitShutdownRace()
 
     struct Seam
     {
+        std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
         std::atomic<bool> reached { false };
         std::atomic<bool> release { false };
     };
 
     static Seam seam;
+    seam.fired.store (false);
     seam.reached.store (false);
     seam.release.store (false);
 
     auto seamFn = [] (void* ctx) noexcept
     {
-        // ★ 1 回だけ止める。~AudioEngine や他の reader の exit を止めないため、
-        //   呼ばれた瞬間に seam 自体を外す。
-        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        // ★ 1 回だけ止める（~AudioEngine や他の reader の exit は止めない）。
+        //   seam 自体はここで解除しない。解除と競合すると、旧関数ポインタと
+        //   nullptr の ctx の組で呼ばれる経路ができる。解除は join 後に行う。
         auto* s = static_cast<Seam*> (ctx);
+        if (s == nullptr)
+            return;
+        bool expected = false;
+        if (! s->fired.compare_exchange_strong (expected, true))
+            return;
         s->reached.store (true, std::memory_order_release);
         while (! s->release.load (std::memory_order_acquire))
             std::this_thread::yield();

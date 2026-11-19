@@ -419,19 +419,26 @@ void testExitInProgressBlocksDrain()
 
     struct Seam
     {
+        std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
         std::atomic<bool> reached { false };
         std::atomic<bool> release { false };
     };
 
     static Seam seam;
+    seam.fired.store (false);
     seam.reached.store (false);
     seam.release.store (false);
 
     convo::EpochDomain::setReaderExitSeam ([] (void* p) noexcept
     {
         // ★ 1 回だけ止める（他の exit を止めない）。
-        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        //   seam 自体はここで解除しない（解除は join 後）。
         auto* s2 = static_cast<Seam*> (p);
+        if (s2 == nullptr)
+            return;
+        bool expected = false;
+        if (! s2->fired.compare_exchange_strong (expected, true))
+            return;
         s2->reached.store (true, std::memory_order_release);
         while (! s2->release.load (std::memory_order_acquire))
             std::this_thread::yield();
@@ -458,9 +465,11 @@ void testExitInProgressBlocksDrain()
     {
         goExit.store (true, std::memory_order_release);
         seam.release.store (true, std::memory_order_release);
-        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
         if (reader.joinable())
             reader.join();
+        // ★ 解除は join の後。実行中の exitReader が旧 fn と nullptr の ctx を
+        //   組み合わせて呼ぶ経路を作らない。
+        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
     };
 
     if (! waitUntilBounded (entered, std::chrono::milliseconds (2000)))
