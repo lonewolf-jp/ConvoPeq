@@ -167,6 +167,26 @@ public:
     }
     [[nodiscard]] std::uint32_t readerAdmissionsActive() const noexcept { return readerAdmissionGate_.active(); }
 
+    // ★ WORK113 R1: shutdown の強制解放を「新しい入場が始まらない」状態で実行するための
+    //   一時的な除外。fence と違い解除できるので、「releaseResources 後に close 前登録の reader は
+    //   再入場できる」規則（V11 E1）を壊さない。除外中は reacquireReaderSlot() を拒否する。
+    void beginRetireDrainExclusion() noexcept
+    {
+        convo::publishAtomic (retireDrainExclusion_, true, std::memory_order_acq_rel);
+    }
+    void endRetireDrainExclusion() noexcept
+    {
+        convo::publishAtomic (retireDrainExclusion_, false, std::memory_order_release);
+    }
+    [[nodiscard]] bool retireDrainExclusionActive() const noexcept
+    {
+        return convo::consumeAtomic (retireDrainExclusion_, std::memory_order_acquire);
+    }
+    [[nodiscard]] std::uint32_t reacquireDuringDrainExclusion() const noexcept
+    {
+        return convo::consumeAtomic (reacquireDuringDrainExclusion_, std::memory_order_acquire);
+    }
+
     // 予約済みで未 enter の slot（admission 中の slot）を数える。admission gate と二重に確認する。
     [[nodiscard]] std::uint32_t admissionPendingSlots() const noexcept
     {
@@ -545,6 +565,15 @@ public:
         if (shutdownReaderFenceEngaged())
         {
             reacquireAfterFence_.fetch_add(1, std::memory_order_relaxed);
+            readerAdmissionGate_.exit();
+            return false;
+        }
+
+        // ★ WORK113 R1: shutdown の強制解放中は再入場を拒否する。fence と違い解除されるので、
+        //   解除後の再入場は従来どおりできる。
+        if (retireDrainExclusionActive())
+        {
+            reacquireDuringDrainExclusion_.fetch_add(1, std::memory_order_relaxed);
             readerAdmissionGate_.exit();
             return false;
         }
@@ -1307,6 +1336,8 @@ private:
     inline static std::atomic<void*> readerExitSeamCtx_ { nullptr };
 #endif
     std::atomic<std::uint32_t> reacquireAfterFence_ { 0 };
+    std::atomic<bool> retireDrainExclusion_ { false };
+    std::atomic<std::uint32_t> reacquireDuringDrainExclusion_ { 0 };
     std::atomic<std::uint32_t> enterAfterFence_ { 0 };
     std::atomic<std::uint32_t> epochIdleTimeouts_ { 0 };
     std::atomic<std::uint32_t> latePublisherAttempts_ { 0 };

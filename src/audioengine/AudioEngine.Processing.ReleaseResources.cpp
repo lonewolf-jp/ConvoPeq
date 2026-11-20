@@ -31,6 +31,25 @@ void diagLog(const juce::String& message)
 }
 }
 
+namespace
+{
+// ★ WORK113 R1: shutdown の強制解放を「新しい入場が始まらない」状態で実行するための一時的な除外。
+//   fence と違い解除するので、V11 E1（releaseResources 後に close 前登録の reader は再入場できる）
+//   を壊さない。除外中は reacquireReaderSlot() が拒否され、集合が解放の後ろに増えない。
+struct RetireDrainExclusionScope
+{
+    explicit RetireDrainExclusionScope (convo::EpochDomain& d) noexcept : domain (d)
+    {
+        domain.beginRetireDrainExclusion();
+    }
+    ~RetireDrainExclusionScope()
+    {
+        domain.endRetireDrainExclusion();
+    }
+    convo::EpochDomain& domain;
+};
+} // namespace
+
 void AudioEngine::releaseResources()
 {
     ASSERT_NON_RT_THREAD();
@@ -450,6 +469,10 @@ void AudioEngine::releaseResources()
         //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
         if (quarantinedRetireResident > 0) {
+            RetireDrainExclusionScope drainExclusion (m_epochDomain);
+            (void) m_epochDomain.waitForReaderAdmissions (
+                std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
+                                                                 std::memory_order_acquire)));
             if (readerActivityZeroNonRt()) {
                 diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
                         + juce::String(static_cast<int64>(quarantinedRetireResident))
@@ -465,6 +488,8 @@ void AudioEngine::releaseResources()
                         + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots()))
                         + " admissions="
                         + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
+                        + " drainExclusion="
+                        + juce::String(static_cast<int>(m_epochDomain.retireDrainExclusionActive() ? 1 : 0))
                         + "), skipping shutdown drain (fail-closed)");
             }
         }
@@ -638,8 +663,15 @@ void AudioEngine::releaseResources()
     //   UAF 回避のため強制 drain をスキップし、epoch-gated drain（waitForDrain 内の
     //   drainTerminalReclaim）に委ねる。
     //   ★ 活動数だけでなく admission（実行中・予約済み）も idle であることを要求する。
-    if (readerActivityZeroNonRt())
-        m_retireRouter->drainAllQuarantineStore();
+    //   ★ 除外中は新しい再入場が始まらないため、確認した集合が解放まで増えない。
+    {
+        RetireDrainExclusionScope drainExclusion (m_epochDomain);
+        (void) m_epochDomain.waitForReaderAdmissions (
+            std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
+                                                             std::memory_order_acquire)));
+        if (readerActivityZeroNonRt())
+            m_retireRouter->drainAllQuarantineStore();
+    }
 
     // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。
     //   world (dspProjection/topology) が DSPCore* を保持したまま先に破壊すると、

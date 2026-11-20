@@ -104,6 +104,43 @@ void testReaderFence (convo::EpochDomain& domain)
 }
 
 //==============================================================================
+// shutdown の強制解放除外（retire drain exclusion）
+//   除外中は再入場を拒否し、解除後は従来どおり再入場できること。
+//   fence（永久）とは異なり、V11 E1 の規則を壊さないことを固定する。
+//==============================================================================
+void testRetireDrainExclusion()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+
+    const int slot = domain->registerReaderThread ("drain-exclusion");
+    check (slot >= 0, "exclusion: registerReaderThread must succeed before close");
+    if (slot < 0)
+        return;
+
+    // registerReaderThread が予約（admission）を保持しているので、そのまま enter する。
+    // 一度 exit すれば slot は inactive に戻り、reacquire 可能になる。
+    domain->enterReader (slot);
+    domain->exitReader (slot);
+
+    domain->beginRetireDrainExclusion();
+    check (domain->retireDrainExclusionActive(), "exclusion: flag must be visible");
+    check (! domain->reacquireReaderSlot (slot),
+           "exclusion: reacquireReaderSlot must be refused during the exclusion");
+    check (domain->reacquireDuringDrainExclusion() >= 1u,
+           "exclusion: refusal must be counted");
+    check (domain->readerAdmissionsActive() == 0u,
+           "exclusion: a refused reacquire must not hold an admission");
+
+    domain->endRetireDrainExclusion();
+    check (! domain->retireDrainExclusionActive(), "exclusion: flag must clear");
+
+    const bool reacquired = domain->reacquireReaderSlot (slot);
+    check (reacquired, "exclusion: reacquireReaderSlot must succeed after the exclusion ends");
+    if (reacquired)
+        domain->exitReader (slot);
+}
+
+//==============================================================================
 // admission と shutdown の競合（決定論的 interleaving）
 //   Reader が admission を取得した直後（fence 判定の前）に停止し、その間に
 //   shutdown が fence / gate を閉じる。shutdown は入場処理の完了を待ち、
@@ -595,6 +632,7 @@ int main()
     testReservedNotEntered();
     testExitInProgressBlocksDrain();
     testExitCounterRestoredOnEarlyReturns();
+    testRetireDrainExclusion();
     testDrainContract();
     testQuarantine();
 
