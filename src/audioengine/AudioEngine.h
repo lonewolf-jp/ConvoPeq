@@ -5057,6 +5057,9 @@ captureEpochQuiescenceEvidence() const noexcept
     {
         // ★ WORK113 R1: 保守的な活動数（exit 処理中を含む）。
         //   0 は「この domain を触っている reader が居ない」。
+        //   ただし 0 だけでは静止とは言えない。予約済みで未 enter の slot は
+        //   depth 0 でここに入らないが、後から入場できる。静止判定には
+        //   readerActivityZeroNonRt()（admission と予約 slot も見る）を使うこと。
         evidence.activeReaders = m_retireRouter->activeReaderCount();
         evidence.minReaderEpoch = m_retireRouter->minReaderEpoch();
         evidence.captured = true;

@@ -4784,6 +4784,9 @@ bool checkReaderExitShutdownRace()
     // ★ reset 後は domain が破棄されている可能性があるため、タイムアウトは
     //   プロセス定数で前後を比べる。
     const int publishIdleFailuresBefore = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    // ★ admission の待ちは、期限切れなら idle でも false になる。タイムアウトで保持された
+    //   場合は、exit 実行中の reader が理由ではないため、この計数を前後で比べる。
+    const int admissionIdleFailuresBefore = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
     const std::uint32_t admissionsBeforeDestroy = domainPtr->readerAdmissionsActive();
     const std::uint32_t pendingSlotsBeforeDestroy = domainPtr->admissionPendingSlots();
 
@@ -4830,6 +4833,15 @@ bool checkReaderExitShutdownRace()
                              "(failures %d -> %d)\n",
                      publishIdleFailuresBefore,
                      AudioEngine::shutdownPublisherIdleFailuresForTest());
+        ok = false;
+    }
+    // ★ admission の idle 待ちがタイムアウトしていないこと（期限切れは idle でも false）。
+    if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() != admissionIdleFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-W3-3d] FAIL: admission idle wait timed out during teardown "
+                             "(failures %d -> %d)\n",
+                     admissionIdleFailuresBefore,
+                     AudioEngine::shutdownReaderAdmissionIdleFailuresForTest());
         ok = false;
     }
     // ★ admission が残って保持されていないこと（残っていれば別の理由）。

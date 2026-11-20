@@ -477,6 +477,10 @@ void t7_exitVsShutdownObservation()
         checkpoint.join();
     }
 
+    // ★ stress フェーズの前の値。チェックポイントだけで満たさないことを固定する。
+    const int exitsBeforeStress = exitsDone.load (std::memory_order_acquire);
+    const int observationsBeforeStress = observations.load (std::memory_order_acquire);
+
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
         readers.emplace_back ([&]
@@ -499,8 +503,8 @@ void t7_exitVsShutdownObservation()
     //   これが無いと、observer が一度も実行されなくてもカウンタが 0 に戻るだけで PASS してしまう。
     const bool observedWhileRunning = waitUntil ([&]
     {
-        return observations.load (std::memory_order_acquire) > 0
-            && exitsDone.load (std::memory_order_acquire) > 0
+        return observations.load (std::memory_order_acquire) > observationsBeforeStress
+            && exitsDone.load (std::memory_order_acquire) > exitsBeforeStress
             && sawActivity.load (std::memory_order_acquire);
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
