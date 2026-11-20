@@ -168,9 +168,10 @@ private:
                 return entry->slot;
             }
 
-            entry->provider = nullptr;     // stale entry: drop it and register again
-            entry->slot = -1;
-            entry->depth = 0;
+            // ★ WORK113 R1: ここでキャッシュを消さない。拒否の理由には、一時的な
+            //   排除（shutdown の強制解放中）も含まれる。ここで舍てると、登録が閉じた後は
+            //   再登録できず、排除が解除されても再入場できなくなる。
+            //   キャッシュは再登録が成功したときだけ差し替える。
         }
 
         const int slot = (tag != nullptr) ? provider.registerReaderThreadWithTag (tag)
@@ -179,7 +180,14 @@ private:
         if (slot < 0)
             return -1;   // fail-closed: registration closed or slots exhausted
 
-        if (auto* entry = findFree())
+        if (auto* entry = find (provider))
+        {
+            // 旧 slot は不要になるが、他スレッドの slot ではないため放置する。
+            entry->slot = slot;
+            entry->depth = 1;
+            if (outDepth != nullptr) *outDepth = 1;
+        }
+        else if (auto* entry = findFree())
         {
             entry->provider = &provider;
             entry->slot = slot;

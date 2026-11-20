@@ -493,9 +493,13 @@ void t7_exitVsShutdownObservation()
 
     stressPhase.store (true, std::memory_order_release);
 
+    // ★ 3 人の stress reader それぞれが 1 回は exit することを要求する。
+    //   1 人だけが動いても他の reader 経路は検証されない。
+    std::atomic<bool> workerExited[3] { {false}, {false}, {false} };
+
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
-        readers.emplace_back ([&]
+        readers.emplace_back ([&, t]
         {
             convo::RCUReader reader (*domain);
             while (! stop.load (std::memory_order_acquire))
@@ -506,6 +510,7 @@ void t7_exitVsShutdownObservation()
                     continue;
                 }
                 reader.exit();
+                workerExited[t].store (true, std::memory_order_release);
                 (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
             }
         });
@@ -517,7 +522,10 @@ void t7_exitVsShutdownObservation()
     {
         return observations.load (std::memory_order_acquire) > observationsBeforeStress
             && exitsDone.load (std::memory_order_acquire) > exitsBeforeStress
-            && sawStressActivity.load (std::memory_order_acquire);
+            && sawStressActivity.load (std::memory_order_acquire)
+            && workerExited[0].load (std::memory_order_acquire)
+            && workerExited[1].load (std::memory_order_acquire)
+            && workerExited[2].load (std::memory_order_acquire);
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
 
