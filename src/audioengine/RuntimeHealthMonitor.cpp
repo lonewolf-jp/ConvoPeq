@@ -791,7 +791,11 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
                               - static_cast<int64_t>(before.maxRetireAgeUs);
     const int64_t pubDelta    = static_cast<int64_t>(now.publicationSeq)
                               - static_cast<int64_t>(before.publicationSeq);
-    const bool faultMaskIncreased = (now.activeFaultMask > before.activeFaultMask);
+    // ★ 新しく立ったビットが増加である。数値比較だと、reader (4) が消えて
+    //   retire (1) や publication (2) が同時に立つと値が下がり、新しい異常を見落として
+    //   Recovered を返し得る。消えたビットだけなら回復を阻まない。
+    const bool faultMaskIncreased =
+        (now.activeFaultMask & ~before.activeFaultMask) != 0u;
 
     // Step 1: ProgressFreeze 監視（最優先、多軸評価）
     if (now.freezeDetected) {
