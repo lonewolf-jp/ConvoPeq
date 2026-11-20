@@ -3054,6 +3054,12 @@ public:
         engine.shutdownWaitTimeoutMs_.store (ms, std::memory_order_release);
     }
 
+    // ★ publisher idle の待ちだけを差し替える。admission の待ちは変えない。
+    static void setShutdownPublisherWaitTimeout (AudioEngine& engine, int ms) noexcept
+    {
+        engine.shutdownPublisherWaitTimeoutMs_.store (ms, std::memory_order_release);
+    }
+
     // ★ WORK113: reader が実際に保持する provider（AudioEngine::getRetireRouter() の戻り値）。
     static convo::IReaderEpochProvider& readerProvider (AudioEngine& engine) noexcept
     {
@@ -4242,6 +4248,9 @@ bool checkDeferredCoreNotRetried()
     {
         auto engine = std::make_unique<AudioEngine>();
         ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+        // ★ 保持の理由は admission。publisher は idle なので、タイムアウトしない予算を与える。
+        //   admission 側は 50 ms のままで、意図的な待機を長引しない。
+        ShutdownHoldTestAccess::setShutdownPublisherWaitTimeout (*engine, 5000);
 
         if (ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "deferred") < 0)
         {
