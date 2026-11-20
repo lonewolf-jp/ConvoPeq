@@ -116,8 +116,16 @@ private:
     {
         const void* provider = nullptr;
         int slot = -1;
-        int depth = 0;   // > 0 while this thread is inside the scope
+        int depth = 0;               // > 0 while this thread is inside the scope
+        std::uint32_t lastUse = 0;   // キャッシュ全杯時の LRU 判定用
     };
+
+    // ★ 使用順の番号。スレッドごとに進めるので、他スレッドと干渉しない。
+    static std::uint32_t bumpUseTick() noexcept
+    {
+        static thread_local std::uint32_t tick = 0;
+        return ++tick;
+    }
 
     // Four entries cover the realistic case (one engine, a few domains). Overflow is
     // not fatal: the thread registers another slot, bounded by kMaxReaders.
@@ -133,9 +141,27 @@ private:
     {
         for (auto& entry : cache())
             if (entry.provider == &provider)
+            {
+                entry.lastUse = bumpUseTick();
                 return &entry;
+            }
 
         return nullptr;
+    }
+
+    // ★ 使っていないエントリのうち、最も古いものを返す。
+    //   depth > 0 のエントリは使用中なので対象外。
+    static CacheEntry* findLeastRecentlyUsed() noexcept
+    {
+        CacheEntry* victim = nullptr;
+        for (auto& entry : cache())
+        {
+            if (entry.provider == nullptr || entry.depth > 0)
+                continue;
+            if (victim == nullptr || entry.lastUse < victim->lastUse)
+                victim = &entry;
+        }
+        return victim;
     }
 
     static CacheEntry* findFree() noexcept
@@ -171,7 +197,8 @@ private:
             // ★ WORK113 R1: ここでキャッシュを消さない。拒否の理由には、一時的な
             //   排除（shutdown の強制解放中）も含まれる。ここで捨てると、登録が閉じた後は
             //   再登録できず、排除が解除されても再入場できなくなる。
-            //   キャッシュは再登録が成功したときだけ差し替える。
+            //   エントリは再登録が成功したとき、またはキャッシュが全杯したときに
+            //   差し替える（下の LRU）。
         }
 
         const int slot = (tag != nullptr) ? provider.registerReaderThreadWithTag (tag)
@@ -192,6 +219,19 @@ private:
             entry->provider = &provider;
             entry->slot = slot;
             entry->depth = 1;
+            entry->lastUse = bumpUseTick();
+            if (outDepth != nullptr) *outDepth = 1;
+        }
+        else if (auto* victim = findLeastRecentlyUsed())
+        {
+            // ★ 拒否されたエントリを保持する代わりに、キャッシュが全杯したら
+            //   最も古いエントリと差し替える。保持を続けると 4 件が埋まり、
+            //   後から登録した provider がキャッシュされず、登録閉鎖後に
+            //   再入場できなくなる。
+            victim->provider = &provider;
+            victim->slot = slot;
+            victim->depth = 1;
+            victim->lastUse = bumpUseTick();
             if (outDepth != nullptr) *outDepth = 1;
         }
 

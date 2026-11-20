@@ -839,7 +839,12 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
         return RecoveryOutcome::Worsening;
 
     // Step 5: Improving
-    const bool retireImproving = (retireDelta < -2);
+    // ★ reader が離脱して retire が 1〜2 減ったサンプルも改善とする。
+    //   以前は -2 を超える減少だけが対象で、その場合は Stalled に落ちて
+    //   過剰に悪化側へ進んだ。バックログが不変（retireDelta == 0）の場合は
+    //   Step 3 が先に Worsening を返すので、その強調は維持される。
+    const bool retireImproving = (retireDelta < -2)
+                               || (retireDelta < 0 && readersDeparted);
     const bool readerImproving = (now.readerStuckCount < before.readerStuckCount);
     if ((retireImproving || readerImproving) && !faultMaskIncreased)
         return RecoveryOutcome::Improving;
