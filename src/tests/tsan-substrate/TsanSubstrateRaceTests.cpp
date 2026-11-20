@@ -385,6 +385,8 @@ void t7_exitVsShutdownObservation()
     std::atomic<int> exitsDone { 0 };
     std::atomic<int> observations { 0 };
     std::atomic<bool> sawActivity { false };
+    std::atomic<bool> stressPhase { false };       // 並行ストレスを始めた後で true
+    std::atomic<bool> sawStressActivity { false }; // stress フェーズ中に活動を見た
     std::atomic<int> exitWindowSamples { 0 };    // depth < activity（exit 実行中）を見た回数
 
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
@@ -427,7 +429,12 @@ void t7_exitVsShutdownObservation()
             const std::uint32_t observedActivity = domain->activeReaderCount();
             const std::uint32_t observedDepth = domain->activeDepthReaderCount();
             if (observedActivity > 0)
+            {
                 sawActivity.store (true, std::memory_order_release);
+                // ★ チェックポイントで立つ sawActivity を、stress フェーズの証拠に流用しない。
+                if (stressPhase.load (std::memory_order_acquire))
+                    sawStressActivity.store (true, std::memory_order_release);
+            }
             // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
             //   seam がパーク中のサンプルだけを計上する（到達前の偶然で
             //   「exit 実行中を見た」ことにしない）。
@@ -484,6 +491,8 @@ void t7_exitVsShutdownObservation()
     const int exitsBeforeStress = exitsDone.load (std::memory_order_acquire);
     const int observationsBeforeStress = observations.load (std::memory_order_acquire);
 
+    stressPhase.store (true, std::memory_order_release);
+
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
         readers.emplace_back ([&]
@@ -508,7 +517,7 @@ void t7_exitVsShutdownObservation()
     {
         return observations.load (std::memory_order_acquire) > observationsBeforeStress
             && exitsDone.load (std::memory_order_acquire) > exitsBeforeStress
-            && sawActivity.load (std::memory_order_acquire);
+            && sawStressActivity.load (std::memory_order_acquire);
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
 

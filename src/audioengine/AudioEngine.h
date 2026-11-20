@@ -5152,7 +5152,7 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 // ★ WORK113 R1 (2026-11-19 Owner 承認): reader 静止の単一判定。
 //   値は EpochDomain::activeReaderCount()（depth > 0 のスロット数＋exitReader 実行中の件数）。
 //   Q4（proof の入力）と checked drain の前提が同じ判定を使う。
-[[nodiscard]] bool readerActivityZeroNonRt() const noexcept
+[[nodiscard]] bool readerActivityZeroNonRt() noexcept
 {
     // ★ 順序固定: admission（予約〜enter）を先に読み、活動数を最後に読む。
     //   逆順だと「活動数 0 を読む → admission の reader が enter → admission 0」の

@@ -107,6 +107,15 @@ public:
         }
 
         [[nodiscard]] uint32_t active() const noexcept { return convo::consumeAtomic(active_, std::memory_order_acquire); }
+
+        // ★ WORK113 R1: 排他判定用の読み。RMW で active_ を読むことで、
+        //   「close 後に shutdown が 0 を読む」と「reader が close 前と読む」の両立を排除する。
+        //   reader 側は tryEnter で同じ active_ を RMW するため、修飾順序で
+        //   必ず片方が相手の更新を見る（RMW 同士の release sequence）。
+        [[nodiscard]] uint32_t activeRmw() noexcept
+        {
+            return convo::fetchOrAtomic(active_, 0u, std::memory_order_acq_rel);
+        }
         [[nodiscard]] bool closed() const noexcept { return convo::consumeAtomic(closed_, std::memory_order_acquire); }
 
     private:
@@ -165,7 +174,10 @@ public:
     {
         return readerAdmissionGate_.waitForIdle(timeout);
     }
-    [[nodiscard]] std::uint32_t readerAdmissionsActive() const noexcept { return readerAdmissionGate_.active(); }
+    [[nodiscard]] std::uint32_t readerAdmissionsActive() noexcept
+    {
+        return readerAdmissionGate_.activeRmw();
+    }
 
     // ★ WORK113 R1: shutdown の強制解放を「新しい入場が始まらない」状態で実行するための
     //   一時的な除外。fence と違い解除できるので、「releaseResources 後に close 前登録の reader は
