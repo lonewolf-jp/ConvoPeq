@@ -305,7 +305,9 @@ public:
             return DrainResult::CapabilityInvalid;
         }
 
-        const bool regClosed = convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
+        // ★ RMW で読み、後続の admission 読みと順序を結ぶ（登録側と同じ語を使う）。
+        const bool regClosed = convo::fetchOrAtomic(registrationClosed_, 0u,
+                                                    std::memory_order_acq_rel) != 0u;
         const bool fence = shutdownReaderFenceEngaged();
         // ★ 順序固定: admission（予約〜enter）を先に読み、活動数を最後に読む。
         //   逆順だと「活動数 0 を読む → admission の reader が enter → admission 0」の
@@ -448,7 +450,7 @@ public:
             enterAfterFence_.fetch_add(1, std::memory_order_relaxed);
             return -1;
         }
-        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
+        if (convo::fetchOrAtomic(registrationClosed_, 0u, std::memory_order_acq_rel) != 0u)
         {
             readerAdmissionGate_.exit();
             return -1;   // ★ X3: reader registration permanently closed（INV-X3-4）
@@ -506,7 +508,7 @@ public:
             return false;
         }
         // ★ work88 (X3 §6.3 / INV-X3-4): reserve 経由の登録も封じる（registrationClosed_ ガード）
-        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
+        if (convo::fetchOrAtomic(registrationClosed_, 0u, std::memory_order_acq_rel) != 0u)
         {
             readerAdmissionGate_.exit();
             return false;
@@ -1433,7 +1435,8 @@ public:
     // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): reader registration permanently closed フラグ。
     //   closeReaderRegistration() で true（shutdown state machine の CloseReaderRegistration フェーズ）。
     //   registerReaderThread / reserveReaderThread は true 後は失敗を返す（新規登録拒否）。
-    std::atomic<bool> registrationClosed_{false};
+    // ★ WORK113 R1: 登録閉鎖は RMW で扱うため uint32（1 = 閉鎖）。
+    std::atomic<std::uint32_t> registrationClosed_{0u};
 
     // ── ★ dash2 §2.2 (Phase A2 — G19/G20): generation 実供給源 ──
     //   ShutdownRuntimeIdentity の epochGeneration / readerRegistrationGeneration を束縛する
@@ -1461,7 +1464,9 @@ public:
     // ★ work88 (X3 §6.3 / INV-X3-4): reader registration を永久に閉じる（CloseReaderRegistration）。
     //   新規登録のみを拒否し、登録済み slot は exit まで継続可能（既存 Reader の epoch 安全性維持）。
     void closeReaderRegistration() noexcept {
-        convo::publishAtomic(registrationClosed_, true, std::memory_order_release);
+        // ★ RMW で公開する。単なる store だと、登録側の「admission 増加 → 閉鎖読み」と
+        //   対にならず、双方が古い値を読む順序が残る。
+        (void) convo::exchangeAtomic(registrationClosed_, 1u, std::memory_order_acq_rel);
         // ★ dash2 §2.2 (G20): registration 状態の世代をインクリメント。
         //   ShutdownRuntimeIdentity::readerRegistrationGeneration の実供給源。
         //   registrationClosed_ の publish 後（release）に increment するため、
@@ -1470,7 +1475,7 @@ public:
                                     std::memory_order_acq_rel);
     }
     [[nodiscard]] bool readerRegistrationClosed() const noexcept {
-        return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
+        return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire) != 0u;
     }
 
     // ★ dash2 §2.2 (G19/G20): generation 公開アクセサ（ShutdownRuntime / Proof 生成用）。
