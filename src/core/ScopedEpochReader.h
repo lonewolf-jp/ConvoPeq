@@ -120,13 +120,6 @@ private:
         std::uint32_t lastUse = 0;   // キャッシュ全杯時の LRU 判定用
     };
 
-    // ★ 使用順の番号。スレッドごとに進めるので、他スレッドと干渉しない。
-    static std::uint32_t bumpUseTick() noexcept
-    {
-        static thread_local std::uint32_t tick = 0;
-        return ++tick;
-    }
-
     // Four entries cover the realistic case (one engine, a few domains). Overflow is
     // not fatal: the thread registers another slot, bounded by kMaxReaders.
     static std::array<CacheEntry, 4>& cache() noexcept
@@ -137,12 +130,23 @@ private:
         return entries;
     }
 
+    // ★ 使用順の値。キャッシュはスレッド単位なので、最大値 + 1 で十分。
+    //   thread_local カウンタを持たない（LINT-AE-011）。
+    static std::uint32_t nextUseValue() noexcept
+    {
+        std::uint32_t maxUse = 0;
+        for (const auto& entry : cache())
+            if (entry.lastUse > maxUse)
+                maxUse = entry.lastUse;
+        return maxUse + 1u;
+    }
+
     static CacheEntry* find (const IReaderEpochProvider& provider) noexcept
     {
         for (auto& entry : cache())
             if (entry.provider == &provider)
             {
-                entry.lastUse = bumpUseTick();
+                entry.lastUse = nextUseValue();
                 return &entry;
             }
 
@@ -219,7 +223,7 @@ private:
             entry->provider = &provider;
             entry->slot = slot;
             entry->depth = 1;
-            entry->lastUse = bumpUseTick();
+            entry->lastUse = nextUseValue();
             if (outDepth != nullptr) *outDepth = 1;
         }
         else if (auto* victim = findLeastRecentlyUsed())
@@ -231,7 +235,7 @@ private:
             victim->provider = &provider;
             victim->slot = slot;
             victim->depth = 1;
-            victim->lastUse = bumpUseTick();
+            victim->lastUse = nextUseValue();
             if (outDepth != nullptr) *outDepth = 1;
         }
 
