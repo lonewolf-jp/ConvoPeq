@@ -5073,10 +5073,38 @@ captureEpochQuiescenceEvidence() const noexcept
 //   - reclaim: reclaimShutdownQuiescent（Permit consume — single-use）
 //   - 戻り値: reclaim 成功時 true（Permit 消費済み）。Proof 不成立 / Permit なし / 二重使用は false。
 //   ［NonRT のみ。AC-ISR-1: Audio Thread からは呼ばない］
+// ★ WORK113 R1: shutdown の強制解放を「新しい入場が始まらない」状態で実行するための一時的な除外。
+//   fence と違い解除するので、V11 E1（releaseResources 後に close 前登録の reader は
+//   再入場できる）を壊さない。二重に囲んでも外側が解除するまで維持される。
+struct RetireDrainExclusionScope
+{
+    explicit RetireDrainExclusionScope (convo::EpochDomain& d) noexcept
+        : domain (d), engaged (! d.retireDrainExclusionActive())
+    {
+        if (engaged)
+            domain.beginRetireDrainExclusion();
+    }
+    ~RetireDrainExclusionScope()
+    {
+        if (engaged)
+            domain.endRetireDrainExclusion();
+    }
+    RetireDrainExclusionScope (const RetireDrainExclusionScope&) = delete;
+    RetireDrainExclusionScope& operator= (const RetireDrainExclusionScope&) = delete;
+
+    convo::EpochDomain& domain;
+    const bool engaged;
+};
+
 inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 {
     if (handle.isNull())
         return false;
+
+    // ★ WORK113 R1: Q4 の観歋から reclaim まで、新しい reader の再入場を排除する。
+    //   closeReaderRegistration() 後でも reacquireReaderSlot() は通るため、この間に
+    //   入場した reader は Q4 に計上されない。
+    RetireDrainExclusionScope drainExclusion (m_epochDomain);
 
     // Q0〜Q7 の観測値（EpochDomain / RetireRouter / ShutdownRuntime から収集）
     convo::isr::ShutdownRuntime::QuiescenceObservation obs;
