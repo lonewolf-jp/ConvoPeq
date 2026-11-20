@@ -4221,6 +4221,11 @@ bool checkDeferredCoreNotRetried()
     }
 
     // (2) 陰性対照: hold 経路（非静止）では再試行が呼ばれない。
+    //   ★ 「再試行 0 回」は、hold 経路を通らずに破棄された場合でも成立する。
+    //   実際に hold 経路（非静止 → 基盤をプロセス寿命へ移す）を通ったことを、
+    //   DIAG に依存しないプロセス定数で確かめる。
+    const int abandonedBeforeHold = ShutdownHoldTestAccess::abandonedReaderSubstrates();
+    const int overflowsBeforeHold = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
     std::uint32_t destroyedTotalBefore = 0;
     std::size_t deferredBefore = 0;
     std::uint64_t id = 0;
@@ -4273,6 +4278,22 @@ bool checkDeferredCoreNotRetried()
 
         // 観測を開始する。引き続き admission を保持し、~AudioEngine は hold 経路を選ぶ。
         id = convo::testobs::setTarget (raw);
+    }
+
+    // ★ hold 経路が実行されたこと（非静止で基盤がプロセス寿命へ移された）。
+    {
+        const int abandonedAfterHold = ShutdownHoldTestAccess::abandonedReaderSubstrates();
+        const int overflowsAfterHold = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+        const bool holdPathRan = (abandonedAfterHold == abandonedBeforeHold + 1)
+                              || (overflowsAfterHold == overflowsBeforeHold + 1);
+        if (! holdPathRan)
+        {
+            std::fprintf(stderr, "[DQ-V2-13b] FAIL: teardown did not take the admission-hold path "
+                                 "(abandoned %d -> %d, overflow %d -> %d)\n",
+                         abandonedBeforeHold, abandonedAfterHold,
+                         overflowsBeforeHold, overflowsAfterHold);
+            ok = false;
+        }
     }
 
     const auto held = readDeferredObservation();
