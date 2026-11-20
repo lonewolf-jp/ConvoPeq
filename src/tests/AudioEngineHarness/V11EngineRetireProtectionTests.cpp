@@ -24,6 +24,7 @@
 
 #include "AudioEngineHarness.h"
 #include "DeferredPublicationTestAccess.h"
+#include "audioengine/ISRRetireRouter.h"
 
 #include <atomic>
 #include <chrono>
@@ -4723,6 +4724,11 @@ bool checkReaderExitShutdownRace()
 
     const int abandonedBefore = ShutdownHoldTestAccess::abandonedReaderSubstrates();
     const int overflowsBefore = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+    // ★ 診断索引が満杯して overflow 側で保持されると、保持されたものを特定できない。
+    //   そこでこの engine の router に破棄フラグを登録し、overflow 側でも
+    //   同じ router が生存したままであることを固定する（他のインスタンスの
+    //   破棄では立たない）。
+    std::atomic<bool> routerDestroyed { false };
     const int instancesBefore = ShutdownHoldTestAccess::engineInstanceCount();
 
     auto engine = std::make_unique<AudioEngine>();
@@ -4737,6 +4743,7 @@ bool checkReaderExitShutdownRace()
         std::fprintf(stderr, "[DQ-W3-1] FAIL: engine substrate is null\n");
         return false;
     }
+    convo::isr::ISRRetireRouter::armDestructionProbeForTest (routerPtr, &routerDestroyed);
 
     convo::EpochDomain::setReaderExitSeam (seamFn, &seam);
 
@@ -4815,6 +4822,16 @@ bool checkReaderExitShutdownRace()
     // ★ ここが破壊的な操作：exit 実行中に engine を破棄する。
     engine.reset();
 
+    // ★ router が破棄されていないこと（overflow 側でも確認する）。
+    //   件数の増分だけでは、保持されたのが domain だけで router が
+    //   破棄された退行を見逃す。この計数は破棄後のオブジェクトを
+    //   参照しないため、生存を判定できる。
+    if (routerDestroyed.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-3f] FAIL: retire router was destroyed during teardown\n");
+        ok = false;
+    }
+
     // 基盤は保持され、プロセス寿命へ移される。
     // 診断索引は固定容量（8）のため、満杯時は保持の証拠を overflow 側で取る。
     const int abandonedAfter = ShutdownHoldTestAccess::abandonedReaderSubstrates();
@@ -4872,6 +4889,8 @@ bool checkReaderExitShutdownRace()
     seam.release.store (true, std::memory_order_release);
     worker.join();
     convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+    // ★ 監視はこの検査の間だけ。以降に別の理由で破棄されても、戻ったスタックのフラグは触らない。
+    convo::isr::ISRRetireRouter::armDestructionProbeForTest (nullptr, nullptr);
 
     if (! entered.load (std::memory_order_acquire))
     {

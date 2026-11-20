@@ -213,6 +213,15 @@ public:
     explicit ISRRetireRouter(convo::IEpochProvider& provider,
                              convo::isr::WorldRetirementReferenceObserver* referenceObserver = nullptr) noexcept;
 
+    ~ISRRetireRouter();
+
+    // ★ テスト専用: 指定したインスタンスが破棄されたときに立つフラグを登録する。
+    //   他のインスタンスの破棄に動作されないため、テスト対象の router が
+    //   生存したときだけフラグは立たない（破棄後のオブジェクトは参照しない）。
+    //   target に nullptr を渡せば解除する。
+    static void armDestructionProbeForTest (const ISRRetireRouter* target,
+                                            std::atomic<bool>* fired) noexcept;
+
     ISRRetireRouter(const ISRRetireRouter&) = delete;
     ISRRetireRouter& operator=(const ISRRetireRouter&) = delete;
     ISRRetireRouter(ISRRetireRouter&&) = delete;
