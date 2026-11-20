@@ -418,6 +418,12 @@ void t7_exitVsShutdownObservation()
         while (! stop.load (std::memory_order_acquire))
         {
             (void) domain->publishEpoch();
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+            // ★ seam の状態を前後で確認してから、間の activity / depth を読む。
+            //   後で確認するだけだと、seam 到達前のサンプルを到達後に計上し得る。
+            const bool seamHeldBefore = seam.reached.load (std::memory_order_acquire)
+                                     && ! seam.release.load (std::memory_order_acquire);
+#endif
             const std::uint32_t observedActivity = domain->activeReaderCount();
             const std::uint32_t observedDepth = domain->activeDepthReaderCount();
             if (observedActivity > 0)
@@ -426,9 +432,8 @@ void t7_exitVsShutdownObservation()
             //   seam がパーク中のサンプルだけを計上する（到達前の偶然で
             //   「exit 実行中を見た」ことにしない）。
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
-            const bool seamHeld = seam.reached.load (std::memory_order_acquire)
-                                && ! seam.release.load (std::memory_order_acquire);
-            if (seamHeld && observedActivity > observedDepth)
+            const bool seamHeldAfter = ! seam.release.load (std::memory_order_acquire);
+            if (seamHeldBefore && seamHeldAfter && observedActivity > observedDepth)
                 exitWindowSamples.fetch_add (1, std::memory_order_release);
 #else
             if (observedActivity > observedDepth)
