@@ -545,8 +545,17 @@ void testExitInProgressBlocksDrain()
     // shutdown 側の前提を整える（fence・登録閉鎖・bublisher idle）。
     domain->engageShutdownReaderFence();
     domain->closeReaderRegistration();
-    check (domain->closePublishersAndWaitIdle (std::chrono::milliseconds (50)),
-           "exit-window: publishers must become idle");
+    // ★ CI の一時停止で 50 ms の期限が過ぎると、publisher がいなくても
+    //   false になり、epochAtFence() が無効なまま drain を試してしまう。
+    //   reader 側の確認と同じ 2 秒の予算を与え、失敗したら drain を試さずに後片付ける。
+    const bool publishersIdle =
+        domain->closePublishersAndWaitIdle (std::chrono::milliseconds (2000));
+    check (publishersIdle, "exit-window: publishers must become idle");
+    if (! publishersIdle)
+    {
+        cleanupWorker();
+        return;
+    }
 
     auto queue = domain->borrow();
     check (queue != nullptr, "exit-window: borrow");
