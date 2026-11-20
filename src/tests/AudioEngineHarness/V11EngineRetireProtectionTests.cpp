@@ -94,6 +94,13 @@ void v11eSentinelDeleter(void* p) noexcept
     g_v11eLastReclaimed = p;
 }
 
+// ★ DQ-W3: exit 停止中の teardown が強制解放していないことを見るための計数。
+std::atomic<int> g_exitWindowDrainDeletes { 0 };
+void exitWindowDrainDeleter (void* /*p*/) noexcept
+{
+    g_exitWindowDrainDeletes.fetch_add (1, std::memory_order_relaxed);
+}
+
 bool checkEngineLevelProtection()
 {
     AudioEngineHarness harness;
@@ -4851,6 +4858,20 @@ bool checkReaderExitShutdownRace()
         }
     }
 
+    // ★ exit 停止中に強制解放しないことを固定する。future epoch の sentinel は
+    //   通常の epoch 回収では対象外なので、deleter が 1 回でも走れば
+    //   強制解放した証拠になる（保持のみなら 0 回）。
+    g_exitWindowDrainDeletes.store (0, std::memory_order_relaxed);
+    {
+        static int exitWindowSentinel = 0;
+        if (! domainPtr->enqueueRetire (&exitWindowSentinel, exitWindowDrainDeleter,
+                                        domainPtr->currentEpoch() + 1000000ull))
+        {
+            std::fprintf(stderr, "[DQ-W3-3h] FAIL: future-epoch sentinel enqueue failed\n");
+            ok = false;
+        }
+    }
+
     // ★ ここが破壊的な操作：exit 実行中に engine を破棄する。
     engine.reset();
 
@@ -4866,6 +4887,14 @@ bool checkReaderExitShutdownRace()
     if (domainDestroyed.load (std::memory_order_acquire))
     {
         std::fprintf(stderr, "[DQ-W3-3g] FAIL: epoch domain was destroyed during teardown\n");
+        ok = false;
+    }
+    // ★ 停止中の exit に対して強制解放していないこと（future epoch は回収対象外）。
+    if (g_exitWindowDrainDeletes.load (std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[DQ-W3-3i] FAIL: teardown force-reclaimed a future-epoch entry "
+                             "(deletes=%d)\n",
+                     g_exitWindowDrainDeletes.load (std::memory_order_relaxed));
         ok = false;
     }
 
