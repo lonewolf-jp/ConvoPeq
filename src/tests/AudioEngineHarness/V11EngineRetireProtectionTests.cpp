@@ -4523,6 +4523,9 @@ bool checkReaderExitQuiescenceWindow()
 
     std::atomic<convo::RCUReader*> readerPtr { nullptr };
     std::atomic<bool> entered { false };
+    // ★ enter() が戻って失敗したときだけ立つ。
+    //   enter 実行中（activity が先に非 0 になる）とは区別する。
+    std::atomic<bool> entryFailed { false };
     std::atomic<bool> exitDone { false };
 
     std::thread worker ([&]
@@ -4532,8 +4535,12 @@ bool checkReaderExitQuiescenceWindow()
         const bool ok = reader.enter();
         entered.store (ok, std::memory_order_release);
         // ★ enter に失敗した場合は exit を呼ばない（depth は既に 0に戻っている）。
+        //   失敗は enter が戻ってからだけ公開する（待ち側が実行中と誤判しない）。
         if (! ok)
+        {
+            entryFailed.store (true, std::memory_order_release);
             return;
+        }
         // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
         while (! seam.armed.load (std::memory_order_acquire))
             std::this_thread::yield();
@@ -4546,20 +4553,13 @@ bool checkReaderExitQuiescenceWindow()
     seam.expectedTid = worker.get_id();
     seam.armed.store (true, std::memory_order_release);
 
-    // 入場完了（activeReaderCount()==1）を経過時間で bound して待つ。
-    // ★ enter に失敗したら seam は到達しないので、待ちを即座に打ち切る。
-    const auto entryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
-    while (std::chrono::steady_clock::now() < entryDeadline
-           && routerPtr->activeReaderCount() == 0
-           && ! entered.load (std::memory_order_acquire)
-           && ! seam.reached.load (std::memory_order_acquire))
-        std::this_thread::sleep_for (std::chrono::microseconds (100));
-
-    // seam 到達（depth==0 だが exit 未完了）を経過時間で bound して待つ。
+    // ★ seam 到達を 1 つの期限で待つ。
+    //   activity は enter 実行中にも非 0 になるため、打ち切り条件には使わない。
+    //   打ち切りは「enter が戻って失敗したとき（entryFailed）だけ。
     const auto seamDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
     while (std::chrono::steady_clock::now() < seamDeadline
            && ! seam.reached.load (std::memory_order_acquire)
-           && entered.load (std::memory_order_acquire))
+           && ! entryFailed.load (std::memory_order_acquire))
         std::this_thread::sleep_for (std::chrono::microseconds (100));
 
     const bool reached = seam.reached.load (std::memory_order_acquire);
@@ -4772,6 +4772,8 @@ bool checkReaderExitShutdownRace()
     convo::EpochDomain::setReaderExitSeam (seamFn, &seam);
 
     std::atomic<bool> entered { false };
+    // ★ enter() が戻って失敗したときだけ立つ（実行中とは区別する）。
+    std::atomic<bool> entryFailed { false };
     std::atomic<bool> exitDone { false };
 
     // ★ engine が使う provider（ISRRetireRouter）で reader を作る。EpochDomain を直接使うと、
@@ -4784,8 +4786,12 @@ bool checkReaderExitShutdownRace()
         const bool ok = reader.enter();
         entered.store (ok, std::memory_order_release);
         // ★ enter に失敗した場合は exit を呼ばない（depth は既に 0に戻っている）。
+        //   失敗は enter が戻ってからだけ公開する（待ち側が実行中と誤判しない）。
         if (! ok)
+        {
+            entryFailed.store (true, std::memory_order_release);
             return;
+        }
         // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
         while (! seam.armed.load (std::memory_order_acquire))
             std::this_thread::yield();
@@ -4797,17 +4803,11 @@ bool checkReaderExitShutdownRace()
     seam.expectedTid = worker.get_id();
     seam.armed.store (true, std::memory_order_release);
 
-    // ★ 経過時間で bound する。enter 失敗なら seam は到達しないので即座に打ち切る。
-    const auto entryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
-    while (std::chrono::steady_clock::now() < entryDeadline
-           && routerPtr->activeReaderCount() == 0
-           && ! entered.load (std::memory_order_acquire)
-           && ! seam.reached.load (std::memory_order_acquire))
-        std::this_thread::sleep_for (std::chrono::microseconds (100));
+    // ★ seam 到達を 1 つの期限で待つ。打ち切りは enter 失敗のみ。
     const auto seamDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
     while (std::chrono::steady_clock::now() < seamDeadline
            && ! seam.reached.load (std::memory_order_acquire)
-           && entered.load (std::memory_order_acquire))
+           && ! entryFailed.load (std::memory_order_acquire))
         std::this_thread::sleep_for (std::chrono::microseconds (100));
 
     if (! seam.reached.load (std::memory_order_acquire))
