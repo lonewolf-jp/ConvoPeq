@@ -413,23 +413,6 @@ void t7_exitVsShutdownObservation()
     }, &seam);
 #endif
 
-    std::vector<std::thread> readers;
-    for (int t = 0; t < 3; ++t)
-        readers.emplace_back ([&]
-        {
-            convo::RCUReader reader (*domain);
-            while (! stop.load (std::memory_order_acquire))
-            {
-                if (! reader.enter())
-                {
-                    std::this_thread::yield();
-                    continue;
-                }
-                reader.exit();
-                (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
-            }
-        });
-
     std::thread shutdownSide ([&]
     {
         while (! stop.load (std::memory_order_acquire))
@@ -448,6 +431,56 @@ void t7_exitVsShutdownObservation()
         }
     });
 
+    // ★ exit 実行中のサンプルは、並行ストレスの偶然に頼らず、単一 reader を seam で止めて
+    //   確定的に取る。ほかの reader が同時に入場すると `activity > depth` の判定がぶれるため、
+    //   この段階では reader を 1 人だけ動かす。
+    {
+        const int windowsBefore = exitWindowSamples.load (std::memory_order_acquire);
+        std::thread checkpoint ([&]
+        {
+            convo::RCUReader reader (*domain);
+            if (! reader.enter())
+                return;
+            reader.exit();   // seam で 1 回だけ止まる
+            (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
+        });
+
+        const bool seamReached = waitUntil ([&]
+        {
+            return seam.reached.load (std::memory_order_acquire);
+        }, std::chrono::milliseconds (5000));
+        check (seamReached, "T7: the exit seam must be reached");
+        if (seamReached)
+        {
+            const bool sampledWhilePaused = waitUntil ([&]
+            {
+                return exitWindowSamples.load (std::memory_order_acquire) > windowsBefore;
+            }, std::chrono::milliseconds (2000));
+            check (sampledWhilePaused,
+                   "T7: the observer must sample the paused exit (activity > depth)");
+        }
+        seam.release.store (true, std::memory_order_release);
+        checkpoint.join();
+    }
+
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 3; ++t)
+        readers.emplace_back ([&]
+        {
+            convo::RCUReader reader (*domain);
+            while (! stop.load (std::memory_order_acquire))
+            {
+                if (! reader.enter())
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+                reader.exit();
+                (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
+            }
+        });
+
+
     // ★ observer が reader の稼働中に実際の観測を完了したことを確認してから停める。
     //   これが無いと、observer が一度も実行されなくてもカウンタが 0 に戻るだけで PASS してしまう。
     const bool observedWhileRunning = waitUntil ([&]
@@ -458,25 +491,6 @@ void t7_exitVsShutdownObservation()
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
 
-    // ★ exit 実行中のサンプルは、ストレスループの偶然に頼らず、
-    //   seam で 1 人を depth デクリメント後に止めて確定的に取る。
-    //   止まっている reader は depth 0・活動 1 なので、observer は必ず activity > depth を見る。
-    const int windowsBefore = exitWindowSamples.load (std::memory_order_acquire);
-    const bool seamReached = waitUntil ([&]
-    {
-        return seam.reached.load (std::memory_order_acquire);
-    }, std::chrono::milliseconds (5000));
-    check (seamReached, "T7: the exit seam must be reached");
-    if (seamReached)
-    {
-        const bool sampledWhilePaused = waitUntil ([&]
-        {
-            return exitWindowSamples.load (std::memory_order_acquire) > windowsBefore;
-        }, std::chrono::milliseconds (2000));
-        check (sampledWhilePaused,
-               "T7: the observer must sample the paused exit (activity > depth)");
-    }
-    seam.release.store (true, std::memory_order_release);
     check (sawActivity.load (std::memory_order_acquire),
            "T7: the observer must see non-zero reader activity");
 

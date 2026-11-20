@@ -442,6 +442,20 @@ void AudioEngine::releaseResources()
     //    ★ 活動数だけでは足りない。予約済みで未 enter の slot は depth 0・活動数 0 だが、
     //      チェックの後に enter してくる。admission（実行中・予約済み）も idle であることを
     //      readerActivityZeroNonRt() でまとめて確認する。
+    // ★ 強制解放の admission 待ちは 2 回のパスで合計する。予約が残っている場合に
+    //   同じ待ちを二度しないよう、期限を共有する。
+    const auto drainAdmissionDeadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
+                                                           std::memory_order_acquire));
+    auto remainingAdmissionWait = [&drainAdmissionDeadline]() noexcept
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= drainAdmissionDeadline)
+            return std::chrono::milliseconds (0);
+        return std::chrono::duration_cast<std::chrono::milliseconds> (
+            drainAdmissionDeadline - now);
+    };
+
     {
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
         m_retireRouter->unquarantineAllReaders();
@@ -449,20 +463,6 @@ void AudioEngine::releaseResources()
         // ★ BUG-015/027 (work88): RetireQuarantineStore の全強制解放（Audio Thread 停止後 — drainAllUnsafe 契約）
         //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
-        // ★ 強制解放の admission 待ちは 2 回のパスで合計する。予約が残っている場合に
-        //   同じ待ちを二度しないよう、期限を共有する。
-        const auto drainAdmissionDeadline = std::chrono::steady_clock::now()
-            + std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
-                                                               std::memory_order_acquire));
-        auto remainingAdmissionWait = [&drainAdmissionDeadline]() noexcept
-        {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= drainAdmissionDeadline)
-                return std::chrono::milliseconds (0);
-            return std::chrono::duration_cast<std::chrono::milliseconds> (
-                drainAdmissionDeadline - now);
-        };
-
         if (quarantinedRetireResident > 0) {
             RetireDrainExclusionScope drainExclusion (m_epochDomain);
             (void) m_epochDomain.waitForReaderAdmissions (remainingAdmissionWait());

@@ -4528,7 +4528,11 @@ bool checkReaderExitQuiescenceWindow()
     {
         convo::RCUReader reader (*domainPtr);
         readerPtr.store (&reader, std::memory_order_release);
-        entered.store (reader.enter(), std::memory_order_release);
+        const bool ok = reader.enter();
+        entered.store (ok, std::memory_order_release);
+        // ★ enter に失敗した場合は exit を呼ばない（depth は既に 0に戻っている）。
+        if (! ok)
+            return;
         // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
         while (! seam.armed.load (std::memory_order_acquire))
             std::this_thread::yield();
@@ -4736,10 +4740,18 @@ bool checkReaderExitShutdownRace()
     std::atomic<bool> entered { false };
     std::atomic<bool> exitDone { false };
 
+    // ★ engine が使う provider（ISRRetireRouter）で reader を作る。EpochDomain を直接使うと、
+    //   domain は存命しても router が破棔される場合を検出できない。
+    auto& workerProvider = ShutdownHoldTestAccess::readerProvider (*engine);
+
     std::thread worker ([&]
     {
-        convo::RCUReader reader (*domainPtr);
-        entered.store (reader.enter(), std::memory_order_release);
+        convo::RCUReader reader (workerProvider);
+        const bool ok = reader.enter();
+        entered.store (ok, std::memory_order_release);
+        // ★ enter に失敗した場合は exit を呼ばない（depth は既に 0に戻っている）。
+        if (! ok)
+            return;
         // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
         while (! seam.armed.load (std::memory_order_acquire))
             std::this_thread::yield();
