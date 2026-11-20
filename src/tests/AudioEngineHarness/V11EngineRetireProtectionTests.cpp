@@ -4745,6 +4745,17 @@ bool checkReaderExitShutdownRace()
     }
     convo::isr::ISRRetireRouter::armDestructionProbeForTest (routerPtr, &routerDestroyed);
 
+    // ★ 早期リターンを含む全経路で解除する。フラグはこの関数のローカルなので、
+    //   戻った後に別の router が同じアドレスで破棄されても書かれないようにする。
+    struct DestructionProbeGuard
+    {
+        ~DestructionProbeGuard()
+        {
+            convo::isr::ISRRetireRouter::armDestructionProbeForTest (nullptr, nullptr);
+        }
+    };
+    const DestructionProbeGuard destructionProbeGuard;
+
     convo::EpochDomain::setReaderExitSeam (seamFn, &seam);
 
     std::atomic<bool> entered { false };
@@ -4889,8 +4900,6 @@ bool checkReaderExitShutdownRace()
     seam.release.store (true, std::memory_order_release);
     worker.join();
     convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
-    // ★ 監視はこの検査の間だけ。以降に別の理由で破棄されても、戻ったスタックのフラグは触らない。
-    convo::isr::ISRRetireRouter::armDestructionProbeForTest (nullptr, nullptr);
 
     if (! entered.load (std::memory_order_acquire))
     {
