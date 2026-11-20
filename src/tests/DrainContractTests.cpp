@@ -134,6 +134,10 @@ void testRetireDrainExclusion()
            "exclusion: refusal must be counted");
     check (domain->readerAdmissionsActive() == 0u,
            "exclusion: a refused reacquire must not hold an admission");
+    // ★ 拒否直後に予約が残っていないこと。後の enter が消すので、
+    //   実行を待ってから確かめると見逃してしまう。
+    check (domain->admissionPendingSlots() == 0u,
+           "exclusion: a refused reacquire must not leave a pending slot");
 
     domain->endRetireDrainExclusion();
     check (! domain->retireDrainExclusionActive(), "exclusion: flag must clear");
