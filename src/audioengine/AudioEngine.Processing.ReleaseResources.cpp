@@ -447,14 +447,6 @@ void AudioEngine::releaseResources()
     const auto drainAdmissionDeadline = std::chrono::steady_clock::now()
         + std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
                                                            std::memory_order_acquire));
-    auto remainingAdmissionWait = [&drainAdmissionDeadline]() noexcept
-    {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= drainAdmissionDeadline)
-            return std::chrono::milliseconds (0);
-        return std::chrono::duration_cast<std::chrono::milliseconds> (
-            drainAdmissionDeadline - now);
-    };
 
     {
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
@@ -465,7 +457,7 @@ void AudioEngine::releaseResources()
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
         if (quarantinedRetireResident > 0) {
             RetireDrainExclusionScope drainExclusion (m_epochDomain);
-            (void) m_epochDomain.waitForReaderAdmissions (remainingAdmissionWait());
+            (void) m_epochDomain.waitForReaderAdmissionsUntil (drainAdmissionDeadline);
             if (readerActivityZeroNonRt()) {
                 diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
                         + juce::String(static_cast<int64>(quarantinedRetireResident))
@@ -669,9 +661,8 @@ void AudioEngine::releaseResources()
     {
         RetireDrainExclusionScope drainExclusion (m_epochDomain);
         // ★ 期限は先の強制解放と共有する。残りが 0 なら待たずに再確認だけ行う。
-        const auto remainingForFinalDrain = remainingAdmissionWait();
-        if (remainingForFinalDrain.count() > 0)
-            (void) m_epochDomain.waitForReaderAdmissions (remainingForFinalDrain);
+        if (std::chrono::steady_clock::now() < drainAdmissionDeadline)
+            (void) m_epochDomain.waitForReaderAdmissionsUntil (drainAdmissionDeadline);
         if (readerActivityZeroNonRt())
         {
             m_retireRouter->drainAllQuarantineStore();

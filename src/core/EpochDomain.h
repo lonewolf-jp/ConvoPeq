@@ -93,7 +93,13 @@ public:
         // 期限内の idle だけを成功として扱う（期限到達後は idle でも false）。
         bool waitForIdle(std::chrono::milliseconds timeout) noexcept
         {
-            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            return waitForIdleUntil (std::chrono::steady_clock::now() + timeout);
+        }
+
+        // ★ 期限そのものを受け取る版。呼び出し側が期限を先に計算し、
+        //   待機の開始までにスレッドが止まっても予算が伸びない。
+        bool waitForIdleUntil(std::chrono::steady_clock::time_point deadline) noexcept
+        {
             for (;;)
             {
                 const bool idle = convo::consumeAtomic(active_, std::memory_order_acquire) == 0;
@@ -173,6 +179,12 @@ public:
     [[nodiscard]] bool waitForReaderAdmissions(std::chrono::milliseconds timeout) noexcept
     {
         return readerAdmissionGate_.waitForIdle(timeout);
+    }
+
+    // ★ 期限そのものを渡す版。二度のパスで期限を共有するときに使う。
+    [[nodiscard]] bool waitForReaderAdmissionsUntil(std::chrono::steady_clock::time_point deadline) noexcept
+    {
+        return readerAdmissionGate_.waitForIdleUntil(deadline);
     }
     [[nodiscard]] std::uint32_t readerAdmissionsActive() noexcept
     {
