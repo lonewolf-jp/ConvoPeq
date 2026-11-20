@@ -4477,12 +4477,16 @@ bool checkReaderExitQuiescenceWindow()
         std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
         std::atomic<bool> reached { false };
         std::atomic<bool> release { false };
+        std::thread::id expectedTid {};         // 止める対象（worker）のスレッド
+        std::atomic<bool> armed { false };      // worker が exit する直前に立てる
     };
 
     static Seam seam;
     seam.fired.store (false);
     seam.reached.store (false);
     seam.release.store (false);
+    seam.armed.store (false);
+    seam.expectedTid = std::thread::id();
 
     auto seamFn = [] (void* ctx) noexcept
     {
@@ -4491,6 +4495,11 @@ bool checkReaderExitQuiescenceWindow()
         //   nullptr の ctx の組で呼ばれる経路ができる。解除は join 後に行う。
         auto* s = static_cast<Seam*> (ctx);
         if (s == nullptr)
+            return;
+        // ★ この seam は worker の exit だけを止める。engine が保有する他の reader の exit を
+        //   止めると、観測する窓が別の reader のものになり判定がぶれる。
+        if (! s->armed.load (std::memory_order_acquire)
+            || std::this_thread::get_id() != s->expectedTid)
             return;
         bool expected = false;
         if (! s->fired.compare_exchange_strong (expected, true))
@@ -4520,10 +4529,17 @@ bool checkReaderExitQuiescenceWindow()
         convo::RCUReader reader (*domainPtr);
         readerPtr.store (&reader, std::memory_order_release);
         entered.store (reader.enter(), std::memory_order_release);
+        // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
+        while (! seam.armed.load (std::memory_order_acquire))
+            std::this_thread::yield();
         readerPtr.store (nullptr, std::memory_order_release);   // 以降は isInside だけを読む
         reader.exit();
         exitDone.store (true, std::memory_order_release);
     });
+
+    // seam をこの worker の exit に限定する。
+    seam.expectedTid = worker.get_id();
+    seam.armed.store (true, std::memory_order_release);
 
     // 入場完了（activeReaderCount()==1）を bounded wait で待つ
     for (int i = 0; i < 20000 && routerPtr->activeReaderCount() == 0; ++i)
@@ -4669,12 +4685,16 @@ bool checkReaderExitShutdownRace()
         std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
         std::atomic<bool> reached { false };
         std::atomic<bool> release { false };
+        std::thread::id expectedTid {};         // 止める対象（worker）のスレッド
+        std::atomic<bool> armed { false };      // worker が exit する直前に立てる
     };
 
     static Seam seam;
     seam.fired.store (false);
     seam.reached.store (false);
     seam.release.store (false);
+    seam.armed.store (false);
+    seam.expectedTid = std::thread::id();
 
     auto seamFn = [] (void* ctx) noexcept
     {
@@ -4683,6 +4703,11 @@ bool checkReaderExitShutdownRace()
         //   nullptr の ctx の組で呼ばれる経路ができる。解除は join 後に行う。
         auto* s = static_cast<Seam*> (ctx);
         if (s == nullptr)
+            return;
+        // ★ この seam は worker の exit だけを止める。engine が保有する他の reader の exit を
+        //   止めると、観測する窓が別の reader のものになり判定がぶれる。
+        if (! s->armed.load (std::memory_order_acquire)
+            || std::this_thread::get_id() != s->expectedTid)
             return;
         bool expected = false;
         if (! s->fired.compare_exchange_strong (expected, true))
@@ -4715,9 +4740,16 @@ bool checkReaderExitShutdownRace()
     {
         convo::RCUReader reader (*domainPtr);
         entered.store (reader.enter(), std::memory_order_release);
+        // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
+        while (! seam.armed.load (std::memory_order_acquire))
+            std::this_thread::yield();
         reader.exit();
         exitDone.store (true, std::memory_order_release);
     });
+
+    // seam をこの worker の exit に限定する。
+    seam.expectedTid = worker.get_id();
+    seam.armed.store (true, std::memory_order_release);
 
     for (int i = 0; i < 20000 && routerPtr->activeReaderCount() == 0; ++i)
         std::this_thread::sleep_for (std::chrono::microseconds (100));

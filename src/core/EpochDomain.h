@@ -172,7 +172,14 @@ public:
     //   再入場できる」規則（V11 E1）を壊さない。除外中は reacquireReaderSlot() を拒否する。
     void beginRetireDrainExclusion() noexcept
     {
-        convo::publishAtomic (retireDrainExclusion_, true, std::memory_order_acq_rel);
+        // ★ store に acq_rel は使えない（UB）。RMW で置く。
+        //   さらに acq_rel フェンスを置き、「除外の公開 → admission 読み」と
+        //   reader 側の「admission 増加 → 除外読み」を対にする。片側だけでは
+        //   双方が古い値を読む順序が残る。
+        //   ※ memory_order_seq_cst はこのリポジトリのゲート
+        //     (.github/scripts/check-src-atomic-dotcall.ps1 の forbidden-seq-cst) で禁止されているため使わない。
+        (void) convo::exchangeAtomic (retireDrainExclusion_, true, std::memory_order_acq_rel);
+        std::atomic_thread_fence (std::memory_order_acq_rel);
     }
     void endRetireDrainExclusion() noexcept
     {
@@ -571,6 +578,9 @@ public:
 
         // ★ WORK113 R1: shutdown の強制解放中は再入場を拒否する。fence と違い解除されるので、
         //   解除後の再入場は従来どおりできる。
+        //   admission 増加（直前の tryEnter）と除外フラグ読みの間に acq_rel フェンスを置き、
+        //   shutdown 側の「除外の公開 → admission 読み」と組にする。
+        std::atomic_thread_fence (std::memory_order_acq_rel);
         if (retireDrainExclusionActive())
         {
             reacquireDuringDrainExclusion_.fetch_add(1, std::memory_order_relaxed);

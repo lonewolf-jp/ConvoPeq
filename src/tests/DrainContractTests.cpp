@@ -137,7 +137,20 @@ void testRetireDrainExclusion()
     const bool reacquired = domain->reacquireReaderSlot (slot);
     check (reacquired, "exclusion: reacquireReaderSlot must succeed after the exclusion ends");
     if (reacquired)
+    {
+        // reacquire は slot を depth 0 で予約し、admission を保持したままである。
+        // enter せずに exit すると、admission が残って下流の静止判定を壊す。
+        domain->enterReader (slot);
+        check (domain->activeDepthReaderCount() >= 1u,
+               "exclusion: depth must be nonzero after enter");
         domain->exitReader (slot);
+        check (domain->activeDepthReaderCount() == 0u,
+               "exclusion: depth must return to 0 after exit");
+        check (domain->readerAdmissionsActive() == 0u,
+               "exclusion: no admission must remain after exit");
+        check (domain->admissionPendingSlots() == 0u,
+               "exclusion: no pending slot must remain after exit");
+    }
 }
 
 //==============================================================================
