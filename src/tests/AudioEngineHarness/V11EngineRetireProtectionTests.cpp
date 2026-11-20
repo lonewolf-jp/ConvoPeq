@@ -4133,6 +4133,11 @@ bool checkDeferredCoreNotRetried()
             auto pin = engine->tryPinDSPHandle (handle);
             if (! static_cast<bool>(pin))
             {
+                // ★ 登録は成功しているが pin が取れない場合、raw は台帳が保有している。
+                //   そのまま return すると fixture の teardown でも解放されずリークする。
+                //   teardown と同じ順（台帳解除 → 実体破棄）で戻す。
+                (void) engine->retireDSPHandleForRuntime (raw);
+                DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire (raw);
                 std::fprintf(stderr, "[DQ-V2-2] FAIL: could not pin\n");
                 return false;
             }
