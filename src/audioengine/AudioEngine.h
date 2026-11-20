@@ -5104,7 +5104,7 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
     if (handle.isNull())
         return false;
 
-    // ★ WORK113 R1: Q4 の観歋から reclaim まで、新しい reader の再入場を排除する。
+    // ★ WORK113 R1: Q4 の観察から reclaim まで、新しい reader の再入場を排除する。
     //   closeReaderRegistration() 後でも reacquireReaderSlot() は通るため、この間に
     //   入場した reader は Q4 に計上されない。
     RetireDrainExclusionScope drainExclusion (m_epochDomain);
