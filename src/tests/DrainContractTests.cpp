@@ -122,6 +122,10 @@ void testRetireDrainExclusion()
     domain->enterReader (slot);
     domain->exitReader (slot);
 
+    // ★ 実際の shutdown と同じ状態にする：新規登録は閉じ、登録済み slot の再入場は可能。
+    //   登録が開いたままだと、再入場が登録経由で成功しても差が出ない。
+    domain->closeReaderRegistration();
+
     domain->beginRetireDrainExclusion();
     check (domain->retireDrainExclusionActive(), "exclusion: flag must be visible");
     check (! domain->reacquireReaderSlot (slot),
@@ -151,6 +155,10 @@ void testRetireDrainExclusion()
         check (domain->admissionPendingSlots() == 0u,
                "exclusion: no pending slot must remain after exit");
     }
+
+    // 解除後も新規登録は拒否される（close は永久、再入場だけが復帰する）。
+    check (domain->registerReaderThread ("drain-exclusion-2") == -1,
+           "exclusion: new registration must stay refused after the exclusion ends");
 }
 
 //==============================================================================

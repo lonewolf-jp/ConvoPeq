@@ -4765,6 +4765,14 @@ bool checkReaderExitShutdownRace()
         return false;
     }
 
+    // ★ 保持の理由が「exit 実行中の reader」だけに絞られることを確かめるため、
+    //   publisher の idle 待ちタイムアウトと admission の状態を前後で比べる。
+    //   どちらかが原因でも基盤は保持されるため、これを見ないと
+    //   別の理由で PASS し得る。
+    const std::uint32_t publishIdleTimeoutsBefore = domainPtr->epochIdleTimeouts();
+    const std::uint32_t admissionsBeforeDestroy = domainPtr->readerAdmissionsActive();
+    const std::uint32_t pendingSlotsBeforeDestroy = domainPtr->admissionPendingSlots();
+
     // ★ 破壊前の状態を固定する。depth 0 かつ活動数 > 0（exit 実行中）でなければ、
     //   DQ-W3 は「exit 実行中の破棄」を検証していない（既存の active-reader hold 経路を
     //   通るだけになる）。状態が違う場合は破棄せずに片付ける。
@@ -4798,6 +4806,25 @@ bool checkReaderExitShutdownRace()
         std::fprintf(stderr, "[DQ-W3-3] FAIL: substrate not retained "
                              "(abandoned %d -> %d, overflow %d -> %d)\n",
                      abandonedBefore, abandonedAfter, overflowsBefore, overflowsAfter);
+        ok = false;
+    }
+
+    // ★ publisher の idle タイムアウトで保持されていないこと。
+    if (domainPtr->epochIdleTimeouts() != publishIdleTimeoutsBefore)
+    {
+        std::fprintf(stderr, "[DQ-W3-3b] FAIL: publisher idle timed out during teardown "
+                             "(timeouts %u -> %u)\n",
+                     static_cast<unsigned> (publishIdleTimeoutsBefore),
+                     static_cast<unsigned> (domainPtr->epochIdleTimeouts()));
+        ok = false;
+    }
+    // ★ admission が残って保持されていないこと（残っていれば別の理由）。
+    if (admissionsBeforeDestroy != 0u || pendingSlotsBeforeDestroy != 0u)
+    {
+        std::fprintf(stderr, "[DQ-W3-3c] FAIL: admission was not idle before destruction "
+                             "(active=%u pending=%u)\n",
+                     static_cast<unsigned> (admissionsBeforeDestroy),
+                     static_cast<unsigned> (pendingSlotsBeforeDestroy));
         ok = false;
     }
 

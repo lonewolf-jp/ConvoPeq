@@ -385,6 +385,7 @@ void t7_exitVsShutdownObservation()
     std::atomic<int> exitsDone { 0 };
     std::atomic<int> observations { 0 };
     std::atomic<bool> sawActivity { false };
+    std::atomic<bool> sawExitWindow { false };   // depth 0 で活動 > 0（exit 実行中）を見た
 
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
@@ -409,9 +410,12 @@ void t7_exitVsShutdownObservation()
         {
             (void) domain->publishEpoch();
             const std::uint32_t observedActivity = domain->activeReaderCount();
+            const std::uint32_t observedDepth = domain->activeDepthReaderCount();
             if (observedActivity > 0)
                 sawActivity.store (true, std::memory_order_release);
-            (void) domain->activeDepthReaderCount();
+            // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
+            if (observedActivity > observedDepth)
+                sawExitWindow.store (true, std::memory_order_release);
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
             (void) observations.fetch_add (1, std::memory_order_release);
@@ -427,6 +431,15 @@ void t7_exitVsShutdownObservation()
             && sawActivity.load (std::memory_order_acquire);
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
+
+    // ★ exit 実行中（depth < activity）のサンプルを取れるまで待つ。
+    //   これが無いと、observer が depth 1 の間に一度回っただけで PASS し、
+    //   目的の窓を見たことにならない。
+    const bool observedExitWindow = waitUntil ([&]
+    {
+        return sawExitWindow.load (std::memory_order_acquire);
+    }, std::chrono::milliseconds (5000));
+    check (observedExitWindow, "T7: the observer must sample a reader in exit (depth < activity)");
     check (sawActivity.load (std::memory_order_acquire),
            "T7: the observer must see non-zero reader activity");
 
