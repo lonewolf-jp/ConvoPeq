@@ -20,6 +20,9 @@ void AudioEngine::exitRcuReader(int readerIndex) noexcept
 
 [[nodiscard]] uint32_t AudioEngine::activeEpochObserverCount() const noexcept
 {
-    // ★ WORK113 R1: 診断用の件数なので depth のみ（activity は exit 中を二重計上する）。
-    return m_retireRouter->activeDepthReaderCount();
+    // ★ WORK113 R1: この値は shutdown trace の SH4（observerCount）に入り、
+    //   verified の判定に使われる。exit 実行中の reader は depth 0 だが
+    //   まだ epoch を手放していないので、活動数（exit 中を含む）を返す。
+    //   診断の件数が必要な場合は activeDepthReaderCount() を直接使うこと。
+    return m_retireRouter->activeReaderCount();
 }
