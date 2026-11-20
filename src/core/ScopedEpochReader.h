@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 
 #include "IReaderEpochProvider.h"
 #include "audioengine/AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
@@ -134,13 +135,57 @@ private:
 
     // ★ 使用順の値。キャッシュはスレッド単位なので、最大値 + 1 で十分。
     //   thread_local カウンタを持たない（LINT-AE-011）。
+    //   ★ 最大値が UINT32_MAX に達したら、次の +1 は 0 に巻き戻り、
+    //     今使った provider が最古として退避される。巻き戻り直前に
+    //     8 件の時刻を順位（1..N）に詰め直し、相対順序を保つ。
     static std::uint32_t nextUseValue() noexcept
     {
         std::uint32_t maxUse = 0;
         for (const auto& entry : cache())
             if (entry.lastUse > maxUse)
                 maxUse = entry.lastUse;
-        return maxUse + 1u;
+
+        if (maxUse != std::numeric_limits<std::uint32_t>::max())
+            return maxUse + 1u;
+
+        compactUseValues();
+        std::uint32_t compactedMax = 0;
+        for (const auto& entry : cache())
+            if (entry.lastUse > compactedMax)
+                compactedMax = entry.lastUse;
+        return compactedMax + 1u;
+    }
+
+    // ★ 巻き戻り直前の詰め直し。lastUse の昇順に 1..N を振り直し、
+    //   触らないエントリの相対順序をそのまま保つ。
+    static void compactUseValues() noexcept
+    {
+        auto& entries = cache();
+        std::array<bool, kCacheEntries> ranked {};
+        std::array<std::uint32_t, kCacheEntries> ranks {};
+        std::uint32_t nextRank = 0;
+        for (std::size_t step = 0; step < kCacheEntries; ++step)
+        {
+            std::size_t best = kCacheEntries;
+            std::uint32_t bestUse = 0;
+            for (std::size_t i = 0; i < kCacheEntries; ++i)
+            {
+                if (ranked[i])
+                    continue;
+                if (best == kCacheEntries || entries[i].lastUse < bestUse)
+                {
+                    best = i;
+                    bestUse = entries[i].lastUse;
+                }
+            }
+            if (best == kCacheEntries)
+                break;
+            ranked[best] = true;
+            ranks[best] = ++nextRank;
+        }
+        for (std::size_t i = 0; i < kCacheEntries; ++i)
+            if (ranked[i])
+                entries[i].lastUse = ranks[i];
     }
 
     static CacheEntry* find (const IReaderEpochProvider& provider) noexcept

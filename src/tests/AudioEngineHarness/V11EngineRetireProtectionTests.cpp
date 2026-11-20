@@ -4546,12 +4546,20 @@ bool checkReaderExitQuiescenceWindow()
     seam.expectedTid = worker.get_id();
     seam.armed.store (true, std::memory_order_release);
 
-    // 入場完了（activeReaderCount()==1）を bounded wait で待つ
-    for (int i = 0; i < 20000 && routerPtr->activeReaderCount() == 0; ++i)
+    // 入場完了（activeReaderCount()==1）を経過時間で bound して待つ。
+    // ★ enter に失敗したら seam は到達しないので、待ちを即座に打ち切る。
+    const auto entryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
+    while (std::chrono::steady_clock::now() < entryDeadline
+           && routerPtr->activeReaderCount() == 0
+           && ! entered.load (std::memory_order_acquire)
+           && ! seam.reached.load (std::memory_order_acquire))
         std::this_thread::sleep_for (std::chrono::microseconds (100));
 
-    // seam 到達（depth==0 だが exit 未完了）を待つ
-    for (int i = 0; i < 20000 && ! seam.reached.load (std::memory_order_acquire); ++i)
+    // seam 到達（depth==0 だが exit 未完了）を経過時間で bound して待つ。
+    const auto seamDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
+    while (std::chrono::steady_clock::now() < seamDeadline
+           && ! seam.reached.load (std::memory_order_acquire)
+           && entered.load (std::memory_order_acquire))
         std::this_thread::sleep_for (std::chrono::microseconds (100));
 
     const bool reached = seam.reached.load (std::memory_order_acquire);
@@ -4729,6 +4737,9 @@ bool checkReaderExitShutdownRace()
     //   同じ router が生存したままであることを固定する（他のインスタンスの
     //   破棄では立たない）。
     std::atomic<bool> routerDestroyed { false };
+    // ★ overflow 側では記録が残らないため、domain の存甘も独立して確認する。
+    //   router だけを見ると、router を保持して domain だけを破棄する退行を見逃す。
+    std::atomic<bool> domainDestroyed { false };
     const int instancesBefore = ShutdownHoldTestAccess::engineInstanceCount();
 
     auto engine = std::make_unique<AudioEngine>();
@@ -4744,6 +4755,7 @@ bool checkReaderExitShutdownRace()
         return false;
     }
     convo::isr::ISRRetireRouter::armDestructionProbeForTest (routerPtr, &routerDestroyed);
+    convo::EpochDomain::armDestructionProbeForTest (domainPtr, &domainDestroyed);
 
     // ★ 早期リターンを含む全経路で解除する。フラグはこの関数のローカルなので、
     //   戻った後に別の router が同じアドレスで破棄されても書かれないようにする。
@@ -4752,6 +4764,7 @@ bool checkReaderExitShutdownRace()
         ~DestructionProbeGuard()
         {
             convo::isr::ISRRetireRouter::armDestructionProbeForTest (nullptr, nullptr);
+            convo::EpochDomain::armDestructionProbeForTest (nullptr, nullptr);
         }
     };
     const DestructionProbeGuard destructionProbeGuard;
@@ -4784,9 +4797,17 @@ bool checkReaderExitShutdownRace()
     seam.expectedTid = worker.get_id();
     seam.armed.store (true, std::memory_order_release);
 
-    for (int i = 0; i < 20000 && routerPtr->activeReaderCount() == 0; ++i)
+    // ★ 経過時間で bound する。enter 失敗なら seam は到達しないので即座に打ち切る。
+    const auto entryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
+    while (std::chrono::steady_clock::now() < entryDeadline
+           && routerPtr->activeReaderCount() == 0
+           && ! entered.load (std::memory_order_acquire)
+           && ! seam.reached.load (std::memory_order_acquire))
         std::this_thread::sleep_for (std::chrono::microseconds (100));
-    for (int i = 0; i < 20000 && ! seam.reached.load (std::memory_order_acquire); ++i)
+    const auto seamDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
+    while (std::chrono::steady_clock::now() < seamDeadline
+           && ! seam.reached.load (std::memory_order_acquire)
+           && entered.load (std::memory_order_acquire))
         std::this_thread::sleep_for (std::chrono::microseconds (100));
 
     if (! seam.reached.load (std::memory_order_acquire))
@@ -4840,6 +4861,11 @@ bool checkReaderExitShutdownRace()
     if (routerDestroyed.load (std::memory_order_acquire))
     {
         std::fprintf(stderr, "[DQ-W3-3f] FAIL: retire router was destroyed during teardown\n");
+        ok = false;
+    }
+    if (domainDestroyed.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-3g] FAIL: epoch domain was destroyed during teardown\n");
         ok = false;
     }
 

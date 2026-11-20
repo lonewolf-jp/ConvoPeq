@@ -359,6 +359,38 @@ public:
     }
 
 
+    // ★ テスト専用: 指定したインスタンスが破棄されたときに立つフラグを登録する。
+    //   target に nullptr を渡せば解除する。破棄後のオブジェクトは参照しない。
+    static void armDestructionProbeForTest (const EpochDomain* target,
+                                            std::atomic<bool>* fired) noexcept
+    {
+        destructionProbeTarget().store (target, std::memory_order_relaxed);
+        destructionProbeFlag().store (fired, std::memory_order_relaxed);
+    }
+
+    ~EpochDomain()
+    {
+        if (destructionProbeTarget().load (std::memory_order_relaxed) == this)
+        {
+            auto* fired = destructionProbeFlag().load (std::memory_order_relaxed);
+            if (fired != nullptr)
+                fired->store (true, std::memory_order_relaxed);
+        }
+    }
+
+private:
+    static std::atomic<const EpochDomain*>& destructionProbeTarget() noexcept
+    {
+        static std::atomic<const EpochDomain*> target { nullptr };
+        return target;
+    }
+    static std::atomic<std::atomic<bool>*>& destructionProbeFlag() noexcept
+    {
+        static std::atomic<std::atomic<bool>*> flag { nullptr };
+        return flag;
+    }
+
+public:
     // ★ domain tag (v2.9 §3.2): 生成側に必ず意図を書かせる（デフォルト引数なし）。
     //   契約は B-1:
     //     ・許可値は Unknown / EngineISR / EQ の 3 値のみ
