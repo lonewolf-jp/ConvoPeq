@@ -172,22 +172,25 @@ public:
     //   再入場できる」規則（V11 E1）を壊さない。除外中は reacquireReaderSlot() を拒否する。
     void beginRetireDrainExclusion() noexcept
     {
-        // ★ store に acq_rel は使えない（UB）。RMW で置く。
-        //   さらに acq_rel フェンスを置き、「除外の公開 → admission 読み」と
-        //   reader 側の「admission 増加 → 除外読み」を対にする。片側だけでは
-        //   双方が古い値を読む順序が残る。
-        //   ※ memory_order_seq_cst はこのリポジトリのゲート
-        //     (.github/scripts/check-src-atomic-dotcall.ps1 の forbidden-seq-cst) で禁止されているため使わない。
-        (void) convo::exchangeAtomic (retireDrainExclusion_, true, std::memory_order_acq_rel);
-        std::atomic_thread_fence (std::memory_order_acq_rel);
+        // ★ 排除の公開は RMW。store に acq_rel は使えない（UB）。
+        //   ※ この語は reader 側でも RMW で読む（retireDrainExclusionActive）。
+        //     同じオブジェクトの RMW は全体順序が与えられるため、
+        //     「shutdown が admission 0 を読む」と「reader が除外なしを読む」の
+        //     双方は成立しない（片方が必ず相手の更新を見る）。
+        (void) convo::exchangeAtomic (retireDrainExclusion_, kRetireDrainExclusionBit,
+                                      std::memory_order_acq_rel);
     }
     void endRetireDrainExclusion() noexcept
     {
-        convo::publishAtomic (retireDrainExclusion_, false, std::memory_order_release);
+        (void) convo::exchangeAtomic (retireDrainExclusion_, 0u, std::memory_order_release);
     }
-    [[nodiscard]] bool retireDrainExclusionActive() const noexcept
+    // ★ RMW で読む（fetch_or 0）。単なる load だと、shutdown 側の RMW との間で
+    //   双方が古い値を読む順序が残る。RMW 同士なら同じ語の修飾順序で
+    //   必ず片方が相手の更新を見る。
+    [[nodiscard]] bool retireDrainExclusionActive() noexcept
     {
-        return convo::consumeAtomic (retireDrainExclusion_, std::memory_order_acquire);
+        return (convo::fetchOrAtomic (retireDrainExclusion_, 0u, std::memory_order_acquire)
+                & kRetireDrainExclusionBit) != 0u;
     }
     [[nodiscard]] std::uint32_t reacquireDuringDrainExclusion() const noexcept
     {
@@ -578,9 +581,8 @@ public:
 
         // ★ WORK113 R1: shutdown の強制解放中は再入場を拒否する。fence と違い解除されるので、
         //   解除後の再入場は従来どおりできる。
-        //   admission 増加（直前の tryEnter）と除外フラグ読みの間に acq_rel フェンスを置き、
-        //   shutdown 側の「除外の公開 → admission 読み」と組にする。
-        std::atomic_thread_fence (std::memory_order_acq_rel);
+        //   admission 増加（直前の tryEnter）の後に、除外語を RMW で読む。
+        //   shutdown 側も同じ語を RMW で更新するため、片方は必ず相手の更新を見る。
         if (retireDrainExclusionActive())
         {
             reacquireDuringDrainExclusion_.fetch_add(1, std::memory_order_relaxed);
@@ -1346,7 +1348,8 @@ private:
     inline static std::atomic<void*> readerExitSeamCtx_ { nullptr };
 #endif
     std::atomic<std::uint32_t> reacquireAfterFence_ { 0 };
-    std::atomic<bool> retireDrainExclusion_ { false };
+    static constexpr std::uint32_t kRetireDrainExclusionBit = 1u;
+    std::atomic<std::uint32_t> retireDrainExclusion_ { 0u };
     std::atomic<std::uint32_t> reacquireDuringDrainExclusion_ { 0 };
     std::atomic<std::uint32_t> enterAfterFence_ { 0 };
     std::atomic<std::uint32_t> epochIdleTimeouts_ { 0 };
