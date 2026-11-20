@@ -4226,6 +4226,10 @@ bool checkDeferredCoreNotRetried()
     //   DIAG に依存しないプロセス定数で確かめる。
     const int abandonedBeforeHold = ShutdownHoldTestAccess::abandonedReaderSubstrates();
     const int overflowsBeforeHold = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+    // ★ 保持の理由が admission であることを見分けるため、publisher と admission の
+    //   idle 失敗回数を前後で比べる。publisher のタイムアウトでも同じ保持になる。
+    const int publisherFailuresBeforeHold = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    const int admissionFailuresBeforeHold = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
     std::uint32_t destroyedTotalBefore = 0;
     std::size_t deferredBefore = 0;
     std::uint64_t id = 0;
@@ -4292,6 +4296,21 @@ bool checkDeferredCoreNotRetried()
                                  "(abandoned %d -> %d, overflow %d -> %d)\n",
                          abandonedBeforeHold, abandonedAfterHold,
                          overflowsBeforeHold, overflowsAfterHold);
+            ok = false;
+        }
+        // ★ 保持の理由が admission であること。
+        if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() == admissionFailuresBeforeHold)
+        {
+            std::fprintf(stderr, "[DQ-V2-13c] FAIL: admission idle failure did not increase "
+                                 "(hold was not caused by the held admission)\n");
+            ok = false;
+        }
+        if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publisherFailuresBeforeHold)
+        {
+            std::fprintf(stderr, "[DQ-V2-13d] FAIL: publisher idle timed out during teardown "
+                                 "(failures %d -> %d)\n",
+                         publisherFailuresBeforeHold,
+                         AudioEngine::shutdownPublisherIdleFailuresForTest());
             ok = false;
         }
     }
