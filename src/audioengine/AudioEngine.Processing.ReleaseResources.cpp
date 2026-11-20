@@ -449,11 +449,23 @@ void AudioEngine::releaseResources()
         // ★ BUG-015/027 (work88): RetireQuarantineStore の全強制解放（Audio Thread 停止後 — drainAllUnsafe 契約）
         //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
+        // ★ 強制解放の admission 待ちは 2 回のパスで合計する。予約が残っている場合に
+        //   同じ待ちを二度しないよう、期限を共有する。
+        const auto drainAdmissionDeadline = std::chrono::steady_clock::now()
+            + std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
+                                                               std::memory_order_acquire));
+        auto remainingAdmissionWait = [&drainAdmissionDeadline]() noexcept
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= drainAdmissionDeadline)
+                return std::chrono::milliseconds (0);
+            return std::chrono::duration_cast<std::chrono::milliseconds> (
+                drainAdmissionDeadline - now);
+        };
+
         if (quarantinedRetireResident > 0) {
             RetireDrainExclusionScope drainExclusion (m_epochDomain);
-            (void) m_epochDomain.waitForReaderAdmissions (
-                std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
-                                                                 std::memory_order_acquire)));
+            (void) m_epochDomain.waitForReaderAdmissions (remainingAdmissionWait());
             if (readerActivityZeroNonRt()) {
                 diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
                         + juce::String(static_cast<int64>(quarantinedRetireResident))
@@ -647,11 +659,27 @@ void AudioEngine::releaseResources()
     //   ★ 除外中は新しい再入場が始まらないため、確認した集合が解放まで増えない。
     {
         RetireDrainExclusionScope drainExclusion (m_epochDomain);
-        (void) m_epochDomain.waitForReaderAdmissions (
-            std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
-                                                             std::memory_order_acquire)));
+        // ★ 期限は先の強制解放と共有する。残りが 0 なら待たずに再確認だけ行う。
+        const auto remainingForFinalDrain = remainingAdmissionWait();
+        if (remainingForFinalDrain.count() > 0)
+            (void) m_epochDomain.waitForReaderAdmissions (remainingForFinalDrain);
         if (readerActivityZeroNonRt())
+        {
             m_retireRouter->drainAllQuarantineStore();
+        }
+        else
+        {
+            // ★ #227: 非静止で保持したことを必ず残す（ここでは Q/E が空でも
+            //   world clear 後の Terminal に World が残り得る）。
+            diagLog("[DIAG] releaseResources: final quarantine drain skipped (fail-closed) -- activity="
+                    + juce::String(static_cast<int>(m_retireRouter->activeReaderCount()))
+                    + " admissions="
+                    + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
+                    + " pendingSlots="
+                    + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots()))
+                    + " terminalResident="
+                    + juce::String(static_cast<int64>(m_retireRouter->terminalReclaimResidentCount())));
+        }
     }
 
     // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。

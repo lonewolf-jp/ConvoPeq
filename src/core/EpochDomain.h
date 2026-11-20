@@ -184,12 +184,14 @@ public:
     {
         (void) convo::exchangeAtomic (retireDrainExclusion_, 0u, std::memory_order_release);
     }
-    // ★ RMW で読む（fetch_or 0）。単なる load だと、shutdown 側の RMW との間で
-    //   双方が古い値を読む順序が残る。RMW 同士なら同じ語の修飾順序で
-    //   必ず片方が相手の更新を見る。
+    // ★ RMW で読む（fetch_or 0）。
+    //   acq_rel にする理由: release 側面が、この直前の admission 増加（tryEnter の RMW）を
+    //   公開する。shutdown 側の RMW（acq_rel）がそれを読めば、その acquire 側面で
+    //   admission 増加が shutdown の後続の読みに可視になる。
+    //   同じ語の RMW 同士は修飾順序が全体順序になるため、片方は必ず相手の更新を見る。
     [[nodiscard]] bool retireDrainExclusionActive() noexcept
     {
-        return (convo::fetchOrAtomic (retireDrainExclusion_, 0u, std::memory_order_acquire)
+        return (convo::fetchOrAtomic (retireDrainExclusion_, 0u, std::memory_order_acq_rel)
                 & kRetireDrainExclusionBit) != 0u;
     }
     [[nodiscard]] std::uint32_t reacquireDuringDrainExclusion() const noexcept
