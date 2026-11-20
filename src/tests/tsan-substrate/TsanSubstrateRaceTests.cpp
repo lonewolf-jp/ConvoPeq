@@ -428,12 +428,15 @@ void t7_exitVsShutdownObservation()
 #endif
             const std::uint32_t observedActivity = domain->activeReaderCount();
             const std::uint32_t observedDepth = domain->activeDepthReaderCount();
+            // ★ チェックポイントで立つ sawActivity を、stress フェーズの証拠に流用しない。
+            //   公開はこの反復のサンプルを取り終えてから行い、
+            //   活動の観測と admission の読み取りを別の反復にまたがらせない。
+            bool sampledStressActivity = false;
             if (observedActivity > 0)
             {
                 sawActivity.store (true, std::memory_order_release);
-                // ★ チェックポイントで立つ sawActivity を、stress フェーズの証拠に流用しない。
                 if (stressPhase.load (std::memory_order_acquire))
-                    sawStressActivity.store (true, std::memory_order_release);
+                    sampledStressActivity = true;
             }
             // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
             //   seam がパーク中のサンプルだけを計上する（到達前の偶然で
@@ -451,6 +454,9 @@ void t7_exitVsShutdownObservation()
 #endif
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
+            // ★ この反復のサンプルを取り終えてから公開する。
+            if (sampledStressActivity)
+                sawStressActivity.store (true, std::memory_order_release);
             (void) observations.fetch_add (1, std::memory_order_release);
         }
     });
