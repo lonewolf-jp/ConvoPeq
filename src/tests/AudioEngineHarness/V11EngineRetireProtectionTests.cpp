@@ -4862,6 +4862,10 @@ bool checkReaderExitShutdownRace()
     //   通常の epoch 回収では対象外なので、deleter が 1 回でも走れば
     //   強制解放した証拠になる（保持のみなら 0 回）。
     g_exitWindowDrainDeletes.store (0, std::memory_order_relaxed);
+    // ★ deleter 0 回だけでは、queue を deleter なしで捨てた場合を見逃す。
+    //   保持されたことを quarantine の増分でも確認する。
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto quarantinePendingBefore = convo::EpochDomain::quarantinePendingEntries();
     {
         static int exitWindowSentinel = 0;
         if (! domainPtr->enqueueRetire (&exitWindowSentinel, exitWindowDrainDeleter,
@@ -4895,6 +4899,26 @@ bool checkReaderExitShutdownRace()
         std::fprintf(stderr, "[DQ-W3-3i] FAIL: teardown force-reclaimed a future-epoch entry "
                              "(deletes=%d)\n",
                      g_exitWindowDrainDeletes.load (std::memory_order_relaxed));
+        ok = false;
+    }
+    // ★ deleter を実行せずに queue を捨てた場合も検出する。
+    //   保持なら quarantine に 1 件増え、処理待ちも増える。
+    const auto quarantineAfter = convo::EpochDomain::quarantineCount();
+    const auto quarantinePendingAfter = convo::EpochDomain::quarantinePendingEntries();
+    if (quarantineAfter != quarantineBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-W3-3j] FAIL: teardown did not quarantine the D sentinel "
+                             "(count %llu -> %llu)\n",
+                     static_cast<unsigned long long>(quarantineBefore),
+                     static_cast<unsigned long long>(quarantineAfter));
+        ok = false;
+    }
+    if (quarantinePendingAfter < quarantinePendingBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-W3-3k] FAIL: quarantined entry is not pending "
+                             "(pending %llu -> %llu)\n",
+                     static_cast<unsigned long long>(quarantinePendingBefore),
+                     static_cast<unsigned long long>(quarantinePendingAfter));
         ok = false;
     }
 
