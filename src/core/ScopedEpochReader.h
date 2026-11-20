@@ -120,13 +120,15 @@ private:
         std::uint32_t lastUse = 0;   // キャッシュ全杯時の LRU 判定用
     };
 
-    // Four entries cover the realistic case (one engine, a few domains). Overflow is
-    // not fatal: the thread registers another slot, bounded by kMaxReaders.
-    static std::array<CacheEntry, 4>& cache() noexcept
+    // ★ サポートするプロバイダはスレッドあたり 8 件まで。実用上は 1〜2 件
+    //   （engine とその domain）である。全杯した場合は下の選択規則で 1 件を差し替える。
+    static constexpr std::size_t kCacheEntries = 8;
+
+    static std::array<CacheEntry, kCacheEntries>& cache() noexcept
     {
         // NOLINT(thread-local) RT-SAFE: used only by the non-RT reader path (never from the audio
         //   thread); POD, no destructor, one cache per thread, no cross-thread sharing.
-        thread_local std::array<CacheEntry, 4> entries {};   // NOLINT(thread-local) RT-SAFE: non-RT only, POD, no destructor, per-thread
+        thread_local std::array<CacheEntry, kCacheEntries> entries {};   // NOLINT(thread-local) RT-SAFE: non-RT only, POD, no destructor, per-thread
         return entries;
     }
 
@@ -153,9 +155,12 @@ private:
         return nullptr;
     }
 
-    // ★ 使っていないエントリのうち、最も古いものを返す。
-    //   depth > 0 のエントリは使用中なので対象外。
-    static CacheEntry* findLeastRecentlyUsed() noexcept
+    // ★ 差し替え対象（最も古いエントリ）を選ぶ。depth > 0 は使用中なので対象外。
+    //   キャッシュはスレッドあたり kCacheEntries 件までで、それを超えると
+    //   最も古い provider が差し替えられる。差し替えられた provider の
+    //   スコープは fail-closed（非アクティブ）になるが、保護なしの読みは生じない。
+    //   エントリの provider ポインタは解放済みを指し得るため、逆参照しない。
+    static CacheEntry* findEvictionCandidate() noexcept
     {
         CacheEntry* victim = nullptr;
         for (auto& entry : cache())
@@ -226,7 +231,7 @@ private:
             entry->lastUse = nextUseValue();
             if (outDepth != nullptr) *outDepth = 1;
         }
-        else if (auto* victim = findLeastRecentlyUsed())
+        else if (auto* victim = findEvictionCandidate())
         {
             // ★ 拒否されたエントリを保持する代わりに、キャッシュが全杯したら
             //   最も古いエントリと差し替える。保持を続けると 4 件が埋まり、

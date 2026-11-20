@@ -4726,7 +4726,10 @@ bool checkReaderExitShutdownRace()
     const int instancesBefore = ShutdownHoldTestAccess::engineInstanceCount();
 
     auto engine = std::make_unique<AudioEngine>();
-    ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+    // ★ タイムアウトはバウンド付きで長めに取る。50 ms だと、待機中に
+    //   スレッドが 50 ms 以上デスケジュールされただけで idle の待機がタイムアウトし、
+    //   保持の理由が exit であることを誤判する。graceful drain の遅延は短いままにする。
+    ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 500);
     auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
     auto* routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
     if (domainPtr == nullptr || routerPtr == nullptr)
