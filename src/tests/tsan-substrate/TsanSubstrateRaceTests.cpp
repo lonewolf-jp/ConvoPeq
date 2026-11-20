@@ -385,7 +385,33 @@ void t7_exitVsShutdownObservation()
     std::atomic<int> exitsDone { 0 };
     std::atomic<int> observations { 0 };
     std::atomic<bool> sawActivity { false };
-    std::atomic<bool> sawExitWindow { false };   // depth 0 で活動 > 0（exit 実行中）を見た
+    std::atomic<int> exitWindowSamples { 0 };    // depth < activity（exit 実行中）を見た回数
+
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ 決定論的な exit 窓: 1 回だけ、depth デクリメント後の reader を止める。
+    struct ExitSeamCtx
+    {
+        std::atomic<bool> fired { false };
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+    };
+    static ExitSeamCtx seam;
+    seam.fired.store (false);
+    seam.reached.store (false);
+    seam.release.store (false);
+    convo::EpochDomain::setReaderExitSeam ([] (void* p) noexcept
+    {
+        auto* s = static_cast<ExitSeamCtx*> (p);
+        if (s == nullptr)
+            return;
+        bool expected = false;
+        if (! s->fired.compare_exchange_strong (expected, true))
+            return;
+        s->reached.store (true, std::memory_order_release);
+        while (! s->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    }, &seam);
+#endif
 
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
@@ -415,7 +441,7 @@ void t7_exitVsShutdownObservation()
                 sawActivity.store (true, std::memory_order_release);
             // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
             if (observedActivity > observedDepth)
-                sawExitWindow.store (true, std::memory_order_release);
+                exitWindowSamples.fetch_add (1, std::memory_order_release);
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
             (void) observations.fetch_add (1, std::memory_order_release);
@@ -432,14 +458,25 @@ void t7_exitVsShutdownObservation()
     }, std::chrono::milliseconds (2000));
     check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
 
-    // ★ exit 実行中（depth < activity）のサンプルを取れるまで待つ。
-    //   これが無いと、observer が depth 1 の間に一度回っただけで PASS し、
-    //   目的の窓を見たことにならない。
-    const bool observedExitWindow = waitUntil ([&]
+    // ★ exit 実行中のサンプルは、ストレスループの偶然に頼らず、
+    //   seam で 1 人を depth デクリメント後に止めて確定的に取る。
+    //   止まっている reader は depth 0・活動 1 なので、observer は必ず activity > depth を見る。
+    const int windowsBefore = exitWindowSamples.load (std::memory_order_acquire);
+    const bool seamReached = waitUntil ([&]
     {
-        return sawExitWindow.load (std::memory_order_acquire);
+        return seam.reached.load (std::memory_order_acquire);
     }, std::chrono::milliseconds (5000));
-    check (observedExitWindow, "T7: the observer must sample a reader in exit (depth < activity)");
+    check (seamReached, "T7: the exit seam must be reached");
+    if (seamReached)
+    {
+        const bool sampledWhilePaused = waitUntil ([&]
+        {
+            return exitWindowSamples.load (std::memory_order_acquire) > windowsBefore;
+        }, std::chrono::milliseconds (2000));
+        check (sampledWhilePaused,
+               "T7: the observer must sample the paused exit (activity > depth)");
+    }
+    seam.release.store (true, std::memory_order_release);
     check (sawActivity.load (std::memory_order_acquire),
            "T7: the observer must see non-zero reader activity");
 
@@ -451,6 +488,9 @@ void t7_exitVsShutdownObservation()
 
     check (exitsDone.load() > 0, "T7: readers must complete exits");
     check (observations.load() > 0, "T7: observer iterations must be recorded");
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+#endif
     check (domain->activeReaderCount() == 0, "T7: activity must return to 0");
     check (domain->activeDepthReaderCount() == 0, "T7: depth must return to 0");
     std::printf ("T7 exit vs shutdown: exits=%d observations=%d activity=%u depth=%u\n",
