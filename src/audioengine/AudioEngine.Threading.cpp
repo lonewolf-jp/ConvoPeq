@@ -52,12 +52,15 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
             //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
             //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
-            owner->deferDestroyRetry(static_cast<DSPCore*>(p));
-            juce::Logger::writeToLog(juce::String::formatted(
-                "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
+            // ★ WORK113 DQ-V2: Deferred の記録は、リストに戻す前に実行する。
+            //   直後に pin が外れると別の再試行が破棄に成功し、
+            //   観測対象が解除されて deferred が計上されないことがある。
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
             convo::testobs::noteDeferred (p);
 #endif
+            owner->deferDestroyRetry(static_cast<DSPCore*>(p));
+            juce::Logger::writeToLog(juce::String::formatted(
+                "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
             return DestroyOutcome::Deferred;
         }
     }
