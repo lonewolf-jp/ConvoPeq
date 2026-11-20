@@ -15,6 +15,12 @@
 // 陽性対照（TSan が競合を検出できることを確認するビルド）:
 //   同じコマンドに -DTSAN_POSITIVE_CONTROL を追加する。
 // ============================================================================
+// ★ このファイルは DrainCapability::makeForTest を無条件に使うため、
+//   マクロは必須である（マクロ無しの構成はサポートしない）。
+#if ! defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+#error "TsanSubstrateRaceTests requires CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY"
+#endif
+
 #include "core/EpochDomain.h"
 #include "core/RCUReader.h"
 #include "audioengine/RetireQuarantineStore.h"
@@ -441,17 +447,12 @@ void t7_exitVsShutdownObservation()
             // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
             //   seam がパーク中のサンプルだけを計上する（到達前の偶然で
             //   「exit 実行中を見た」ことにしない）。
-#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
             const bool seamHeldAfter = ! seam.release.load (std::memory_order_acquire);
             // ★ depth 0 で活動 > 0 を要件にする。activity > depth だけだと
             //   activity 2・depth 1 でも成立し、depth デクリメント前の位置でも
             //   チェックポイントが通ってしまう。
             if (seamHeldBefore && seamHeldAfter && observedDepth == 0u && observedActivity > 0u)
                 exitWindowSamples.fetch_add (1, std::memory_order_release);
-#else
-            if (observedActivity > observedDepth)
-                exitWindowSamples.fetch_add (1, std::memory_order_release);
-#endif
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
             // ★ この反復のサンプルを取り終えてから公開する。
