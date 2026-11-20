@@ -433,7 +433,10 @@ void t7_exitVsShutdownObservation()
             //   「exit 実行中を見た」ことにしない）。
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
             const bool seamHeldAfter = ! seam.release.load (std::memory_order_acquire);
-            if (seamHeldBefore && seamHeldAfter && observedActivity > observedDepth)
+            // ★ depth 0 で活動 > 0 を要件にする。activity > depth だけだと
+            //   activity 2・depth 1 でも成立し、depth デクリメント前の位置でも
+            //   チェックポイントが通ってしまう。
+            if (seamHeldBefore && seamHeldAfter && observedDepth == 0u && observedActivity > 0u)
                 exitWindowSamples.fetch_add (1, std::memory_order_release);
 #else
             if (observedActivity > observedDepth)
