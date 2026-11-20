@@ -657,6 +657,15 @@ void AudioEngine::releaseResources()
     //   drainTerminalReclaim）に委ねる。
     //   ★ 活動数だけでなく admission（実行中・予約済み）も idle であることを要求する。
     //   ★ 除外中は新しい再入場が始まらないため、確認した集合が解放まで増えない。
+    // ★ 対象が空なら待たない。admission の予約を持った reader が止まっていると、
+    //   待つ対象が無いのに予算（既定 5 秒）を使い切ることになる。
+    const bool anyQuarantineResident =
+        m_retireRouter->quarantineResidentCount() > 0
+        || m_retireRouter->emergencyQuarantineResidentCount() > 0
+        || m_retireRouter->terminalReclaimResidentCount() > 0
+        || m_retireRouter->terminalDeferredResidentCount() > 0
+        || m_retireRouter->terminalRetryableResidentCount() > 0;
+    if (anyQuarantineResident)
     {
         RetireDrainExclusionScope drainExclusion (m_epochDomain);
         // ★ 期限は先の強制解放と共有する。残りが 0 なら待たずに再確認だけ行う。

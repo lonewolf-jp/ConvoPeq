@@ -4829,6 +4829,17 @@ bool checkReaderExitShutdownRace()
         ok = false;
     }
 
+    // ★ 保持されたのが「同じ router と domain の組」であること。件数だけでは、
+    //   router を破棄して domain だけ残す退行を見逃す。
+    //   診断索引が満杯して overflow 側で保持された場合は記録が無いため、
+    //   記録が増えたときだけ同一性を要求する。
+    const bool recordedInIndex = (abandonedAfter == abandonedBefore + 1);
+    if (recordedInIndex && ! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+    {
+        std::fprintf(stderr, "[DQ-W3-3e] FAIL: abandoned record does not hold the same router/domain\n");
+        ok = false;
+    }
+
     // ★ publisher の idle タイムアウトで保持されていないこと。
     if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publishIdleFailuresBefore)
     {
