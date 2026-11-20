@@ -4146,7 +4146,15 @@ bool checkDeferredCoreNotRetried()
             id = convo::testobs::setTarget (raw);
 
             // pin 残留のまま再試行 → Deferred と在住 1。
-            (void) ShutdownHoldTestAccess::retryDeferred (*engine);
+            // ★ 戻り値（破棄した件数）も表明する。Deferred を返せだけで破棄している
+            //   実装は 0 を返すので、observer が破棄を記録していてもここで検出できる。
+            const std::size_t pinnedRetried = ShutdownHoldTestAccess::retryDeferred (*engine);
+            if (pinnedRetried != 0u)
+            {
+                std::fprintf(stderr, "[DQ-V2-4b] FAIL: pinned retry reported %zu destroyed (want 0)\n",
+                             pinnedRetried);
+                ok = false;
+            }
             const auto held = readDeferredObservation();
             if (held.id != id || held.attempts != 1u || held.deferred != 1u
                 || held.destroyed != 0u || held.released)
@@ -4168,7 +4176,13 @@ bool checkDeferredCoreNotRetried()
         }
 
         // pin 解放後の再試行 → Destroyed と解放経路。
-        (void) ShutdownHoldTestAccess::retryDeferred (*engine);
+        const std::size_t unpinnedRetried = ShutdownHoldTestAccess::retryDeferred (*engine);
+        if (unpinnedRetried != 1u)
+        {
+            std::fprintf(stderr, "[DQ-V2-6b] FAIL: unpinned retry reported %zu destroyed (want 1)\n",
+                         unpinnedRetried);
+            ok = false;
+        }
         const auto done = readDeferredObservation();
         if (done.id != id || done.attempts != 2u || done.destroyed != 1u || ! done.released)
         {
