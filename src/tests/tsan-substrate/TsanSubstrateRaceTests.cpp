@@ -423,8 +423,17 @@ void t7_exitVsShutdownObservation()
             if (observedActivity > 0)
                 sawActivity.store (true, std::memory_order_release);
             // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
+            //   seam がパーク中のサンプルだけを計上する（到達前の偶然で
+            //   「exit 実行中を見た」ことにしない）。
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+            const bool seamHeld = seam.reached.load (std::memory_order_acquire)
+                                && ! seam.release.load (std::memory_order_acquire);
+            if (seamHeld && observedActivity > observedDepth)
+                exitWindowSamples.fetch_add (1, std::memory_order_release);
+#else
             if (observedActivity > observedDepth)
                 exitWindowSamples.fetch_add (1, std::memory_order_release);
+#endif
             (void) domain->readerAdmissionsActive();
             (void) domain->admissionPendingSlots();
             (void) observations.fetch_add (1, std::memory_order_release);
