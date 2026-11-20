@@ -695,8 +695,12 @@ void AudioEngine::releaseResources()
     //   EBR destroy は dtor body 内 D5/D8 drain で digest される（INV-D162-8 適合）。
     {
         // V-11 §10.6-2 (2026-10-26): handle ベースの所有権移転。
-        //   slot は上で quiescence permit により既に Reclaimed なので、retire()/reclaim() は
-        //   呼ばない（Retired への戻しと free list の二重 push を避ける）。
+        //   slot の状態は上の tryShutdownQuiescentReclaim の結果で分かれる。
+        //     - permit が通った場合: 既に Reclaimed（free list に返却済み）。
+        //     - reject された場合: Retired のまま。この後の
+        //       destroyDSPCoreNode → invalidateForDestroy が DestroyPending 経由で Reclaimed にし、
+        //       free list へ返す（ここで reclaim() を呼ぶと二重 push になる）。
+        //   どちらの場合も retire()/reclaim() をここでは呼ばない。
         DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
         if (!activeHandle.isNull())
         {
