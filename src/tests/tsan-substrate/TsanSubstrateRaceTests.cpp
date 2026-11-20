@@ -464,6 +464,9 @@ void t7_exitVsShutdownObservation()
     // ★ exit 実行中のサンプルは、並行ストレスの偶然に頼らず、単一 reader を seam で止めて
     //   確定的に取る。ほかの reader が同時に入場すると `activity > depth` の判定がぶれるため、
     //   この段階では reader を 1 人だけ動かす。
+    //   ★ seam はマクロ有時だけ宣言されるので、このブロックも同じ条件で囲む。
+    //     マクロ無時は上の #else側（activity > depth）で観測する。
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
     {
         const int windowsBefore = exitWindowSamples.load (std::memory_order_acquire);
         std::thread checkpoint ([&]
@@ -492,6 +495,7 @@ void t7_exitVsShutdownObservation()
         seam.release.store (true, std::memory_order_release);
         checkpoint.join();
     }
+#endif
 
     // ★ stress フェーズの前の値。チェックポイントだけで満たさないことを固定する。
     const int exitsBeforeStress = exitsDone.load (std::memory_order_acquire);
