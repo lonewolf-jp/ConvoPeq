@@ -176,6 +176,22 @@ CodeRabbit のレビューで 10 件の指摘があり、すべて反映した�
 | epoch と復元後スコアを mutex の外で別々に読み、新しい epoch と古いスコアの組を掴み得る | 読み取り・基準の更新・sampling を同一の臨界区間へ入れる |
 | `latestScore` が改善時しか更新されず「Latest score」の表示が古いまま残る | 評価が有効な世代すべてで公開し、履歴は改善時のみとする。復元で無効になった世代は epoch 照合の下で除外 |
 
+### 7.6 PR #229 の CI
+
+PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 の最新コミット `408c07e9` で、17 件のチェックがすべて成功した（1 件はディスパッチ専用の意図的な skip）。
+
+| チェック | 結果 | 所要 |
+| --- | --- | --- |
+| RelWithDebInfo ASan (MSVC, /MD) | 成功 | 1 時間 16 分 |
+| Debug TSan (Clang, substrate harness) | 成功（陽性対照も成功） | 26 秒 |
+| Windows MSVC / Release | 成功 | 23 分 25 秒 |
+| Analyze (c-cpp) | 成功 | 46 分 51 秒 |
+| isr-verify | 成功 | 2 分 14 秒 |
+| lint-audioengine、compliance-list-md、authority-static-checks、authority-runtime-tests、audit-report-verification | 成功 | 各 17〜43 秒 |
+| CodeRabbit | 成功（4 回目のレビューで新規指摘なし） | 5 分 34 秒 |
+
+マージ状態は `MERGEABLE` / `CLEAN` である。
+
 ## 8. C-ID ごとの検証根拠
 
 | 根拠 | 対象 |
@@ -207,7 +223,7 @@ CodeRabbit のレビューで 10 件の指摘があり、すべて反映した�
 - C-24: 学習 XML の再解析が遅いという指摘は、main に原因コードがない。修正前後を同一条件で測っていないため、要再測定のままにする。
 - C-39: 非 2 冪ブロック長は設計の前提外である。前提を広げる場合は、遅延境界のブロック欠落を別途設計する必要がある。
 - C-19／C-21: 挙動は変えず、制約をコード注記に残した。仕様として保証するなら、時間領域の減衰カーブへ移す設計変更が要る。
-- TSan／ASan の実測はこの環境では回していない。CI の Sanitizer ジョブで確認する必要がある。
+- TSan と ASan は手元では回していない。CI（PR #229）の TSan ジョブと RelWithDebInfo ASan ジョブで成功を確認した（§7.6）。手元で再現した結果ではない。
 
 ## 11. まとめ
 
