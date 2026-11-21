@@ -25,7 +25,7 @@
 - 起点は `origin/main` の `a9598d34751794c31d4da23048baed0c8e679e24`（2026-11-21 09:33）。
 - 独立 worktree を作り、未コミット変更を持ち込んでいない。`git status` は作業開始時点で空だった。
 - ビルドは MSVC ではなく Intel oneAPI 2026.2（icx）Release。`build.bat` ではなく cmake を直接呼び、`vcvars64` と `MKLROOT`／`IPPROOT`／`LIB` を明示した。
-- コード改修のコミットは `712ecb55`（親 `a9598d34`）。42 ファイル、921 行追加・172 行削除。
+- コード改修のコミットは `712ecb55` と `07446a56`（親 `a9598d34`）。46 ファイル、1,090 行追加・180 行削除（報告書と AGENTS.md を含む）。
 
 ## 3. 高 8 件
 
@@ -62,7 +62,7 @@ C-05 は、従来 `headerSize + dataSize + timeDomainSizeBytes` と実ファイ�
 | C-20 | 倍率を 2 の冪へ丸めて保存し、スライダーも同じ値へスナップ | 修正 |
 | C-21 | Air Absorption の HF 減衰がブロック長依存である制約を注記 | 注記 |
 | C-22 | 具体箇所を特定できず。修正しない | 判定不能 |
-| C-23 | ログの上限を 8 MiB に。キャッシュは既存の LRU で有界であることを確認 | 修正 |
+| C-23 | ログを書込み中も 8 MiB で打ち切り、超過時に 1 回ローテートする。キャッシュは既存の LRU で有界 | 修正 |
 | C-24 | main に原因コードがなく、実測もし直していない | 要再測定 |
 | C-25 | HB トレースのイベント数を 20 万件で上限化（超過時は古い半分を捨てる） | 修正 |
 | C-27 | MSVC でも AVX2 高速路を有効化（`__FMA__` 未定義対策） | 修正 |
@@ -128,12 +128,29 @@ icx 2026.2 Release で全 263 ステップをビルドし、エラー 0（終了
 
 ### 7.4 ctest 全件
 
-`ctest --test-dir build -C Release` を実行し、63/63 が成功した（152.16 秒）。新規の `Fix55ContractTests` も含む。
+`ctest --test-dir build -C Release` を実行し、63/63 が成功した。新規の `Fix55ContractTests` も含む。最終実行は 181.16 秒である。
 
 最初の実行では 61/63 だった。内訳は次の 2 件で、どちらもコードの退行ではない。
 
 - `TailLayerPerfTests`: 判定が `wall/cpu=1.274 > 1.25` で「5 回とも外乱」と明示された。ビルド直後で他のプロセスが動いていたためである。負荷のない状態で単独実行すると 5.04 秒で成功した。
 - `AudioEngineHarness`: A2 プローブの自己テストが `expected 1 allocation, got 0` で失敗した。原因は最適化である。icx `-O2` は、ポインタが外へ出ない `new int(1); delete p;` の対を削除する。2 TU の最小再現で `calls=0` を確認した。テスト側でポインタを volatile なグローバルへ逃がし、確保が消えないようにした。修正後は 145.58 秒で成功した。
+
+### 7.5 レビュー指摘の反映
+
+CodeRabbit のレビューで 10 件の指摘があり、すべて反映した（コミット `07446a56`）。
+
+| 指摘 | 対応 |
+| --- | --- |
+| `handleLoadError` に世代照合がない | キューへ積む時点の世代を捕捉し、適用前に照合 |
+| テール倍率が Air Absorption / Layer Tail Contouring で 2 のまま表示される | `effectiveTailL1L2Multiplier()` を単一規則にし、setter とモード切替で実効値を保存 |
+| `FileLogger` の上限はコンストラクタ時だけ | `SizeCappedFileLogger` を追加し、書込み中も上限を適用して 1 回ローテート |
+| Bypass のコメントが存在しない `setTailEnabled(false)` を案内 | 記述を削除 |
+| `getState` がワーカー専用の非 atomic を別スレッドから読む | 公開済みの atomic（`progress.*`）を読む |
+| `setState` が sample と update の間に入り得る | 状態 epoch を導入し、復元をまたいだ世代の update を破棄 |
+| CMA mean を反射係数の範囲へ丸めていた | 非有限値だけ 0 にし、有限値は保持（±50 の飽和上限） |
+| 公開係数が評価時の `coeffSafetyMargin` で丸められていない | 評価と同じ `clampCoeff` を公開時にも適用 |
+| A2 プローブの volatile がポインタ先に付いていた | `const void* volatile` に修正 |
+| TruePeak の上限が確保サイズで、再 prepare 後の履歴長と合わない | `stages[0].maxInputSamples` で制限 |
 
 ## 8. C-ID ごとの検証根拠
 
@@ -152,13 +169,13 @@ icx 2026.2 Release で全 263 ステップをビルドし、エラー 0（終了
 
 追跡ファイル 40 件を変更し、2 件を追加した（合計 42 件）。
 
-- 製品コード: `CacheManager.cpp`、`ConvolverControlPanel.cpp`、`ConvolverProcessor.h`、`CustomInputOversampler.cpp`、`DeviceSettings.{h,cpp}`、`IRConverter.cpp`、`LoudnessMeter.cpp`、`MKLNonUniformConvolver.cpp`、`MainApplication.cpp`、`MainWindow.{h,cpp}`、`NoiseShaperLearner.{h,cpp}`、`OutputFilter.cpp`、`TruePeakDetector.cpp`
+- 製品コード: `CacheManager.cpp`、`ConvolverControlPanel.cpp`、`ConvolverProcessor.h`、`CustomInputOversampler.cpp`、`DeviceSettings.{h,cpp}`、`IRConverter.cpp`、`LoudnessMeter.cpp`、`MKLNonUniformConvolver.cpp`、`MainApplication.{h,cpp}`、`MainWindow.{h,cpp}`、`NoiseShaperLearner.{h,cpp}`、`OutputFilter.cpp`、`SizeCappedFileLogger.h`（新規）、`TailLayerMultiplier.h`、`TruePeakDetector.cpp`
 - audioengine: `AudioEngine.Processing.AudioBlock.cpp`、`AudioEngine.Processing.BlockDouble.cpp`、`AudioEngine.Processing.DSPCoreDouble.cpp`、`AudioEngine.Processing.DSPCoreFloat.cpp`、`AudioEngine.Retire.cpp`、`ISRHB.{h,cpp}`、`RuntimePublicationOrchestrator.{h,cpp}`
 - convolver: `ConvolverProcessor.LoaderThread.cpp`、`ConvolverProcessor.Runtime.cpp`
 - core: `CommandBuffer.h`、`DeletionQueue.{h,cpp}`、`FadeEngine.h`、`RCUReader.h`、`ReaderMeasureRegistry.h`
 - EQ: `EQProcessor.Parameters.cpp`、`EQProcessor.Processing.cpp`
 - テスト: `Fix55ContractTests.cpp`（新規）、`PolyphaseGainCandidateRef.h`、`V11EngineRetireProtectionTests.cpp`
-- ビルド・文書: `CMakeLists.txt`、`BUILD_GUIDE_WINDOWS.md`、`manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_JP.md`
+- ビルド・文書: `CMakeLists.txt`、`BUILD_GUIDE_WINDOWS.md`、`manual/ADAPTIVE_NOISE_SHAPER_LEARNING_WINDOW_JP.md`、`AGENTS.md`
 
 ## 10. 残り
 
