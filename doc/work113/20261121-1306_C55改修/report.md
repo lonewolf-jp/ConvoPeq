@@ -25,7 +25,7 @@
 - 起点は `origin/main` の `a9598d34751794c31d4da23048baed0c8e679e24`（2026-11-21 09:33）。
 - 独立 worktree を作り、未コミット変更を持ち込んでいない。`git status` は作業開始時点で空だった。
 - ビルドは MSVC ではなく Intel oneAPI 2026.2（icx）Release。`build.bat` ではなく cmake を直接呼び、`vcvars64` と `MKLROOT`／`IPPROOT`／`LIB` を明示した。
-- 変更は 38 ファイル、537 行追加・148 行削除。
+- コード改修のコミットは `712ecb55`（親 `a9598d34`）。42 ファイル、921 行追加・172 行削除。
 
 ## 3. 高 8 件
 

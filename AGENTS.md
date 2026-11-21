@@ -776,3 +776,15 @@ OpenCode V2 + OpenChamber 環境での実測。バックエンドは `opencode.e
   query は BFS の順序が hash 依存でなくなった（`PYTHONHASHSEED` で結果が変わらない）。`--no-doc-demotion` で docs-first コーパスの重みを切れる。
 - 0.9.105: **class フィールドを通じたメンバ呼び出しの解析**（`client.actions->Execute()`）、watch の除外ディレクトリ pruning（Linux）。
 - ノード/エッジ構造が変わるため、アップデート後は `graphify update .`（LLM 不要）で既存グラフを再生成するのが望ましい。
+
+## icx `-O2` は `new`/`delete` の対を消す（A2 プローブ自己テスト・2026-11-21 実測）
+
+- `AudioEngineHarness` の A2 プローブ自己テストが `[A2-P1] expected 1 allocation, got 0` で
+  落ちる場合、テスト側の `int* p = new int(1); delete p;` が最適化で消えている。
+  置換 `operator new` が別 TU にある 2 TU の最小再現を icx `-O2` で作ると `calls=0` になる。
+  同じコードを 1 TU に置く（置換が見える）と `calls=1` になる。
+- 対策はテスト側でポインタを volatile なグローバルへ逃がすこと。実装は
+  `src/tests/AudioEngineHarness/V11EngineRetireProtectionTests.cpp` の
+  `a2ProbeNewScalar` / `a2ProbeNewArray`。製品コードの `operator new` 置換は不要。
+- `TailLayerPerfTests` は `wall/cpu > 1.25` を「外乱」として失敗させる。ビルドや他の負荷と
+  同時に走らせず、単独で実行する。
