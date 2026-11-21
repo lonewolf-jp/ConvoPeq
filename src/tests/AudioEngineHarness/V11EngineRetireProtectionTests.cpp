@@ -2502,7 +2502,7 @@ bool checkT10cProductionProviderPath()
 //   allocation to happen in every configuration.
 // ---------------------------------------------------------------------------
 namespace {
-volatile const void* g_a2ProbeSink = nullptr;
+const void* volatile g_a2ProbeSink = nullptr;
 
 void a2ProbeNewScalar(int value)
 {

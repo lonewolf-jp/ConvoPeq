@@ -1176,13 +1176,20 @@ void ConvolverProcessor::setTailMode(TailMode mode)
                                      static_cast<int>(TailMode::Bypass),
                                      static_cast<int>(mode));
     int prev;
+    int prevMult;
+    int newMult;
     {
         pendingOverrideLock.enter();
         prev = pendingOverride.tailMode;
+        prevMult = pendingOverride.tailL1L2Multiplier;
         pendingOverride.tailMode = clamped;
+        // ★ C-20 / review: Air Absorption と Layer Tail Contouring は実効倍率が 8 以上になる。
+        //   保存値も同じ値へ引き上げ、表示と実効値を一致させる。
+        newMult = convo::effectiveTailL1L2Multiplier(prevMult, clamped);
+        pendingOverride.tailL1L2Multiplier = newMult;
         pendingOverrideLock.exit();
     }
-    if (prev != clamped)
+    if (prev != clamped || prevMult != newMult)
         postCoalescedChangeNotification();
 }
 
@@ -1247,14 +1254,15 @@ void ConvolverProcessor::setTailStrength(float strength)
 
 void ConvolverProcessor::setTailL1L2Multiplier(int multiplier)
 {
-    // ★ C-20: the convolver geometry only accepts powers of two (TailLayerMultiplier.h).
-    //   Storing the raw request made the slider show 3 while the engine used 2, so the
-    //   stored value is the sanitized one and the UI reads back the effective value.
-    const int clamped = convo::sanitizeTailL1L2Multiplier(multiplier);
+    // ★ C-20: the convolver geometry only accepts powers of two (TailLayerMultiplier.h),
+    //   and Air Absorption / Layer Tail Contouring raise the applied value to 8.
+    //   Store the value the engine will actually use so the slider shows it.
+    int clamped;
     int prev;
     {
         pendingOverrideLock.enter();
         prev = pendingOverride.tailL1L2Multiplier;
+        clamped = convo::effectiveTailL1L2Multiplier(multiplier, pendingOverride.tailMode);
         pendingOverride.tailL1L2Multiplier = clamped;
         pendingOverrideLock.exit();
     }

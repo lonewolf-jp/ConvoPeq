@@ -711,7 +711,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         //   層は等倍で維持し、L0 被覆も tail 側と同じ 0.12 秒下限に揃える。
         // ★ C-19 (設計制約): そのため Bypass 中も L1/L2 の FFT 作業領域は保持される。
         //   再開時に再構築しないための意図的なメモリ・トレードオフであり、リークではない。
-        //   メモリを削りたい場合は setTailEnabled(false) で層自体を落とす経路を使う。
+        //   層を落とす経路は現状の API に無い（必要なら別途実装する）。
         tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.12));
         tailStrength = 1.0;
         layer1Gain = 1.0;
@@ -722,8 +722,8 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // Air Absorption mode: preserve early reflections while progressively damping late layers.
         tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.055));
         // ★ BUG-013: 旧下限 6 は 2 の冪でなく、L2 の FFT 長を非 2 冪にするため 8 へ引き上げる。
-        tailL1L2Mult = juce::jlimit(convo::kTailL1L2MultMin, convo::kTailL1L2MultMax,
-                                    std::max(tailL1L2Mult, 8));
+        // ★ C-20: 規則は TailLayerMultiplier.h に一本化（保存値と実効値を一致させる）。
+        tailL1L2Mult = convo::effectiveTailL1L2Multiplier(tailL1L2Mult, tailMode);
         tailStrength = juce::jlimit(0.0, 2.0, userTailStrength);
 
         layer1Gain = juce::jlimit(0.0, 2.0, tailStrength * (0.95 - 0.25 * strength01));
@@ -736,7 +736,7 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         // tailL1L2Mult 最小値を 12→8 に緩和（案A）。数学的に出力は同一であり、
         // L2 small buffers (fftTimeBuf/fftOutBuf 等) が 12.4MB → 5.5MB (56%減)。
         // 83ms IR 環境では L1/L2 が生成されないため影響ゼロ。
-        tailL1L2Mult = juce::jlimit(2, 16, std::max(tailL1L2Mult, 8));
+        tailL1L2Mult = convo::effectiveTailL1L2Multiplier(tailL1L2Mult, tailMode);
 
         layer1Gain = juce::jlimit(0.0, 2.0, tailStrength * (1.05 + 0.20 * strength01));
         layer2Gain = juce::jlimit(0.0, 2.0, tailStrength * (0.82 + 0.12 * strength01));

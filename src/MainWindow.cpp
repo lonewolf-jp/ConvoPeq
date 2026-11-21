@@ -456,8 +456,8 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         const auto logFile = juce::File::getCurrentWorkingDirectory().getChildFile(logFileValue);
         // ★ C-16: 以前は release() して所有権を捨てていた（プロセス終了まで解放されない）。
         //   MainWindow が所有し、デストラクタで元のロガーへ戻してから解放する。
-        cliFileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq CLI Log",
-                                                           static_cast<juce::int64>(8) << 20);
+        cliFileLogger = std::make_unique<SizeCappedFileLogger>(logFile, "ConvoPeq CLI Log",
+                                                               static_cast<juce::int64>(8) << 20);
         previousLogger = juce::Logger::getCurrentLogger();
         juce::Logger::setCurrentLogger(cliFileLogger.get());
         juce::Logger::writeToLog("[CLI] Log file: " + logFile.getFullPathName());

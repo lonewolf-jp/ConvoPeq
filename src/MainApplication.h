@@ -9,6 +9,8 @@
 
 #include <JuceHeader.h>
 
+#include "SizeCappedFileLogger.h"
+
 class MainWindow; // フォワード宣言
 
 class MainApplication : public juce::JUCEApplication
@@ -38,7 +40,7 @@ public:
 
 private:
     std::unique_ptr<MainWindow> mainWindow;
-    std::unique_ptr<juce::FileLogger> fileLogger;
+    std::unique_ptr<SizeCappedFileLogger> fileLogger;
 
     // ★ Live evidence: `--verify-runtime-evidence-live`（実 Runtime 実行に基づく証拠）
     //   既存の `--verify-runtime-evidence`（Exporter 単体呼び出し）とは独立したモード。

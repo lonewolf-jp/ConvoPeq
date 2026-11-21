@@ -142,10 +142,11 @@ void MainApplication::initialise(const juce::String& commandLine)
     {
         const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
         const auto logFile = exeDir.getChildFile("ConvoPeq.log");
-        // ★ C-23: bound the log file. Without a limit the file grew for the whole
-        //   lifetime of the installation; 8 MiB is far more than one session needs.
-        fileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq Log",
-                                                        static_cast<juce::int64>(8) << 20);
+        // ★ C-23: bound the log file while the process runs. JUCE's FileLogger applies
+        //   maxInitialFileSizeBytes only in its constructor; SizeCappedFileLogger also
+        //   checks at write time and rotates once to <name>.1.
+        fileLogger = std::make_unique<SizeCappedFileLogger>(logFile, "ConvoPeq Log",
+                                                            static_cast<juce::int64>(8) << 20);
         juce::Logger::setCurrentLogger(fileLogger.get());
         juce::Logger::writeToLog("Logger initialized: " + logFile.getFullPathName());
     }

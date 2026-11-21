@@ -65,9 +65,6 @@ public:
     using Settings = convo::NoiseShaperLearnerSettings;
 
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
-    // ★ C-08: reflection coefficients are only stable inside (-1, 1). Values restored
-    //   from the learned-state XML are clamped to this bound.
-    static constexpr double kMaxReflectionCoefficient = 0.999999;
 
     struct LearnedState
     {
@@ -284,6 +281,9 @@ private:
     //   thread and read from message-thread snapshots (getState) and state restore
     //   (setState). Serialize those accesses; audio/RT paths never touch it.
     mutable std::mutex optimizerMutex;
+    // ★ review: increments whenever the optimizer state is replaced (setState / restored
+    //   mean). The worker discards a generation whose sample was taken before the restore.
+    std::atomic<std::uint64_t> optimizerStateEpoch { 0 };
     std::array<EvaluationWorkerSlot, kMaxParallelEvaluators> evaluationWorkers {};
     int activeEvaluationWorkerCount = 1;
     int activeAuxEvaluationWorkerCount = 0;

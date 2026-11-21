@@ -392,8 +392,10 @@ void NoiseShaperLearner::getState(State& outState) const noexcept
     optimizer.serializeTo(outState.mean, outState.covarianceUpperTriangle, outState.sigma);
     for (int i = 0; i < kOrder; ++i)
         outState.bestCoefficients[i] = convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire);
-    outState.elapsedPlaybackSeconds = accumulatedPlaybackSeconds;
-    outState.currentPhase = currentPhase;
+    // ★ review: the save job runs on another thread. accumulatedPlaybackSeconds and
+    //   currentPhase are plain worker-owned fields, so read the published copies instead.
+    outState.elapsedPlaybackSeconds = convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire);
+    outState.currentPhase = convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire);
     outState.iteration = convo::consumeAtomic(progress.iteration, std::memory_order_acquire);
     outState.bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
     outState.processCount = convo::consumeAtomic(progress.processCount, std::memory_order_acquire);
@@ -405,6 +407,7 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
     // ★ C-03: state restore must not overlap a worker update.
     std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
     optimizer.deserializeFrom(inState.mean, inState.covarianceUpperTriangle, inState.sigma);
+    convo::fetchAddAtomic(optimizerStateEpoch, std::uint64_t{1}, std::memory_order_acq_rel);
     for (int i = 0; i < kOrder; ++i)
         convo::publishAtomic(bestCoefficients[i], inState.bestCoefficients[i], std::memory_order_release);
     accumulatedPlaybackSeconds = inState.elapsedPlaybackSeconds;
@@ -827,6 +830,8 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                         // 数世代だけ回して良し悪しを判断
                         for (int g = 0; g < 3; ++g)
                         {
+                            const std::uint64_t epochAtSample =
+                                convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
                             {
                                 std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
                                 optimizer.sample(candidatePopulationMatrix());
@@ -838,10 +843,20 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                                                dummyIdx,
                                                currentBestScore,
                                                stopToken);
+                            bool restartUpdated = false;
                             {
                                 std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
-                                optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+                                if (convo::consumeAtomic(optimizerStateEpoch, std::memory_order_relaxed)
+                                    == epochAtSample)
+                                {
+                                    optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+                                    restartUpdated = true;
+                                }
                             }
+                            // ★ review: a restore replaced the optimizer state between the
+                            //   sample and the update; discard this generation.
+                            if (!restartUpdated)
+                                continue;
 
                             if (currentBestScore < bestRestartScore)
                             {
@@ -963,6 +978,8 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             convo::publishAtomic(progress.status, Status::Running, std::memory_order_release);
+            const std::uint64_t optimizerEpochAtSample =
+                convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
             {
                 std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
                 optimizer.sample(candidatePopulationMatrix());
@@ -995,10 +1012,21 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 continue;
             }
 
+            bool optimizerUpdated = false;
             {
                 std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
-                optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+                if (convo::consumeAtomic(optimizerStateEpoch, std::memory_order_relaxed)
+                    == optimizerEpochAtSample)
+                {
+                    optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+                    optimizerUpdated = true;
+                }
             }
+            // ★ review: a restore replaced the optimizer state between the sample and the
+            //   update; discard this generation instead of mixing old candidates with the
+            //   restored distribution.
+            if (!optimizerUpdated)
+                continue;
 
             CmaEsOptimizer::toParcor(candidatePopulationMatrix()[bestCandidateIndex], parcor);
             if (bestCandidateScore < bestScore && bestCandidateScore < std::numeric_limits<double>::max())
@@ -1479,34 +1507,36 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
     if (std::isfinite(savedElapsed) && savedElapsed >= 0.0)
         convo::publishAtomic(progress.elapsedPlaybackSeconds, savedElapsed, std::memory_order_release);
 
-    // Reflection coefficients are only meaningful inside the unit interval.
-    const auto sanitizeReflection = [](double v) noexcept
-    {
-        if (!std::isfinite(v))
-            return 0.0;
-        return juce::jlimit(-kMaxReflectionCoefficient, kMaxReflectionCoefficient, v);
-    };
-
     if (auto* coeffsXml = xml->getChildByName("BestCoefficients"))
     {
+        const double margin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
         for (int i = 0; i < kOrder; ++i)
         {
             const double raw = coeffsXml->getDoubleAttribute("c" + juce::String(i));
-            convo::publishAtomic(bestCoefficients[i], sanitizeReflection(raw), std::memory_order_release);
+            convo::publishAtomic(bestCoefficients[i],
+                                 LatticeNoiseShaper::clampCoeff(raw, margin),
+                                 std::memory_order_release);
         }
     }
 
     if (auto* cmaXml = xml->getChildByName("CmaMean"))
     {
+        // ★ review: the CMA mean lives in unconstrained space, not in reflection space.
+        //   Clamping it to ±0.999999 distorted a valid mean (e.g. 2.0). Keep finite values
+        //   and only bound the range where tanh has already saturated.
         double mean[kOrder] = {};
         for (int i = 0; i < kOrder; ++i)
-            mean[i] = sanitizeReflection(cmaXml->getDoubleAttribute("m" + juce::String(i)));
+        {
+            const double raw = cmaXml->getDoubleAttribute("m" + juce::String(i));
+            mean[i] = std::isfinite(raw) ? juce::jlimit(-50.0, 50.0, raw) : 0.0;
+        }
 
         // We only restore the mean, keeping other CMA state as literature defaults or engine state
         // unless we want full CMA state persistence. For now, mean + bestCoeffs is a good warm start.
         {
             std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
             optimizer.setMean(mean);
+            convo::fetchAddAtomic(optimizerStateEpoch, std::uint64_t{1}, std::memory_order_acq_rel);
         }
     }
 
@@ -1516,12 +1546,14 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
 void NoiseShaperLearner::publishGenerationResult(const double* parcor, double score, int evaluatedCandidates) noexcept
 {
     // ★ C-02: parcor is already mapped through tanh by CmaEsOptimizer::toParcor().
-    //   Applying tanh again skew-s the coefficient the engine actually applies from the
-    //   one the CMA-ES fitness evaluated. Publish the reflection coefficients as-is.
+    //   Do not apply tanh again. ★ review: evaluatePopulation() scores the candidates with
+    //   clampCoeff(tanh(x), coeffSafetyMargin), so the published coefficient must use the
+    //   same margin or the stored filter is not the filter that was scored.
+    const double safetyMargin = convo::consumeAtomic(settings.coeffSafetyMargin, std::memory_order_acquire);
     std::array<double, kOrder> mappedCoeffs;
     for (int i = 0; i < kOrder; ++i)
     {
-        const double k = parcor[i];
+        const double k = LatticeNoiseShaper::clampCoeff(parcor[i], safetyMargin);
         mappedCoeffs[static_cast<size_t>(i)] = k;
         convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], k, std::memory_order_release);
     }

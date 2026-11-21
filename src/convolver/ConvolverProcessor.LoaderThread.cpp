@@ -116,10 +116,17 @@ void ConvolverProcessor::LoaderThread::run()
     {
         auto wp = weakOwner;
         const juce::String error = result.errorMessage;
-        const bool queued = juce::MessageManager::callAsync([wp, error]()
+        const std::uint64_t errorGen = requestGenerationId;
+        const bool queued = juce::MessageManager::callAsync([wp, error, errorGen]()
         {
             if (auto* o = wp.get())
+            {
+                // ★ review: same generation rule as the flag reset. A superseded loader
+                //   must not replace the newer load's status with its own error.
+                if (!o->isConvolverGenerationCurrent(errorGen))
+                    return;
                 o->handleLoadError(error);
+            }
         });
 
         if (!queued)
