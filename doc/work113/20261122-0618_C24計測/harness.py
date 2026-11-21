@@ -103,11 +103,12 @@ def run_once(cond):
 def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     conds = ["E0", "E1", "E2", "E3"]
-    # キャリーオーバーも釣り合う均衡ラテン方格（各条件が各順序対で同回数だけ先行する）
+    # 行内は均衡ラテン方格。行の並びは、境界の先行関係も釣り合う順に固定した。
+    # これにより、各条件が他の各条件に先行する回数は 20 行を通して 11 回で等しくなる。
     square = [[0, 1, 2, 3], [1, 3, 0, 2], [2, 0, 3, 1], [3, 2, 1, 0]]
-    rows = []
-    for i in range(rounds):
-        rows.append(square[i % 4])
+    row_order = [0, 3, 2, 2, 1, 2, 0, 2, 1, 2, 3, 0, 1, 3, 3, 1, 1, 0, 0, 3]
+    rows = [square[i] for i in row_order[:rounds]]
+    assert len(rows) == rounds, "the fixed sequence has 20 rows"
     with open(OUT, "w", encoding="utf-8", newline="\n") as out:
         out.write("round,pos,cond,S1_ms,S2_ms,S3_ms,S4_ms,res_start_ms,res_end_ms,total_ms,"
                   "nsl_size,nsl_hash,ls_size,ls_hash\n")
