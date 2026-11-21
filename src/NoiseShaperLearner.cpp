@@ -879,6 +879,9 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
 
         double parcor[CmaEsOptimizer::kDim] = {};
         double bestScore = std::numeric_limits<double>::max();
+        // ★ review: local baseline must follow a restore (setState publishes progress.bestScore).
+        std::uint64_t trackedOptimizerEpoch =
+            convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
         int generation = 0;
         DrainStats cumulativeDrainStats {};
         auto lastWaitingDiagnosticsLogTime = std::chrono::steady_clock::now();
@@ -984,8 +987,15 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             convo::publishAtomic(progress.status, Status::Running, std::memory_order_release);
-            const std::uint64_t optimizerEpochAtSample =
+            const std::uint64_t epochNow =
                 convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
+            if (epochNow != trackedOptimizerEpoch)
+            {
+                // 復元後は復元されたスコアを比較の基準にする（古い baseline を残さない）。
+                trackedOptimizerEpoch = epochNow;
+                bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
+            }
+            const std::uint64_t optimizerEpochAtSample = epochNow;
             {
                 std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
                 optimizer.sample(candidatePopulationMatrix());
@@ -1039,14 +1049,19 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 continue;
 
             CmaEsOptimizer::toParcor(candidatePopulationMatrix()[bestCandidateIndex], parcor);
+            bool committed = false;
             if (bestCandidateScore < bestScore && bestCandidateScore < std::numeric_limits<double>::max())
             {
-                bestScore = bestCandidateScore;
-                publishGenerationResult(parcor, bestScore, evaluatedCandidates,
-                                        optimizerEpochAtSample, generationMargin);
+                // ★ review: lower the local baseline only when the result was actually
+                //   committed. A rejected generation must not make a later valid score look
+                //   worse than the restored baseline.
+                committed = publishGenerationResult(parcor, bestCandidateScore, evaluatedCandidates,
+                                                    optimizerEpochAtSample, generationMargin);
+                if (committed)
+                    bestScore = bestCandidateScore;
             }
 
-            if (bestCandidateScore < std::numeric_limits<double>::max())
+            if (committed && bestCandidateScore < std::numeric_limits<double>::max())
             {
                 convo::publishAtomic(progress.latestScore, bestCandidateScore, std::memory_order_release);
                 appendHistoryPoint(bestCandidateScore);
@@ -1555,7 +1570,7 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
     return true;
 }
 
-void NoiseShaperLearner::publishGenerationResult(const double* parcor, double score,
+bool NoiseShaperLearner::publishGenerationResult(const double* parcor, double score,
                                                  int evaluatedCandidates,
                                                  std::uint64_t expectedEpoch,
                                                  double safetyMargin) noexcept
@@ -1569,7 +1584,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* parcor, double sc
     {
         std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
         if (convo::consumeAtomic(optimizerStateEpoch, std::memory_order_relaxed) != expectedEpoch)
-            return;
+            return false;
 
         for (int i = 0; i < kOrder; ++i)
         {
@@ -1626,26 +1641,33 @@ void NoiseShaperLearner::publishGenerationResult(const double* parcor, double sc
     {
         if (auto* self = weakSelf.get())
         {
-            // ★ review: the bank write is the last step of the result's lifetime. Do not
-            //   let an older generation overwrite a state that was restored meanwhile.
-            if (convo::consumeAtomic(self->optimizerStateEpoch, std::memory_order_acquire) != expectedEpoch)
-                return;
-            // ★ 2026-06-24 [Phase C'] submitRebuildIntent 無効化（実験ブランチ用）。
-            //   RuntimeWorld非依存確定済み（setAdaptiveNoiseShaperState/requestAdaptiveAutosave
-            //   は bank 直接書込 + ファイル保存 callback のみ。world 介在なし）。
-            //   storeLearnedCoeffs → bank.generation++ により RT パスの generation tracking が
-            //   係数反映を検出する。rebuild (~530ms) があっても rebuild なしでも係数は反映される。
-            //   検証項目: rebuild=0回, adaptive switch継続, autosave正常, 30〜60分音飛びゼロ。
-            // self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
-            //                                  AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
-            //                                  AudioEngine::RebuildTelemetryClass::Snapshot,
-            //                                  AudioEngine::RebuildTelemetryPolicy::Replaceable);
-            self->engine.storeLearnedCoeffs(mappedCoeffs.data());
-            self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
+            // ★ review: the bank write is the last step of the result's lifetime. The epoch
+            //   check and both engine writes share the optimizer mutex with setState, so a
+            //   restore cannot slip between them. requestAdaptiveAutosave() runs afterwards
+            //   because its callback may call back into this learner.
+            {
+                std::lock_guard<std::mutex> optimizerLock(self->optimizerMutex);
+                if (convo::consumeAtomic(self->optimizerStateEpoch, std::memory_order_relaxed) != expectedEpoch)
+                    return;
+
+                // ★ 2026-06-24 [Phase C'] submitRebuildIntent 無効化（実験ブランチ用）。
+                //   RuntimeWorld非依存確定済み（setAdaptiveNoiseShaperState/requestAdaptiveAutosave
+                //   は bank 直接書込 + ファイル保存 callback のみ。world 介在なし）。
+                //   storeLearnedCoeffs → bank.generation++ により RT パスの generation tracking が
+                //   係数反映を検出する。rebuild (~530ms) があっても rebuild なしでも係数は反映される。
+                //   検証項目: rebuild=0回, adaptive switch継続, autosave正常, 30〜60分音飛びゼロ。
+                // self->engine.submitRebuildIntent(convo::RebuildKind::Structural,
+                //                                  AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
+                //                                  AudioEngine::RebuildTelemetryClass::Snapshot,
+                //                                  AudioEngine::RebuildTelemetryPolicy::Replaceable);
+                self->engine.storeLearnedCoeffs(mappedCoeffs.data());
+                self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
+            }
             self->engine.requestAdaptiveAutosave();
         }
     });
 
+    return true;
 }
 
 void NoiseShaperLearner::appendHistoryPoint(double score) noexcept

@@ -242,8 +242,11 @@ private:
                                    int numSegments,
                                    int evaluationBitDepth) noexcept;
     void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
-    void publishGenerationResult(const double* parcor, double score, int evaluatedCandidates,
-                                 std::uint64_t expectedEpoch, double safetyMargin) noexcept;
+    // 戻り値: 復元と競合せずに結果を確定できたか。
+    [[nodiscard]] bool publishGenerationResult(const double* parcor, double score,
+                                               int evaluatedCandidates,
+                                               std::uint64_t expectedEpoch,
+                                               double safetyMargin) noexcept;
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
