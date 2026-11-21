@@ -103,7 +103,8 @@ def run_once(cond):
 def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     conds = ["E0", "E1", "E2", "E3"]
-    square = [[0, 1, 2, 3], [1, 2, 3, 0], [2, 3, 0, 1], [3, 0, 1, 2]]
+    # キャリーオーバーも釣り合う均衡ラテン方格（各条件が各順序対で同回数だけ先行する）
+    square = [[0, 1, 2, 3], [1, 3, 0, 2], [2, 0, 3, 1], [3, 2, 1, 0]]
     rows = []
     for i in range(rounds):
         rows.append(square[i % 4])
