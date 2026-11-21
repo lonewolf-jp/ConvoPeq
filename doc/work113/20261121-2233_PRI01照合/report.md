@@ -86,8 +86,8 @@ PRI-01 と C-01 は同一である。C-22（MED-16）は PRI 番号を持たな�
 
 ## 7. Issue の状態
 
-- #225（`ReaderMeasureRegistry` のタグ公開順）: C-29 として修正済み。`src/core/ReaderMeasureRegistry.h:142-159` が「初期化中(2) → タグ書込 → ready(1)」の順で公開し、読み側は `used` を acquire で読む（133）。契約テスト 2 項目（空タグで ready にならない、公開後にタグが見える）も通っている。クローズの判断は未実施。
-- #215（MSVC の AVX2/FMA 経路）: C-27 として条件を `#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))` に変更済み（`src/CustomInputOversampler.cpp:212`、`664`）。ただし Issue の受入条件にある逆アセンブル確認と性能測定は今回実施していない。
+- #225（`ReaderMeasureRegistry` のタグ公開順）: C-29 として修正済み。`src/core/ReaderMeasureRegistry.h:142-159` が「初期化中(2) → タグ書込 → ready(1)」の順で公開し、読み側は `used` を acquire で読む（133）。契約テスト 2 項目（空タグで ready にならない、公開後にタグが見える）も通っている。修正箇所と検証根拠を Issue に記録し、クローズした。
+- #215（MSVC の AVX2/FMA 経路）: C-27 として条件を `#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))` に変更済み（`src/CustomInputOversampler.cpp:212`、`664`）。ただし、これで Issue の受入条件が満たされたわけではない。MSVC の逆アセンブル確認、AVX2/FMA 経路の命令生成確認、性能測定が未実施のため、オープンを維持し、残る受入条件を Issue に明記した。
 
 ## 8. この照合での変更
 
