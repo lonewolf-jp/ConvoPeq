@@ -178,7 +178,7 @@ CodeRabbit のレビューで 10 件の指摘があり、すべて反映した�
 
 ### 7.6 PR #229 の CI
 
-PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 の最新コミット `408c07e9` で、17 件のチェックがすべて成功した（1 件はディスパッチ専用の意図的な skip）。
+PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 のコード改修の最終コミット `408c07e9` で、17 件のチェックがすべて成功した（1 件はディスパッチ専用の意図的な skip）。以降のコミットはこの報告書だけである。
 
 | チェック | 結果 | 所要 |
 | --- | --- | --- |
