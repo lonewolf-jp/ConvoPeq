@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 
 #include "IReaderEpochProvider.h"
 #include "audioengine/AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
@@ -116,26 +117,105 @@ private:
     {
         const void* provider = nullptr;
         int slot = -1;
-        int depth = 0;   // > 0 while this thread is inside the scope
+        int depth = 0;               // > 0 while this thread is inside the scope
+        std::uint32_t lastUse = 0;   // キャッシュ全杯時の LRU 判定用
     };
 
-    // Four entries cover the realistic case (one engine, a few domains). Overflow is
-    // not fatal: the thread registers another slot, bounded by kMaxReaders.
-    static std::array<CacheEntry, 4>& cache() noexcept
+    // ★ サポートするプロバイダはスレッドあたり 8 件まで。実用上は 1〜2 件
+    //   （engine とその domain）である。全杯した場合は下の選択規則で 1 件を差し替える。
+    static constexpr std::size_t kCacheEntries = 8;
+
+    static std::array<CacheEntry, kCacheEntries>& cache() noexcept
     {
         // NOLINT(thread-local) RT-SAFE: used only by the non-RT reader path (never from the audio
         //   thread); POD, no destructor, one cache per thread, no cross-thread sharing.
-        thread_local std::array<CacheEntry, 4> entries {};   // NOLINT(thread-local) RT-SAFE: non-RT only, POD, no destructor, per-thread
+        thread_local std::array<CacheEntry, kCacheEntries> entries {};   // NOLINT(thread-local) RT-SAFE: non-RT only, POD, no destructor, per-thread
         return entries;
+    }
+
+    // ★ 使用順の値。キャッシュはスレッド単位なので、最大値 + 1 で十分。
+    //   thread_local カウンタを持たない（LINT-AE-011）。
+    //   ★ 最大値が UINT32_MAX に達したら、次の +1 は 0 に巻き戻り、
+    //     今使った provider が最古として退避される。巻き戻り直前に
+    //     8 件の時刻を順位（1..N）に詰め直し、相対順序を保つ。
+    static std::uint32_t nextUseValue() noexcept
+    {
+        std::uint32_t maxUse = 0;
+        for (const auto& entry : cache())
+            if (entry.lastUse > maxUse)
+                maxUse = entry.lastUse;
+
+        if (maxUse != std::numeric_limits<std::uint32_t>::max())
+            return maxUse + 1u;
+
+        compactUseValues();
+        std::uint32_t compactedMax = 0;
+        for (const auto& entry : cache())
+            if (entry.lastUse > compactedMax)
+                compactedMax = entry.lastUse;
+        return compactedMax + 1u;
+    }
+
+    // ★ 巻き戻り直前の詰め直し。lastUse の昇順に 1..N を振り直し、
+    //   触らないエントリの相対順序をそのまま保つ。
+    static void compactUseValues() noexcept
+    {
+        auto& entries = cache();
+        std::array<bool, kCacheEntries> ranked {};
+        std::array<std::uint32_t, kCacheEntries> ranks {};
+        std::uint32_t nextRank = 0;
+        for (std::size_t step = 0; step < kCacheEntries; ++step)
+        {
+            std::size_t best = kCacheEntries;
+            std::uint32_t bestUse = 0;
+            for (std::size_t i = 0; i < kCacheEntries; ++i)
+            {
+                if (ranked[i])
+                    continue;
+                if (best == kCacheEntries || entries[i].lastUse < bestUse)
+                {
+                    best = i;
+                    bestUse = entries[i].lastUse;
+                }
+            }
+            if (best == kCacheEntries)
+                break;
+            ranked[best] = true;
+            ranks[best] = ++nextRank;
+        }
+        for (std::size_t i = 0; i < kCacheEntries; ++i)
+            if (ranked[i])
+                entries[i].lastUse = ranks[i];
     }
 
     static CacheEntry* find (const IReaderEpochProvider& provider) noexcept
     {
         for (auto& entry : cache())
             if (entry.provider == &provider)
+            {
+                entry.lastUse = nextUseValue();
                 return &entry;
+            }
 
         return nullptr;
+    }
+
+    // ★ 差し替え対象（最も古いエントリ）を選ぶ。depth > 0 は使用中なので対象外。
+    //   キャッシュはスレッドあたり kCacheEntries 件までで、それを超えると
+    //   最も古い provider が差し替えられる。差し替えられた provider の
+    //   スコープは fail-closed（非アクティブ）になるが、保護なしの読みは生じない。
+    //   エントリの provider ポインタは解放済みを指し得るため、逆参照しない。
+    static CacheEntry* findEvictionCandidate() noexcept
+    {
+        CacheEntry* victim = nullptr;
+        for (auto& entry : cache())
+        {
+            if (entry.provider == nullptr || entry.depth > 0)
+                continue;
+            if (victim == nullptr || entry.lastUse < victim->lastUse)
+                victim = &entry;
+        }
+        return victim;
     }
 
     static CacheEntry* findFree() noexcept
@@ -168,9 +248,11 @@ private:
                 return entry->slot;
             }
 
-            entry->provider = nullptr;     // stale entry: drop it and register again
-            entry->slot = -1;
-            entry->depth = 0;
+            // ★ WORK113 R1: ここでキャッシュを消さない。拒否の理由には、一時的な
+            //   排除（shutdown の強制解放中）も含まれる。ここで捨てると、登録が閉じた後は
+            //   再登録できず、排除が解除されても再入場できなくなる。
+            //   エントリは再登録が成功したとき、またはキャッシュが全杯したときに
+            //   差し替える（下の LRU）。
         }
 
         const int slot = (tag != nullptr) ? provider.registerReaderThreadWithTag (tag)
@@ -179,11 +261,31 @@ private:
         if (slot < 0)
             return -1;   // fail-closed: registration closed or slots exhausted
 
-        if (auto* entry = findFree())
+        if (auto* entry = find (provider))
+        {
+            // 旧 slot は不要になるが、他スレッドの slot ではないため放置する。
+            entry->slot = slot;
+            entry->depth = 1;
+            if (outDepth != nullptr) *outDepth = 1;
+        }
+        else if (auto* entry = findFree())
         {
             entry->provider = &provider;
             entry->slot = slot;
             entry->depth = 1;
+            entry->lastUse = nextUseValue();
+            if (outDepth != nullptr) *outDepth = 1;
+        }
+        else if (auto* victim = findEvictionCandidate())
+        {
+            // ★ 拒否されたエントリを保持する代わりに、キャッシュが全杯したら
+            //   最も古いエントリと差し替える。保持を続けると 4 件が埋まり、
+            //   後から登録した provider がキャッシュされず、登録閉鎖後に
+            //   再入場できなくなる。
+            victim->provider = &provider;
+            victim->slot = slot;
+            victim->depth = 1;
+            victim->lastUse = nextUseValue();
             if (outDepth != nullptr) *outDepth = 1;
         }
 

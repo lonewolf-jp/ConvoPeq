@@ -630,7 +630,10 @@ TrendSnapshot RuntimeHealthMonitor::takeSnapshot() const noexcept
         snap.pendingRetire = m_retireRouter->pendingRetireCount();
         const auto stuckInfo = m_retireRouter->detectStuckReaders(10);
         snap.readerStuckCount = stuckInfo.isStuck ? 1 : 0;
+        // ★ WORK113 R1: 活動数（exit 実行中を含む）は reader が静止していないことの判定に使う。
+        //   容量（64）との比較は depth のみで行う（活動数は exit 中を二重計上する）。
         snap.activeReaderCount = m_retireRouter->activeReaderCount();
+        snap.activeDepthReaders = m_retireRouter->activeDepthReaderCount();
         // ★ D101-9 Step 5-VI-C: retire-chain raw observations (sole raw-read site)
         snap.terminalStoreCount = m_retireRouter->terminalStoreCount();
         snap.terminalReclaimResidentCount = m_retireRouter->terminalReclaimResidentCount();
@@ -788,7 +791,11 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
                               - static_cast<int64_t>(before.maxRetireAgeUs);
     const int64_t pubDelta    = static_cast<int64_t>(now.publicationSeq)
                               - static_cast<int64_t>(before.publicationSeq);
-    const bool faultMaskIncreased = (now.activeFaultMask > before.activeFaultMask);
+    // ★ 新しく立ったビットが増加である。数値比較だと、reader (4) が消えて
+    //   retire (1) や publication (2) が同時に立つと値が下がり、新しい異常を見落として
+    //   Recovered を返し得る。消えたビットだけなら回復を阻まない。
+    const bool faultMaskIncreased =
+        (now.activeFaultMask & ~before.activeFaultMask) != 0u;
 
     // Step 1: ProgressFreeze 監視（最優先、多軸評価）
     if (now.freezeDetected) {
@@ -813,13 +820,18 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
         && (pubDelta > 0 || idleRecovered)
         && (retireTrendImproving || retireWithinLimit)
         && ageDelta <= 0
-        && now.readerStuckCount == 0 && now.activeReaderCount < 64)
+        && now.readerStuckCount == 0 && now.activeDepthReaders < 64)
         return RecoveryOutcome::Recovered;
 
     // Step 3: reader異常（Improvingより優先）
     if (now.readerStuckCount > before.readerStuckCount)
         return RecoveryOutcome::Worsening;
-    if (now.pendingRetire > 0 && now.activeReaderCount == 0 && before.activeReaderCount > 0)
+    // ★ WORK113 R1: 「reader が離脱した」ことは slot の depth で見る。活動数は exit 実行中を
+    //   含むため、baseline が exit 中の reader を掴むと、離脱していないのに Worsening になる。
+    //   また、retire が実際に減っているサンプルでは Worsening にしない（計測できた
+    //   改善を上書きしない）。
+    const bool readersDeparted = (now.activeDepthReaders == 0 && before.activeDepthReaders > 0);
+    if (now.pendingRetire > 0 && retireDelta >= 0 && readersDeparted)
         return RecoveryOutcome::Worsening;
 
     // Step 4: Worsening
@@ -827,7 +839,12 @@ RecoveryOutcome RuntimeHealthMonitor::computeTrend(
         return RecoveryOutcome::Worsening;
 
     // Step 5: Improving
-    const bool retireImproving = (retireDelta < -2);
+    // ★ reader が離脱して retire が 1〜2 減ったサンプルも改善とする。
+    //   以前は -2 を超える減少だけが対象で、その場合は Stalled に落ちて
+    //   過剰に悪化側へ進んだ。バックログが不変（retireDelta == 0）の場合は
+    //   Step 3 が先に Worsening を返すので、その強調は維持される。
+    const bool retireImproving = (retireDelta < -2)
+                               || (retireDelta < 0 && readersDeparted);
     const bool readerImproving = (now.readerStuckCount < before.readerStuckCount);
     if ((retireImproving || readerImproving) && !faultMaskIncreased)
         return RecoveryOutcome::Improving;
@@ -845,7 +862,9 @@ void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
     if (m_readerSlotRef) {
         activeCount = convo::consumeAtomic(*m_readerSlotRef, std::memory_order_acquire);
     } else if (m_retireRouter) {
-        activeCount = m_retireRouter->activeReaderCount();
+        // ★ WORK113 R1: slot 使用率は depth のみで数える（activity は exit 中を二重計上し、
+        //   90% 閾値を誤って超えさせる）。
+        activeCount = m_retireRouter->activeDepthReaderCount();
     } else {
         return;
     }
@@ -896,6 +915,13 @@ void RuntimeHealthMonitor::checkReaderSlotUsage() noexcept
     } else if (usage >= kReaderSlotCriticalThreshold) {
         emitOnTransition(m_prevReaderSlotState, MonitorState::Warning,
             HealthEvent::Severity::Warning, EVENT_READER_SLOT_USAGE,
+            activeCount, maxSlots);
+    } else {
+        // ★ WORK113 R1: 閾値を下回ったら Normal へ戻す。Error / Warning から戻る経路が
+        //    無いと、使用率が下がっても状態が固まり、updateHealthState と reader の
+        //    fault mask に古い状態が残る。emitOnTransition は Normal では通知しない。
+        emitOnTransition(m_prevReaderSlotState, MonitorState::Normal,
+            HealthEvent::Severity::Info, EVENT_READER_SLOT_USAGE,
             activeCount, maxSlots);
     }
 }

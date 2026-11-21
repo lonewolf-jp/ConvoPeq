@@ -15,7 +15,14 @@
 // 陽性対照（TSan が競合を検出できることを確認するビルド）:
 //   同じコマンドに -DTSAN_POSITIVE_CONTROL を追加する。
 // ============================================================================
+// ★ このファイルは DrainCapability::makeForTest を無条件に使うため、
+//   マクロは必須である（マクロ無しの構成はサポートしない）。
+#if ! defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+#error "TsanSubstrateRaceTests requires CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY"
+#endif
+
 #include "core/EpochDomain.h"
+#include "core/RCUReader.h"
 #include "audioengine/RetireQuarantineStore.h"
 
 #include <atomic>
@@ -351,6 +358,210 @@ void t6_quarantineStoreConcurrency()
                  store.residentCount(), static_cast<unsigned> (store.overflowCount()));
 }
 
+// ── T7: reader exit と shutdown 側観測の競合 ─────────────────────
+//   reader が enter/exit を繰り返す間に、shutdown 側の読み取り（activeReaderCount /
+//   activeDepthReaderCount / admission）と epoch 前進を同時に回す。
+//   exitReader の provider アクセスと静止判定の読み取りが競合しないことを
+//   TSan で見る。終了後に活動数が 0 に戻ることも確かめる。
+void t7_exitVsShutdownObservation()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EngineISR);
+
+    // ★ 前処理: ReaderMeasureRegistry の同名タグの枠を単スレッドで作っておく。
+    //   既存の計測レジストリは、タグを書く前に used を公開するため、
+    //   同名タグの初回 claim を複数スレッドで競合させると strncmp 嵌めで
+    //   data race になる（別 Issue で管理。ここでは T7 が目的とする競合だけを実行する）。
+    {
+        // 記録を閉じたこと（タグの登録ができたこと）を closed_ で確かめる。
+        // claim に失敗すると close されず、同名タグの初回 claim 競合が残る。
+        const std::uint64_t closedBefore =
+            convo::consumeAtomic (convo::ReaderMeasureRegistry::closed_, std::memory_order_acquire);
+        convo::RCUReader warmup (*domain);
+        if (warmup.enter())
+            warmup.exit();
+        const std::uint64_t closedAfter =
+            convo::consumeAtomic (convo::ReaderMeasureRegistry::closed_, std::memory_order_acquire);
+        const bool warmupClosed = (closedAfter == closedBefore + 1);
+        check (warmupClosed, "T7: warmup must close a measure record (tag registration)");
+        if (! warmupClosed)
+            return;   // タグが未登録のまま並行 claim を始めない（別 Issue の race を混ぜない）
+    }
+
+    std::atomic<bool> stop { false };
+    std::atomic<int> exitsDone { 0 };
+    std::atomic<int> observations { 0 };
+    std::atomic<bool> sawActivity { false };
+    std::atomic<bool> stressPhase { false };       // 並行ストレスを始めた後で true
+    std::atomic<bool> sawStressActivity { false }; // stress フェーズ中に活動を見た
+    std::atomic<int> exitWindowSamples { 0 };    // depth < activity（exit 実行中）を見た回数
+
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ 決定論的な exit 窓: 1 回だけ、depth デクリメント後の reader を止める。
+    struct ExitSeamCtx
+    {
+        std::atomic<bool> fired { false };
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+    };
+    static ExitSeamCtx seam;
+    seam.fired.store (false);
+    seam.reached.store (false);
+    seam.release.store (false);
+    convo::EpochDomain::setReaderExitSeam ([] (void* p) noexcept
+    {
+        auto* s = static_cast<ExitSeamCtx*> (p);
+        if (s == nullptr)
+            return;
+        bool expected = false;
+        if (! s->fired.compare_exchange_strong (expected, true))
+            return;
+        s->reached.store (true, std::memory_order_release);
+        while (! s->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    }, &seam);
+#endif
+
+    std::thread shutdownSide ([&]
+    {
+        while (! stop.load (std::memory_order_acquire))
+        {
+            (void) domain->publishEpoch();
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+            // ★ seam の状態を前後で確認してから、間の activity / depth を読む。
+            //   後で確認するだけだと、seam 到達前のサンプルを到達後に計上し得る。
+            const bool seamHeldBefore = seam.reached.load (std::memory_order_acquire)
+                                     && ! seam.release.load (std::memory_order_acquire);
+#endif
+            const std::uint32_t observedActivity = domain->activeReaderCount();
+            const std::uint32_t observedDepth = domain->activeDepthReaderCount();
+            // ★ チェックポイントで立つ sawActivity を、stress フェーズの証拠に流用しない。
+            //   公開はこの反復のサンプルを取り終えてから行い、
+            //   活動の観測と admission の読み取りを別の反復にまたがらせない。
+            bool sampledStressActivity = false;
+            if (observedActivity > 0)
+            {
+                sawActivity.store (true, std::memory_order_release);
+                if (stressPhase.load (std::memory_order_acquire))
+                    sampledStressActivity = true;
+            }
+            // ★ 活動しているのに depth が少ない = exit 実行中を抽出できた。
+            //   seam がパーク中のサンプルだけを計上する（到達前の偶然で
+            //   「exit 実行中を見た」ことにしない）。
+            const bool seamHeldAfter = ! seam.release.load (std::memory_order_acquire);
+            // ★ depth 0 で活動 > 0 を要件にする。activity > depth だけだと
+            //   activity 2・depth 1 でも成立し、depth デクリメント前の位置でも
+            //   チェックポイントが通ってしまう。
+            if (seamHeldBefore && seamHeldAfter && observedDepth == 0u && observedActivity > 0u)
+                exitWindowSamples.fetch_add (1, std::memory_order_release);
+            (void) domain->readerAdmissionsActive();
+            (void) domain->admissionPendingSlots();
+            // ★ この反復のサンプルを取り終えてから公開する。
+            if (sampledStressActivity)
+                sawStressActivity.store (true, std::memory_order_release);
+            (void) observations.fetch_add (1, std::memory_order_release);
+        }
+    });
+
+    // ★ exit 実行中のサンプルは、並行ストレスの偶然に頼らず、単一 reader を seam で止めて
+    //   確定的に取る。ほかの reader が同時に入場すると `activity > depth` の判定がぶれるため、
+    //   この段階では reader を 1 人だけ動かす。
+    //   ★ seam はマクロ有時だけ宣言されるので、このブロックも同じ条件で囲む。
+    //     マクロ無時は上の #else側（activity > depth）で観測する。
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    {
+        const int windowsBefore = exitWindowSamples.load (std::memory_order_acquire);
+        std::thread checkpoint ([&]
+        {
+            convo::RCUReader reader (*domain);
+            if (! reader.enter())
+                return;
+            reader.exit();   // seam で 1 回だけ止まる
+            (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
+        });
+
+        const bool seamReached = waitUntil ([&]
+        {
+            return seam.reached.load (std::memory_order_acquire);
+        }, std::chrono::milliseconds (5000));
+        check (seamReached, "T7: the exit seam must be reached");
+        if (seamReached)
+        {
+            const bool sampledWhilePaused = waitUntil ([&]
+            {
+                return exitWindowSamples.load (std::memory_order_acquire) > windowsBefore;
+            }, std::chrono::milliseconds (2000));
+            check (sampledWhilePaused,
+                   "T7: the observer must sample the paused exit (activity > depth)");
+        }
+        seam.release.store (true, std::memory_order_release);
+        checkpoint.join();
+    }
+#endif
+
+    // ★ stress フェーズの前の値。チェックポイントだけで満たさないことを固定する。
+    const int exitsBeforeStress = exitsDone.load (std::memory_order_acquire);
+    const int observationsBeforeStress = observations.load (std::memory_order_acquire);
+
+    stressPhase.store (true, std::memory_order_release);
+
+    // ★ 3 人の stress reader それぞれが 1 回は exit することを要求する。
+    //   1 人だけが動いても他の reader 経路は検証されない。
+    std::atomic<bool> workerExited[3] { {false}, {false}, {false} };
+
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 3; ++t)
+        readers.emplace_back ([&, t]
+        {
+            convo::RCUReader reader (*domain);
+            while (! stop.load (std::memory_order_acquire))
+            {
+                if (! reader.enter())
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+                reader.exit();
+                workerExited[t].store (true, std::memory_order_release);
+                (void) exitsDone.fetch_add (1, std::memory_order_relaxed);
+            }
+        });
+
+
+    // ★ observer が reader の稼働中に実際の観測を完了したことを確認してから停める。
+    //   これが無いと、observer が一度も実行されなくてもカウンタが 0 に戻るだけで PASS してしまう。
+    const bool observedWhileRunning = waitUntil ([&]
+    {
+        return observations.load (std::memory_order_acquire) > observationsBeforeStress
+            && exitsDone.load (std::memory_order_acquire) > exitsBeforeStress
+            && sawStressActivity.load (std::memory_order_acquire)
+            && workerExited[0].load (std::memory_order_acquire)
+            && workerExited[1].load (std::memory_order_acquire)
+            && workerExited[2].load (std::memory_order_acquire);
+    }, std::chrono::milliseconds (2000));
+    check (observedWhileRunning, "T7: observer must complete an iteration while readers run");
+
+    check (sawActivity.load (std::memory_order_acquire),
+           "T7: the observer must see non-zero reader activity");
+
+    stop.store (true, std::memory_order_release);
+
+    for (auto& r : readers)
+        r.join();
+    shutdownSide.join();
+
+    check (exitsDone.load() > 0, "T7: readers must complete exits");
+    check (observations.load() > 0, "T7: observer iterations must be recorded");
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+#endif
+    check (domain->activeReaderCount() == 0, "T7: activity must return to 0");
+    check (domain->activeDepthReaderCount() == 0, "T7: depth must return to 0");
+    std::printf ("T7 exit vs shutdown: exits=%d observations=%d activity=%u depth=%u\n",
+                 exitsDone.load(), observations.load(),
+                 static_cast<unsigned> (domain->activeReaderCount()),
+                 static_cast<unsigned> (domain->activeDepthReaderCount()));
+}
+
 } // namespace
 
 #if defined(TSAN_POSITIVE_CONTROL)
@@ -380,6 +591,7 @@ int main()
     t4_takeDuringEnqueue();
     t5_checkedDrainWithReaders();
     t6_quarantineStoreConcurrency();
+    t7_exitVsShutdownObservation();
 
     std::printf ("== failures=%d deleted=%d ==\n", g_failures, g_del.load());
     return g_failures == 0 ? 0 : 1;

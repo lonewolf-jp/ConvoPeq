@@ -49,6 +49,20 @@ void waitUntil (const std::atomic<bool>& flag)
         std::this_thread::yield();
 }
 
+// ★ 上限付きの待機。タイムアウトは false。
+//   チェックポイントに到達しない回帰でテストがハングしないように使う。
+bool waitUntilBounded (const std::atomic<bool>& flag, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (flag.load (std::memory_order_acquire))
+            return true;
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+    }
+    return flag.load (std::memory_order_acquire);
+}
+
 void testPublishGate()
 {
     convo::EpochDomain::EpochPublishGate gate;
@@ -87,6 +101,68 @@ void testReaderFence (convo::EpochDomain& domain)
     check (domain.enqueueRetire (&sentinel, noopDeleter, domain.currentEpoch()),
            "fence: enqueueRetire must still succeed");
     domain.drainAll();
+}
+
+//==============================================================================
+// shutdown の強制解放除外（retire drain exclusion）
+//   除外中は再入場を拒否し、解除後は従来どおり再入場できること。
+//   fence（永久）とは異なり、V11 E1 の規則を壊さないことを固定する。
+//==============================================================================
+void testRetireDrainExclusion()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+
+    const int slot = domain->registerReaderThread ("drain-exclusion");
+    check (slot >= 0, "exclusion: registerReaderThread must succeed before close");
+    if (slot < 0)
+        return;
+
+    // registerReaderThread が予約（admission）を保持しているので、そのまま enter する。
+    // 一度 exit すれば slot は inactive に戻り、reacquire 可能になる。
+    domain->enterReader (slot);
+    domain->exitReader (slot);
+
+    // ★ 実際の shutdown と同じ状態にする：新規登録は閉じ、登録済み slot の再入場は可能。
+    //   登録が開いたままだと、再入場が登録経由で成功しても差が出ない。
+    domain->closeReaderRegistration();
+
+    domain->beginRetireDrainExclusion();
+    check (domain->retireDrainExclusionActive(), "exclusion: flag must be visible");
+    check (! domain->reacquireReaderSlot (slot),
+           "exclusion: reacquireReaderSlot must be refused during the exclusion");
+    check (domain->reacquireDuringDrainExclusion() >= 1u,
+           "exclusion: refusal must be counted");
+    check (domain->readerAdmissionsActive() == 0u,
+           "exclusion: a refused reacquire must not hold an admission");
+    // ★ 拒否直後に予約が残っていないこと。後の enter が消すので、
+    //   実行を待ってから確かめると見逃してしまう。
+    check (domain->admissionPendingSlots() == 0u,
+           "exclusion: a refused reacquire must not leave a pending slot");
+
+    domain->endRetireDrainExclusion();
+    check (! domain->retireDrainExclusionActive(), "exclusion: flag must clear");
+
+    const bool reacquired = domain->reacquireReaderSlot (slot);
+    check (reacquired, "exclusion: reacquireReaderSlot must succeed after the exclusion ends");
+    if (reacquired)
+    {
+        // reacquire は slot を depth 0 で予約し、admission を保持したままである。
+        // enter せずに exit すると、admission が残って下流の静止判定を壊す。
+        domain->enterReader (slot);
+        check (domain->activeDepthReaderCount() >= 1u,
+               "exclusion: depth must be nonzero after enter");
+        domain->exitReader (slot);
+        check (domain->activeDepthReaderCount() == 0u,
+               "exclusion: depth must return to 0 after exit");
+        check (domain->readerAdmissionsActive() == 0u,
+               "exclusion: no admission must remain after exit");
+        check (domain->admissionPendingSlots() == 0u,
+               "exclusion: no pending slot must remain after exit");
+    }
+
+    // 解除後も新規登録は拒否される（close は永久、再入場だけが復帰する）。
+    check (domain->registerReaderThread ("drain-exclusion-2") == -1,
+           "exclusion: new registration must stay refused after the exclusion ends");
 }
 
 //==============================================================================
@@ -393,6 +469,190 @@ void testQuarantine()
 
 } // namespace
 
+//==============================================================================
+// ★ WORK113 R1 (2026-11-19 Owner 承認): exit 処理中（depth==0・provider 後処理が残る）に
+//   drainQueue が静止を主張しないこと。
+//   seam で depth デクリメント直後に止め、同じ構成で exit 完了後に
+//   Completed になることを対照に取る（他の条件が成立していることの証拠）。
+//==============================================================================
+void testExitInProgressBlocksDrain()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+
+    struct Seam
+    {
+        std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+    };
+
+    static Seam seam;
+    seam.fired.store (false);
+    seam.reached.store (false);
+    seam.release.store (false);
+
+    convo::EpochDomain::setReaderExitSeam ([] (void* p) noexcept
+    {
+        // ★ 1 回だけ止める（他の exit を止めない）。
+        //   seam 自体はここで解除しない（解除は join 後）。
+        auto* s2 = static_cast<Seam*> (p);
+        if (s2 == nullptr)
+            return;
+        bool expected = false;
+        if (! s2->fired.compare_exchange_strong (expected, true))
+            return;
+        s2->reached.store (true, std::memory_order_release);
+        while (! s2->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    }, &seam);
+
+    std::atomic<int> slot { -1 };
+    std::atomic<bool> entered { false };
+    std::atomic<bool> goExit { false };
+
+    std::thread reader ([&]
+    {
+        const int idx = domain->registerReaderThread ("exit-window");
+        slot.store (idx, std::memory_order_release);
+        if (idx < 0)
+            return;
+        domain->enterReader (idx);
+        entered.store (true, std::memory_order_release);
+        waitUntil (goExit);
+        domain->exitReader (idx);          // seam で depth デクリメント直後に止まる
+    });
+
+    // タイムアウト時は worker を解放して join し、seam を外してから FAIL にする。
+    auto cleanupWorker = [&]
+    {
+        goExit.store (true, std::memory_order_release);
+        seam.release.store (true, std::memory_order_release);
+        if (reader.joinable())
+            reader.join();
+        // ★ 解除は join の後。実行中の exitReader が旧 fn と nullptr の ctx を
+        //   組み合わせて呼ぶ経路を作らない。
+        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+    };
+
+    if (! waitUntilBounded (entered, std::chrono::milliseconds (2000)))
+    {
+        check (false, "exit-window: reader did not enter (registration failed or enter stalled)");
+        cleanupWorker();
+        return;
+    }
+    check (slot.load() >= 0, "exit-window: registration");
+
+    // shutdown 側の前提を整える（fence・登録閉鎖・bublisher idle）。
+    domain->engageShutdownReaderFence();
+    domain->closeReaderRegistration();
+    // ★ CI の一時停止で 50 ms の期限が過ぎると、publisher がいなくても
+    //   false になり、epochAtFence() が無効なまま drain を試してしまう。
+    //   reader 側の確認と同じ 2 秒の予算を与え、失敗したら drain を試さずに後片付ける。
+    const bool publishersIdle =
+        domain->closePublishersAndWaitIdle (std::chrono::milliseconds (2000));
+    check (publishersIdle, "exit-window: publishers must become idle");
+    if (! publishersIdle)
+    {
+        cleanupWorker();
+        return;
+    }
+
+    auto queue = domain->borrow();
+    check (queue != nullptr, "exit-window: borrow");
+    if (queue == nullptr)
+    {
+        cleanupWorker();
+        return;
+    }
+
+    // 拒否が「entry を処理しない」ことの証拠として sentinel を 1 件積む。
+    static int sentinel = 0;
+    g_deleted.store (0, std::memory_order_relaxed);
+    check (domain->enqueueRetire (&sentinel, countingDeleter, domain->currentEpoch()),
+           "exit-window: enqueue sentinel");
+
+    goExit.store (true, std::memory_order_release);
+    if (! waitUntilBounded (seam.reached, std::chrono::milliseconds (2000)))
+    {
+        check (false, "exit-window: exit seam was not reached");
+        cleanupWorker();
+        return;
+    }
+
+    // 窓の観測：depth は 0、活動数は 1 以上、admission は idle。
+    const std::uint32_t depthReaders = domain->activeDepthReaderCount();
+    const std::uint32_t activity = domain->activeReaderCount();
+    check (depthReaders == 0u, "exit-window: depth is 0 inside the window");
+    check (activity >= 1u, "exit-window: exit-in-progress is counted as activity");
+    check (domain->readerAdmissionsActive() == 0u, "exit-window: admission active is 0");
+    check (domain->admissionPendingSlots() == 0u, "exit-window: no pending admission slot");
+
+    {
+        auto cap = convo::DrainCapability::makeForTest (true, true, true, true,
+                                                        domain->epochAtFence(), 1, 1);
+        check (domain->drainQueue (*queue, std::move (cap))
+                   == convo::EpochDomain::DrainResult::ReadersNotQuiescent,
+               "exit-window: checked drain must fail while exit is in progress");
+    }
+    check (g_deleted.load() == 0, "exit-window: rejected drain must not run the deleter");
+    check (queue->sizeApprox() == 1u, "exit-window: rejected drain must retain the entry");
+
+    // exit を完了させる。同じ構成で Completed になれば、上の拒否は exit カウンタが理由だ。
+    seam.release.store (true, std::memory_order_release);
+    reader.join();
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+
+    check (domain->activeReaderCount() == 0u, "exit-window: activity returns to 0 after exit");
+
+    {
+        auto cap = convo::DrainCapability::makeForTest (true, true, true, true,
+                                                        domain->epochAtFence(), 1, 1);
+        check (domain->drainQueue (*queue, std::move (cap))
+                   == convo::EpochDomain::DrainResult::Completed,
+               "exit-window: checked drain succeeds after exit completes");
+    }
+    check (g_deleted.load() == 1, "exit-window: completed drain must run the deleter exactly once");
+    check (queue->sizeApprox() == 0u, "exit-window: queue must be empty after the drain");
+}
+
+//==============================================================================
+// ★ WORK113 R1: exitReader の早期 return（previousDepth == 0 / > 1）でも
+//   exit カウンタが元に戻ること。
+//   差（activeReaderCount - activeDepthReaderCount）が exit 実行中の件数である。
+//==============================================================================
+void testExitCounterRestoredOnEarlyReturns()
+{
+    auto domain = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+
+    const int idx = domain->registerReaderThread ("early-return");
+    check (idx >= 0, "early: registration");
+    if (idx < 0)
+        return;
+
+    auto exitInProgress = [&domain]() -> std::uint32_t
+    {
+        const std::uint32_t activity = domain->activeReaderCount();
+        const std::uint32_t depthReaders = domain->activeDepthReaderCount();
+        return activity > depthReaders ? activity - depthReaders : 0u;
+    };
+
+    domain->enterReader (idx);          // depth 1
+    domain->enterReader (idx);          // depth 2（ネスト）
+    check (domain->activeDepthReaderCount() == 1u, "early: nested reader counts once");
+
+    domain->exitReader (idx);           // previousDepth == 2 → 早期 return
+    check (exitInProgress() == 0u, "early: nested exit restores the counter");
+    check (domain->activeReaderCount() == 1u, "early: nested exit keeps activity 1");
+
+    domain->exitReader (idx);           // previousDepth == 1 → 通常終了
+    check (exitInProgress() == 0u, "early: outer exit restores the counter");
+    check (domain->activeReaderCount() == 0u, "early: activity returns to 0");
+
+    domain->exitReader (idx);           // previousDepth == 0 → underflow の早期 return
+    check (exitInProgress() == 0u, "early: underflow exit restores the counter");
+    check (domain->activeReaderCount() == 0u, "early: activity stays 0 after underflow");
+}
+
 int main()
 {
     testPublishGate();
@@ -404,6 +664,9 @@ int main()
 
     testAdmissionRace();
     testReservedNotEntered();
+    testExitInProgressBlocksDrain();
+    testExitCounterRestoredOnEarlyReturns();
+    testRetireDrainExclusion();
     testDrainContract();
     testQuarantine();
 

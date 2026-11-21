@@ -435,7 +435,19 @@ void AudioEngine::releaseResources()
     }
 
     // ★★★ PR2: Quarantine 全スロット強制解放（シャットダウン専用）
-    //    この時点で GracefulDrain が activeReaderCount==0 を確認済み（※ 前提：実行時確認は未検証。別確認項目）
+    //    ★ WORK113 R1: 直前の GracefulDrain がタイムアウトした場合、この時点で reader が
+    //    残っている可能性がある。Q/E/T の強制解放は epoch 非依存なので、参照中の World / DSP を
+    //    解放し得る。Owner 指示（2026-11-18）の fail-closed（所有権を保持し、解放しない）に
+    //    合わせ、reader の活動が 0 のときだけ解放する。
+    //    ★ 活動数だけでは足りない。予約済みで未 enter の slot は depth 0・活動数 0 だが、
+    //      チェックの後に enter してくる。admission（実行中・予約済み）も idle であることを
+    //      readerActivityZeroNonRt() でまとめて確認する。
+    // ★ 強制解放の admission 待ちは 2 回のパスで合計する。予約が残っている場合に
+    //   同じ待ちを二度しないよう、期限を共有する。
+    const auto drainAdmissionDeadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds (convo::consumeAtomic (shutdownWaitTimeoutMs_,
+                                                           std::memory_order_acquire));
+
     {
         // ★ Phase 3: EpochDomain の Reader quarantine を全解除
         m_retireRouter->unquarantineAllReaders();
@@ -444,10 +456,27 @@ void AudioEngine::releaseResources()
         //   retire enqueue 失敗で退避されたエントリを shutdown 時に確定解放する。
         const auto quarantinedRetireResident = m_retireRouter->quarantineResidentCount();
         if (quarantinedRetireResident > 0) {
-            diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
-                    + juce::String(static_cast<int64>(quarantinedRetireResident))
-                    + " -- performing shutdown drain");
-            m_retireRouter->drainAllQuarantineStore();
+            RetireDrainExclusionScope drainExclusion (m_epochDomain);
+            (void) m_epochDomain.waitForReaderAdmissionsUntil (drainAdmissionDeadline);
+            if (readerActivityZeroNonRt()) {
+                diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
+                        + juce::String(static_cast<int64>(quarantinedRetireResident))
+                        + " -- performing shutdown drain");
+                m_retireRouter->drainAllQuarantineStore();
+            } else {
+                // fail-closed: reader の活動または admission が残るため所有権を保持する。
+                diagLog("[DIAG] releaseResources: retireQuarantineStore resident="
+                        + juce::String(static_cast<int64>(quarantinedRetireResident))
+                        + " -- readers or admissions remain (activity="
+                        + juce::String(static_cast<int>(m_retireRouter->activeReaderCount()))
+                        + " pendingSlots="
+                        + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots()))
+                        + " admissions="
+                        + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
+                        + " drainExclusion="
+                        + juce::String(static_cast<int>(m_epochDomain.retireDrainExclusionActive() ? 1 : 0))
+                        + "), skipping shutdown drain (fail-closed)");
+            }
         }
 
         // F-2 (2026-10-25): last chance to finish quarantine-slot destruction that was
@@ -618,8 +647,40 @@ void AudioEngine::releaseResources()
     //   を強制 drain し、Terminal 残留 World のリークを防ぐ。stuck reader が残る場合は
     //   UAF 回避のため強制 drain をスキップし、epoch-gated drain（waitForDrain 内の
     //   drainTerminalReclaim）に委ねる。
-    if (m_retireRouter->activeReaderCount() == 0)
-        m_retireRouter->drainAllQuarantineStore();
+    //   ★ 活動数だけでなく admission（実行中・予約済み）も idle であることを要求する。
+    //   ★ 除外中は新しい再入場が始まらないため、確認した集合が解放まで増えない。
+    // ★ 対象が空なら待たない。admission の予約を持った reader が止まっていると、
+    //   待つ対象が無いのに予算（既定 5 秒）を使い切ることになる。
+    const bool anyQuarantineResident =
+        m_retireRouter->quarantineResidentCount() > 0
+        || m_retireRouter->emergencyQuarantineResidentCount() > 0
+        || m_retireRouter->terminalReclaimResidentCount() > 0
+        || m_retireRouter->terminalDeferredResidentCount() > 0
+        || m_retireRouter->terminalRetryableResidentCount() > 0;
+    if (anyQuarantineResident)
+    {
+        RetireDrainExclusionScope drainExclusion (m_epochDomain);
+        // ★ 期限は先の強制解放と共有する。残りが 0 なら待たずに再確認だけ行う。
+        if (std::chrono::steady_clock::now() < drainAdmissionDeadline)
+            (void) m_epochDomain.waitForReaderAdmissionsUntil (drainAdmissionDeadline);
+        if (readerActivityZeroNonRt())
+        {
+            m_retireRouter->drainAllQuarantineStore();
+        }
+        else
+        {
+            // ★ #227: 非静止で保持したことを必ず残す（ここでは Q/E が空でも
+            //   world clear 後の Terminal に World が残り得る）。
+            diagLog("[DIAG] releaseResources: final quarantine drain skipped (fail-closed) -- activity="
+                    + juce::String(static_cast<int>(m_retireRouter->activeReaderCount()))
+                    + " admissions="
+                    + juce::String(static_cast<int>(m_epochDomain.readerAdmissionsActive()))
+                    + " pendingSlots="
+                    + juce::String(static_cast<int>(m_epochDomain.admissionPendingSlots()))
+                    + " terminalResident="
+                    + juce::String(static_cast<int64>(m_retireRouter->terminalReclaimResidentCount())));
+        }
+    }
 
     // ★ D162-2-B: 最終 active/fading DSPCore の破壊は published world clear の後に行う。
     //   world (dspProjection/topology) が DSPCore* を保持したまま先に破壊すると、
@@ -634,8 +695,12 @@ void AudioEngine::releaseResources()
     //   EBR destroy は dtor body 内 D5/D8 drain で digest される（INV-D162-8 適合）。
     {
         // V-11 §10.6-2 (2026-10-26): handle ベースの所有権移転。
-        //   slot は上で quiescence permit により既に Reclaimed なので、retire()/reclaim() は
-        //   呼ばない（Retired への戻しと free list の二重 push を避ける）。
+        //   slot の状態は上の tryShutdownQuiescentReclaim の結果で分かれる。
+        //     - permit が通った場合: 既に Reclaimed（free list に返却済み）。
+        //     - reject された場合: Retired のまま。この後の
+        //       destroyDSPCoreNode → invalidateForDestroy が DestroyPending 経由で Reclaimed にし、
+        //       free list へ返す（ここで reclaim() を呼ぶと二重 push になる）。
+        //   どちらの場合も retire()/reclaim() をここでは呼ばない。
         DSPLifetimeManager lifetimeMgrForFinalDSP(*this);
         if (!activeHandle.isNull())
         {

@@ -13,6 +13,32 @@
 namespace convo {
 namespace isr {
 
+namespace
+{
+// ★ テスト専用: ルーターの破棄を 1 インスタンス単位で観測するための登録。
+//   プロセス全体の破棄回数だけでは、別の engine の破棄を拾ってしまう。
+std::atomic<const ISRRetireRouter*> g_destructionProbeTarget { nullptr };
+std::atomic<std::atomic<bool>*> g_destructionProbeFlag { nullptr };
+} // namespace
+
+ISRRetireRouter::~ISRRetireRouter()
+{
+    // ★ テスト専用: 登録されたインスタンスのときだけフラグを立てる。
+    if (g_destructionProbeTarget.load (std::memory_order_relaxed) == this)
+    {
+        auto* fired = g_destructionProbeFlag.load (std::memory_order_relaxed);
+        if (fired != nullptr)
+            fired->store (true, std::memory_order_relaxed);
+    }
+}
+
+void ISRRetireRouter::armDestructionProbeForTest (const ISRRetireRouter* target,
+                                                  std::atomic<bool>* fired) noexcept
+{
+    g_destructionProbeTarget.store (target, std::memory_order_relaxed);
+    g_destructionProbeFlag.store (fired, std::memory_order_relaxed);
+}
+
 //============================================================================
 // TerminalReclaimAuthority — implementation
 //============================================================================
@@ -358,6 +384,12 @@ uint32_t ISRRetireRouter::activeReaderCount() const noexcept
 {
     assert(provider_ != nullptr);
     return provider_->activeReaderCount();
+}
+
+uint32_t ISRRetireRouter::activeDepthReaderCount() const noexcept
+{
+    assert(provider_ != nullptr);
+    return provider_->activeDepthReaderCount();
 }
 
 uint64_t ISRRetireRouter::currentEpoch() const noexcept

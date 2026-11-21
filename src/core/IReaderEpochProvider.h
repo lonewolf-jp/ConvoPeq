@@ -78,8 +78,29 @@ public:
     /** Get the current global epoch. */
     virtual uint64_t currentEpoch() const noexcept = 0;
 
-    /** Count of active (non-zero depth) reader slots. */
+    /** Conservative reader activity count.
+
+     *  Number of slots with non-zero depth plus the readers whose exitReader() is still
+     *  running (they have already decremented depth but still touch provider state).
+     *  This is NOT the number of readers: a reader that is exiting can be counted twice.
+     *  Use it only for quiescence decisions (zero or not).
+     *
+     *  A zero value alone does NOT establish quiescence. A slot that is reserved but not
+     *  yet entered has depth 0 and is not counted here, yet it can still enter afterwards.
+     *  Callers must (a) exclude new admissions for the interval they care about, and
+     *  (b) require the in-flight admission count (admission gate) and the
+     *  reserved-but-not-entered slot count to be zero as well. AudioEngine's
+     *  readerActivityZeroNonRt() and the shutdown drain exclusion implement exactly this;
+     *  a bare activeReaderCount() == 0 must not be used to authorise a release.
+     */
     virtual uint32_t activeReaderCount() const noexcept = 0;
+
+    /** Depth-only count of reader slots (excludes readers still in exitReader()).
+     *  Use this for slot-occupancy telemetry. Quiescence must use activeReaderCount().
+     *  Default implementation is the conservative activity count (fail-safe for
+     *  providers that do not separate the two).
+     */
+    virtual uint32_t activeDepthReaderCount() const noexcept { return activeReaderCount(); }
 
     /** Maximum number of reader slots available. */
     virtual int readerCapacity() const noexcept = 0;

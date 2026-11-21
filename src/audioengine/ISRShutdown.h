@@ -274,7 +274,8 @@ public:
         bool allProducersJoined{false};
         // Q3: ReaderRegistrationClosed（EpochDomain::readerRegistrationClosed()）
         bool readerRegistrationClosed{false};
-        // Q4: ActiveReaders == 0（ISRRetireRouter::activeReaderCount() == 0）
+        // Q4: reader 活動 0（depth>0 + exit 実行中 + admission 実行中 + 予約済み slot 0）。
+        //     値は AudioEngine::readerActivityZeroNonRt() が作る。
         bool activeReadersZero{false};
         // Q5: EpochSettled — EpochQuiescenceEvidence（H.11.13.3）。
         //   bool 単独ではなく epoch / registration / active reader の観測束で受け取り、

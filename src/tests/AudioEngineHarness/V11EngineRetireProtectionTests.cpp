@@ -24,6 +24,7 @@
 
 #include "AudioEngineHarness.h"
 #include "DeferredPublicationTestAccess.h"
+#include "audioengine/ISRRetireRouter.h"
 
 #include <atomic>
 #include <chrono>
@@ -91,6 +92,13 @@ void v11eSentinelDeleter(void* p) noexcept
 {
     ++g_v11eReclaimCalls;
     g_v11eLastReclaimed = p;
+}
+
+// ★ DQ-W3: exit 停止中の teardown が強制解放していないことを見るための計数。
+std::atomic<int> g_exitWindowDrainDeletes { 0 };
+void exitWindowDrainDeleter (void* /*p*/) noexcept
+{
+    g_exitWindowDrainDeletes.fetch_add (1, std::memory_order_relaxed);
 }
 
 bool checkEngineLevelProtection()
@@ -3081,6 +3089,29 @@ public:
         return engine.finalizeAndDrainRetireQueueNonRt();
     }
 
+    // ★ WORK113 R1: Q4（proof の入力）が使う単一判定を、engine の実装のまま読む。
+    static bool readerActivityZero (AudioEngine& engine) noexcept
+    {
+        return engine.readerActivityZeroNonRt();
+    }
+
+    // ★ WORK113 R1: プロセス寿命へ移した reader 基盤の累計（保持経路の観測）。
+    static int abandonedReaderSubstrates() noexcept
+    {
+        return AudioEngine::abandonedReaderSubstratesForTest();
+    }
+
+    static int engineInstanceCount() noexcept
+    {
+        return AudioEngine::engineInstanceCountForTest();
+    }
+
+    // ★ WORK113 R1: 診断索引が満杯した回数（実体は保持される）。
+    static int abandonedSubstrateOverflows() noexcept
+    {
+        return AudioEngine::abandonedSubstrateOverflowForTest();
+    }
+
     static std::size_t deferredResident (AudioEngine& engine) noexcept
     {
         return engine.deferredDestroyResidentCount();
@@ -4437,6 +4468,542 @@ bool checkCapabilityIssuedWithFullFallback()
     return ok;
 }
 
+//==============================================================================
+// ★ WORK113 (2026-11-19 Owner 指示): reader exit の途中で shutdown が quiescence を
+//   判定できるかを、決定的な seam で観測する。[DQ-W1]
+//   EpochDomain::exitReader() は slot.depth を 0 にした後も slot の診断・epoch・
+//   quarantineFlags にアクセスする。その間に ~AudioEngine が静止判定を
+//   行うと、activeReaderCount()==0 と isInside()==false になり得る。
+//   ここでは engine を破棄せず、静止判定の入力が揃うことだけを確認する（UAF を避ける）。
+//==============================================================================
+bool checkReaderExitQuiescenceWindow()
+{
+    bool ok = true;
+
+    struct Seam
+    {
+        std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+        std::thread::id expectedTid {};         // 止める対象（worker）のスレッド
+        std::atomic<bool> armed { false };      // worker が exit する直前に立てる
+    };
+
+    static Seam seam;
+    seam.fired.store (false);
+    seam.reached.store (false);
+    seam.release.store (false);
+    seam.armed.store (false);
+    seam.expectedTid = std::thread::id();
+
+    auto seamFn = [] (void* ctx) noexcept
+    {
+        // ★ 1 回だけ止める（~AudioEngine や他の reader の exit は止めない）。
+        //   seam 自体はここで解除しない。解除と競合すると、旧関数ポインタと
+        //   nullptr の ctx の組で呼ばれる経路ができる。解除は join 後に行う。
+        auto* s = static_cast<Seam*> (ctx);
+        if (s == nullptr)
+            return;
+        // ★ この seam は worker の exit だけを止める。engine が保有する他の reader の exit を
+        //   止めると、観測する窓が別の reader のものになり判定がぶれる。
+        if (! s->armed.load (std::memory_order_acquire)
+            || std::this_thread::get_id() != s->expectedTid)
+            return;
+        bool expected = false;
+        if (! s->fired.compare_exchange_strong (expected, true))
+            return;
+        s->reached.store (true, std::memory_order_release);
+        while (! s->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    };
+
+    auto engine = std::make_unique<AudioEngine>();
+    auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+    auto* routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+    if (domainPtr == nullptr || routerPtr == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-W1-1] FAIL: engine substrate is null\n");
+        return false;
+    }
+
+    convo::EpochDomain::setReaderExitSeam (seamFn, &seam);
+
+    std::atomic<convo::RCUReader*> readerPtr { nullptr };
+    std::atomic<bool> entered { false };
+    // ★ enter() が戻って失敗したときだけ立つ。
+    //   enter 実行中（activity が先に非 0 になる）とは区別する。
+    std::atomic<bool> entryFailed { false };
+    std::atomic<bool> exitDone { false };
+
+    std::thread worker ([&]
+    {
+        convo::RCUReader reader (*domainPtr);
+        readerPtr.store (&reader, std::memory_order_release);
+        const bool ok = reader.enter();
+        entered.store (ok, std::memory_order_release);
+        // ★ enter に失敗した場合は exit を呼ばない（depth は既に 0に戻っている）。
+        //   失敗は enter が戻ってからだけ公開する（待ち側が実行中と誤判しない）。
+        if (! ok)
+        {
+            entryFailed.store (true, std::memory_order_release);
+            return;
+        }
+        // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
+        while (! seam.armed.load (std::memory_order_acquire))
+            std::this_thread::yield();
+        readerPtr.store (nullptr, std::memory_order_release);   // 以降は isInside だけを読む
+        reader.exit();
+        exitDone.store (true, std::memory_order_release);
+    });
+
+    // seam をこの worker の exit に限定する。
+    seam.expectedTid = worker.get_id();
+    seam.armed.store (true, std::memory_order_release);
+
+    // ★ seam 到達を 1 つの期限で待つ。
+    //   activity は enter 実行中にも非 0 になるため、打ち切り条件には使わない。
+    //   打ち切りは「enter が戻って失敗したとき（entryFailed）だけ。
+    const auto seamDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
+    while (std::chrono::steady_clock::now() < seamDeadline
+           && ! seam.reached.load (std::memory_order_acquire)
+           && ! entryFailed.load (std::memory_order_acquire))
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+
+    const bool reached = seam.reached.load (std::memory_order_acquire);
+    if (! reached)
+    {
+        std::fprintf(stderr, "[DQ-W1-2] FAIL: read exit seam was not reached\n");
+        ok = false;
+    }
+
+    // ここが実測する窓。
+    // 修正後は activeReaderCount() が exit 処理中を含むため、
+    // depth は 0 でも活動数は 1 以上になる（これが修正の要点）。
+    const std::uint32_t depthReaders = domainPtr->activeDepthReaderCount();
+    const std::uint32_t activity = routerPtr->activeReaderCount();
+    const std::uint32_t exiting = activity > depthReaders ? activity - depthReaders : 0u;
+    const std::uint32_t admissionsActive = domainPtr->readerAdmissionsActive();
+    const std::uint32_t admissionPending = domainPtr->admissionPendingSlots();
+    const bool exitFinished = exitDone.load (std::memory_order_acquire);
+
+    if (exitFinished)
+    {
+        std::fprintf(stderr, "[DQ-W1-3] FAIL: exit finished before the seam (window lost)\n");
+        ok = false;
+    }
+    if (depthReaders != 0)
+    {
+        std::fprintf(stderr, "[DQ-W1-4] FAIL: depth readers=%u inside the window\n",
+                     static_cast<unsigned> (depthReaders));
+        ok = false;
+    }
+    if (exiting < 1)
+    {
+        std::fprintf(stderr, "[DQ-W1-5] FAIL: exit-in-progress not counted (activity=%u depth=%u)\n",
+                     static_cast<unsigned> (activity), static_cast<unsigned> (depthReaders));
+        ok = false;
+    }
+    if (admissionsActive != 0 || admissionPending != 0)
+    {
+        std::fprintf(stderr, "[DQ-W1-6] FAIL: admission not idle (active=%u pending=%u)\n",
+                     static_cast<unsigned> (admissionsActive),
+                     static_cast<unsigned> (admissionPending));
+        ok = false;
+    }
+
+    // Q4（proof の入力）が false になること。
+    if (ShutdownHoldTestAccess::readerActivityZero (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-7] FAIL: Q4 (activeReadersZero) is true inside the window\n");
+        ok = false;
+    }
+
+    // proof → capability → checked drain の前提を整える。準備自体の成功を必須にする
+    //   （publisher 停止のタイムアウトなど、reader 以外の理由で拒否される状態を除外する）。
+    const bool prepared = ShutdownHoldTestAccess::prepareTerminalShutdownForDrain (*engine);
+    if (! prepared)
+    {
+        std::fprintf(stderr, "[DQ-W1-8] FAIL: terminal shutdown preparation failed\n");
+        ok = false;
+    }
+    else if (ShutdownHoldTestAccess::readerActivityZero (*engine))
+    {
+        // ★ 準備後（registration 閉鎖 + reader fence 済み）でも、seam 保持中は Q4 が false で
+        //   あること。ここを見ないと「fence までは false だが、fence 後は exit 活動を
+        //   無視する」退行を見逃す。
+        std::fprintf(stderr, "[DQ-W1-8b] FAIL: Q4 is true after preparation while the seam is held\n");
+        ok = false;
+    }
+    if (ShutdownHoldTestAccess::runCheckedDrain (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-9] FAIL: checked drain completed inside the window\n");
+        ok = false;
+    }
+
+    // seam を放して exit を完了させる（engine は破棄しない）
+    seam.release.store (true, std::memory_order_release);
+    worker.join();
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+
+    if (! entered.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W1-11] FAIL: reader.enter() failed\n");
+        ok = false;
+    }
+    if (! exitDone.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W1-12] FAIL: exit did not complete after the seam\n");
+        ok = false;
+    }
+    // exit 完了後（admission も idle）は Q4 が true に戻ること。
+    if (! ShutdownHoldTestAccess::readerActivityZero (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-12b] FAIL: Q4 is still false after the exit completed "
+                             "(activity=%u pendingSlots=%u admissions=%u)\n",
+                     static_cast<unsigned> (routerPtr->activeReaderCount()),
+                     static_cast<unsigned> (domainPtr->admissionPendingSlots()),
+                     static_cast<unsigned> (domainPtr->readerAdmissionsActive()));
+        ok = false;
+    }
+
+    // 同じ fixture で checked drain が完了すること。これで、上の拒否の理由が
+    // 「exit 中の活動数」だけだったことを切り分けられる。
+    if (! ShutdownHoldTestAccess::runCheckedDrain (*engine))
+    {
+        std::fprintf(stderr, "[DQ-W1-13] FAIL: checked drain did not complete after the exit\n");
+        ok = false;
+    }
+
+    if (routerPtr->activeReaderCount() != 0)
+    {
+        std::fprintf(stderr, "[DQ-W1-14] FAIL: activity not released after exit (%u)\n",
+                     static_cast<unsigned> (routerPtr->activeReaderCount()));
+        ok = false;
+    }
+
+    if (ok)
+        std::printf ("[DQ-W1] exit window: PASS (depth=%u activity=%u exiting=%u; "
+                     "Q4 false, checked drain refused inside the window and completed after the exit)\n",
+                     static_cast<unsigned> (depthReaders),
+                     static_cast<unsigned> (activity),
+                     static_cast<unsigned> (exiting));
+    return ok;
+}
+
+//==============================================================================
+// ★ WORK113 R1 (2026-11-19 Owner 承認): 破壊的プローブ。
+//   reader が exit の途中で止まっている間に ~AudioEngine を実行する。
+//   修正前は静止判定が成立して基盤を破棄し、再開した exitReader が解放済み slot に
+//   書き込む（ASan で UAF）。修正後は基盤がプロセス寿命へ移され、exit は正常完了する。
+//==============================================================================
+bool checkReaderExitShutdownRace()
+{
+    bool ok = true;
+
+    struct Seam
+    {
+        std::atomic<bool> fired { false };      // 1 回だけ止めるためのフラグ
+        std::atomic<bool> reached { false };
+        std::atomic<bool> release { false };
+        std::thread::id expectedTid {};         // 止める対象（worker）のスレッド
+        std::atomic<bool> armed { false };      // worker が exit する直前に立てる
+    };
+
+    static Seam seam;
+    seam.fired.store (false);
+    seam.reached.store (false);
+    seam.release.store (false);
+    seam.armed.store (false);
+    seam.expectedTid = std::thread::id();
+
+    auto seamFn = [] (void* ctx) noexcept
+    {
+        // ★ 1 回だけ止める（~AudioEngine や他の reader の exit は止めない）。
+        //   seam 自体はここで解除しない。解除と競合すると、旧関数ポインタと
+        //   nullptr の ctx の組で呼ばれる経路ができる。解除は join 後に行う。
+        auto* s = static_cast<Seam*> (ctx);
+        if (s == nullptr)
+            return;
+        // ★ この seam は worker の exit だけを止める。engine が保有する他の reader の exit を
+        //   止めると、観測する窓が別の reader のものになり判定がぶれる。
+        if (! s->armed.load (std::memory_order_acquire)
+            || std::this_thread::get_id() != s->expectedTid)
+            return;
+        bool expected = false;
+        if (! s->fired.compare_exchange_strong (expected, true))
+            return;
+        s->reached.store (true, std::memory_order_release);
+        while (! s->release.load (std::memory_order_acquire))
+            std::this_thread::yield();
+    };
+
+    const int abandonedBefore = ShutdownHoldTestAccess::abandonedReaderSubstrates();
+    const int overflowsBefore = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+    // ★ 診断索引が満杯して overflow 側で保持されると、保持されたものを特定できない。
+    //   そこでこの engine の router に破棄フラグを登録し、overflow 側でも
+    //   同じ router が生存したままであることを固定する（他のインスタンスの
+    //   破棄では立たない）。
+    std::atomic<bool> routerDestroyed { false };
+    // ★ overflow 側では記録が残らないため、domain の存甘も独立して確認する。
+    //   router だけを見ると、router を保持して domain だけを破棄する退行を見逃す。
+    std::atomic<bool> domainDestroyed { false };
+    const int instancesBefore = ShutdownHoldTestAccess::engineInstanceCount();
+
+    auto engine = std::make_unique<AudioEngine>();
+    // ★ タイムアウトはバウンド付きで長めに取る。50 ms だと、待機中に
+    //   スレッドが 50 ms 以上デスケジュールされただけで idle の待機がタイムアウトし、
+    //   保持の理由が exit であることを誤判する。graceful drain の遅延は短いままにする。
+    ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 500);
+    auto* domainPtr = ShutdownHoldTestAccess::epochDomainPtr (*engine);
+    auto* routerPtr = ShutdownHoldTestAccess::retireRouter (*engine);
+    if (domainPtr == nullptr || routerPtr == nullptr)
+    {
+        std::fprintf(stderr, "[DQ-W3-1] FAIL: engine substrate is null\n");
+        return false;
+    }
+    convo::isr::ISRRetireRouter::armDestructionProbeForTest (routerPtr, &routerDestroyed);
+    convo::EpochDomain::armDestructionProbeForTest (domainPtr, &domainDestroyed);
+
+    // ★ 早期リターンを含む全経路で解除する。フラグはこの関数のローカルなので、
+    //   戻った後に別の router が同じアドレスで破棄されても書かれないようにする。
+    struct DestructionProbeGuard
+    {
+        ~DestructionProbeGuard()
+        {
+            convo::isr::ISRRetireRouter::armDestructionProbeForTest (nullptr, nullptr);
+            convo::EpochDomain::armDestructionProbeForTest (nullptr, nullptr);
+        }
+    };
+    const DestructionProbeGuard destructionProbeGuard;
+
+    convo::EpochDomain::setReaderExitSeam (seamFn, &seam);
+
+    std::atomic<bool> entered { false };
+    // ★ enter() が戻って失敗したときだけ立つ（実行中とは区別する）。
+    std::atomic<bool> entryFailed { false };
+    std::atomic<bool> exitDone { false };
+
+    // ★ engine が使う provider（ISRRetireRouter）で reader を作る。EpochDomain を直接使うと、
+    //   domain は存命しても router が破棔される場合を検出できない。
+    auto& workerProvider = ShutdownHoldTestAccess::readerProvider (*engine);
+
+    std::thread worker ([&]
+    {
+        convo::RCUReader reader (workerProvider);
+        const bool ok = reader.enter();
+        entered.store (ok, std::memory_order_release);
+        // ★ enter に失敗した場合は exit を呼ばない（depth は既に 0に戻っている）。
+        //   失敗は enter が戻ってからだけ公開する（待ち側が実行中と誤判しない）。
+        if (! ok)
+        {
+            entryFailed.store (true, std::memory_order_release);
+            return;
+        }
+        // ★ seam を armed にしてから exit する。これで worker の exit だけが止まる。
+        while (! seam.armed.load (std::memory_order_acquire))
+            std::this_thread::yield();
+        reader.exit();
+        exitDone.store (true, std::memory_order_release);
+    });
+
+    // seam をこの worker の exit に限定する。
+    seam.expectedTid = worker.get_id();
+    seam.armed.store (true, std::memory_order_release);
+
+    // ★ seam 到達を 1 つの期限で待つ。打ち切りは enter 失敗のみ。
+    const auto seamDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds (2000);
+    while (std::chrono::steady_clock::now() < seamDeadline
+           && ! seam.reached.load (std::memory_order_acquire)
+           && ! entryFailed.load (std::memory_order_acquire))
+        std::this_thread::sleep_for (std::chrono::microseconds (100));
+
+    if (! seam.reached.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-2] FAIL: exit seam was not reached\n");
+        seam.release.store (true, std::memory_order_release);
+        worker.join();
+        convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+        return false;
+    }
+
+    // ★ 保持の理由が「exit 実行中の reader」だけに絞られることを確かめるため、
+    //   publisher の idle 待ちタイムアウトと admission の状態を前後で比べる。
+    //   どちらかが原因でも基盤は保持されるため、これを見ないと
+    //   別の理由で PASS し得る。
+    // ★ reset 後は domain が破棄されている可能性があるため、タイムアウトは
+    //   プロセス定数で前後を比べる。
+    const int publishIdleFailuresBefore = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    // ★ admission の待ちは、期限切れなら idle でも false になる。タイムアウトで保持された
+    //   場合は、exit 実行中の reader が理由ではないため、この計数を前後で比べる。
+    const int admissionIdleFailuresBefore = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
+    const std::uint32_t admissionsBeforeDestroy = domainPtr->readerAdmissionsActive();
+    const std::uint32_t pendingSlotsBeforeDestroy = domainPtr->admissionPendingSlots();
+
+    // ★ 破壊前の状態を固定する。depth 0 かつ活動数 > 0（exit 実行中）でなければ、
+    //   DQ-W3 は「exit 実行中の破棄」を検証していない（既存の active-reader hold 経路を
+    //   通るだけになる）。状態が違う場合は破棄せずに片付ける。
+    {
+        const std::uint32_t depthBeforeDestroy = domainPtr->activeDepthReaderCount();
+        const std::uint32_t activityBeforeDestroy = routerPtr->activeReaderCount();
+        if (depthBeforeDestroy != 0 || activityBeforeDestroy == 0)
+        {
+            std::fprintf(stderr, "[DQ-W3-2b] FAIL: unexpected state before destruction "
+                                 "(depth=%u activity=%u)\n",
+                         static_cast<unsigned> (depthBeforeDestroy),
+                         static_cast<unsigned> (activityBeforeDestroy));
+            seam.release.store (true, std::memory_order_release);
+            worker.join();
+            convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+            return false;
+        }
+    }
+
+    // ★ exit 停止中に強制解放しないことを固定する。future epoch の sentinel は
+    //   通常の epoch 回収では対象外なので、deleter が 1 回でも走れば
+    //   強制解放した証拠になる（保持のみなら 0 回）。
+    g_exitWindowDrainDeletes.store (0, std::memory_order_relaxed);
+    // ★ deleter 0 回だけでは、queue を deleter なしで捨てた場合を見逃す。
+    //   保持されたことを quarantine の増分でも確認する。
+    const auto quarantineBefore = convo::EpochDomain::quarantineCount();
+    const auto quarantinePendingBefore = convo::EpochDomain::quarantinePendingEntries();
+    {
+        static int exitWindowSentinel = 0;
+        if (! domainPtr->enqueueRetire (&exitWindowSentinel, exitWindowDrainDeleter,
+                                        domainPtr->currentEpoch() + 1000000ull))
+        {
+            std::fprintf(stderr, "[DQ-W3-3h] FAIL: future-epoch sentinel enqueue failed\n");
+            ok = false;
+        }
+    }
+
+    // ★ ここが破壊的な操作：exit 実行中に engine を破棄する。
+    engine.reset();
+
+    // ★ router が破棄されていないこと（overflow 側でも確認する）。
+    //   件数の増分だけでは、保持されたのが domain だけで router が
+    //   破棄された退行を見逃す。この計数は破棄後のオブジェクトを
+    //   参照しないため、生存を判定できる。
+    if (routerDestroyed.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-3f] FAIL: retire router was destroyed during teardown\n");
+        ok = false;
+    }
+    if (domainDestroyed.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-3g] FAIL: epoch domain was destroyed during teardown\n");
+        ok = false;
+    }
+    // ★ 停止中の exit に対して強制解放していないこと（future epoch は回収対象外）。
+    if (g_exitWindowDrainDeletes.load (std::memory_order_relaxed) != 0)
+    {
+        std::fprintf(stderr, "[DQ-W3-3i] FAIL: teardown force-reclaimed a future-epoch entry "
+                             "(deletes=%d)\n",
+                     g_exitWindowDrainDeletes.load (std::memory_order_relaxed));
+        ok = false;
+    }
+    // ★ deleter を実行せずに queue を捨てた場合も検出する。
+    //   保持なら quarantine に 1 件増え、処理待ちも増える。
+    const auto quarantineAfter = convo::EpochDomain::quarantineCount();
+    const auto quarantinePendingAfter = convo::EpochDomain::quarantinePendingEntries();
+    if (quarantineAfter != quarantineBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-W3-3j] FAIL: teardown did not quarantine the D sentinel "
+                             "(count %llu -> %llu)\n",
+                     static_cast<unsigned long long>(quarantineBefore),
+                     static_cast<unsigned long long>(quarantineAfter));
+        ok = false;
+    }
+    if (quarantinePendingAfter < quarantinePendingBefore + 1)
+    {
+        std::fprintf(stderr, "[DQ-W3-3k] FAIL: quarantined entry is not pending "
+                             "(pending %llu -> %llu)\n",
+                     static_cast<unsigned long long>(quarantinePendingBefore),
+                     static_cast<unsigned long long>(quarantinePendingAfter));
+        ok = false;
+    }
+
+    // 基盤は保持され、プロセス寿命へ移される。
+    // 診断索引は固定容量（8）のため、満杯時は保持の証拠を overflow 側で取る。
+    const int abandonedAfter = ShutdownHoldTestAccess::abandonedReaderSubstrates();
+    const int overflowsAfter = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+    const bool retained = (abandonedAfter == abandonedBefore + 1)
+                       || (overflowsAfter == overflowsBefore + 1);
+    if (! retained)
+    {
+        std::fprintf(stderr, "[DQ-W3-3] FAIL: substrate not retained "
+                             "(abandoned %d -> %d, overflow %d -> %d)\n",
+                     abandonedBefore, abandonedAfter, overflowsBefore, overflowsAfter);
+        ok = false;
+    }
+
+    // ★ 保持されたのが「同じ router と domain の組」であること。件数だけでは、
+    //   router を破棄して domain だけ残す退行を見逃す。
+    //   診断索引が満杯して overflow 側で保持された場合は記録が無いため、
+    //   記録が増えたときだけ同一性を要求する。
+    const bool recordedInIndex = (abandonedAfter == abandonedBefore + 1);
+    if (recordedInIndex && ! AudioEngine::abandonedSubstrateContainsForTest (routerPtr, domainPtr))
+    {
+        std::fprintf(stderr, "[DQ-W3-3e] FAIL: abandoned record does not hold the same router/domain\n");
+        ok = false;
+    }
+
+    // ★ publisher の idle タイムアウトで保持されていないこと。
+    if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publishIdleFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-W3-3b] FAIL: publisher idle timed out during teardown "
+                             "(failures %d -> %d)\n",
+                     publishIdleFailuresBefore,
+                     AudioEngine::shutdownPublisherIdleFailuresForTest());
+        ok = false;
+    }
+    // ★ admission の idle 待ちがタイムアウトしていないこと（期限切れは idle でも false）。
+    if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() != admissionIdleFailuresBefore)
+    {
+        std::fprintf(stderr, "[DQ-W3-3d] FAIL: admission idle wait timed out during teardown "
+                             "(failures %d -> %d)\n",
+                     admissionIdleFailuresBefore,
+                     AudioEngine::shutdownReaderAdmissionIdleFailuresForTest());
+        ok = false;
+    }
+    // ★ admission が残って保持されていないこと（残っていれば別の理由）。
+    if (admissionsBeforeDestroy != 0u || pendingSlotsBeforeDestroy != 0u)
+    {
+        std::fprintf(stderr, "[DQ-W3-3c] FAIL: admission was not idle before destruction "
+                             "(active=%u pending=%u)\n",
+                     static_cast<unsigned> (admissionsBeforeDestroy),
+                     static_cast<unsigned> (pendingSlotsBeforeDestroy));
+        ok = false;
+    }
+
+    // exit を再開させる（保持された基盤の上で完了すること）。
+    seam.release.store (true, std::memory_order_release);
+    worker.join();
+    convo::EpochDomain::setReaderExitSeam (nullptr, nullptr);
+
+    if (! entered.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-4] FAIL: reader.enter() failed\n");
+        ok = false;
+    }
+    if (! exitDone.load (std::memory_order_acquire))
+    {
+        std::fprintf(stderr, "[DQ-W3-5] FAIL: exit did not complete after the engine was destroyed\n");
+        ok = false;
+    }
+    if (ShutdownHoldTestAccess::engineInstanceCount() != instancesBefore)
+    {
+        std::fprintf(stderr, "[DQ-W3-6] FAIL: engine instance count not restored (%d -> %d)\n",
+                     instancesBefore, ShutdownHoldTestAccess::engineInstanceCount());
+        ok = false;
+    }
+
+    if (ok)
+        std::printf ("[DQ-W3] exit vs shutdown: PASS (abandoned %d -> %d, overflow %d -> %d, "
+                     "exit completed after destruction)\n",
+                     abandonedBefore, abandonedAfter, overflowsBefore, overflowsAfter);
+    return ok;
+}
+
 int runV11EngineRetireProtectionTests()
 {
     // U3: V11 のアロケーション計測はこの実行の間だけ有効化する（既定 OFF）。
@@ -4626,6 +5193,16 @@ int runV11EngineRetireProtectionTests()
     if (!checkCapabilityIssuedWithFullFallback())
     {
         std::fprintf(stderr, "FAIL: checkCapabilityIssuedWithFullFallback (DQ-V4)\n");
+        hdOk = false;
+    }
+    if (!checkReaderExitQuiescenceWindow())
+    {
+        std::fprintf(stderr, "FAIL: checkReaderExitQuiescenceWindow (DQ-W1)\n");
+        hdOk = false;
+    }
+    if (!checkReaderExitShutdownRace())
+    {
+        std::fprintf(stderr, "FAIL: checkReaderExitShutdownRace (DQ-W3)\n");
         hdOk = false;
     }
     if (!hdOk)

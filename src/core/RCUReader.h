@@ -102,10 +102,21 @@ public:
         return epochProvider->currentEpoch();
     }
 
-    /** アクティブなReader数を診断用に取得 */
+    /** アクティブなReader数を診断用に取得。
+     *  診断の件数なので depth のみを返す。静止判定に使ってはならない。
+     *
+     *  ★ WORK113 R1: 静止の完全な条件は depth 0 だけではない。予約してまだ enter していない
+     *  reader は depth 0 でこの値に入らないが、後から入場できる。完全な静止を主張する側は、
+     *  次の順で確かめる。
+     *    1. 保護された操作で新規 admission を排除する（exclusion）
+     *    2. 実行中の admission が 0（readerAdmissionsActive() == 0）
+     *    3. 予約済みで未 enter の slot が 0（admissionPendingSlots() == 0）
+     *    4. 活動数が 0（epochProvider->activeReaderCount() == 0）
+     *  1 を拜えても 2〜4 を読むまでに入場し得るため、2〜4 は 1 の後で読む。
+     *  実装は AudioEngine::readerActivityZeroNonRt()。 */
     uint32_t activeReaders() noexcept
     {
-        return epochProvider->activeReaderCount();
+        return epochProvider->activeDepthReaderCount();
     }
 
     /** ★ P1-A: 今回の enter() が成功し epoch 保護下有効かを返す */

@@ -93,7 +93,13 @@ public:
         // 期限内の idle だけを成功として扱う（期限到達後は idle でも false）。
         bool waitForIdle(std::chrono::milliseconds timeout) noexcept
         {
-            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            return waitForIdleUntil (std::chrono::steady_clock::now() + timeout);
+        }
+
+        // ★ 期限そのものを受け取る版。呼び出し側が期限を先に計算し、
+        //   待機の開始までにスレッドが止まっても予算が伸びない。
+        bool waitForIdleUntil(std::chrono::steady_clock::time_point deadline) noexcept
+        {
             for (;;)
             {
                 const bool idle = convo::consumeAtomic(active_, std::memory_order_acquire) == 0;
@@ -107,6 +113,15 @@ public:
         }
 
         [[nodiscard]] uint32_t active() const noexcept { return convo::consumeAtomic(active_, std::memory_order_acquire); }
+
+        // ★ WORK113 R1: 排他判定用の読み。RMW で active_ を読むことで、
+        //   「close 後に shutdown が 0 を読む」と「reader が close 前と読む」の両立を排除する。
+        //   reader 側は tryEnter で同じ active_ を RMW するため、修飾順序で
+        //   必ず片方が相手の更新を見る（RMW 同士の release sequence）。
+        [[nodiscard]] uint32_t activeRmw() noexcept
+        {
+            return convo::fetchOrAtomic(active_, 0u, std::memory_order_acq_rel);
+        }
         [[nodiscard]] bool closed() const noexcept { return convo::consumeAtomic(closed_, std::memory_order_acquire); }
 
     private:
@@ -165,7 +180,48 @@ public:
     {
         return readerAdmissionGate_.waitForIdle(timeout);
     }
-    [[nodiscard]] std::uint32_t readerAdmissionsActive() const noexcept { return readerAdmissionGate_.active(); }
+
+    // ★ 期限そのものを渡す版。二度のパスで期限を共有するときに使う。
+    [[nodiscard]] bool waitForReaderAdmissionsUntil(std::chrono::steady_clock::time_point deadline) noexcept
+    {
+        return readerAdmissionGate_.waitForIdleUntil(deadline);
+    }
+    [[nodiscard]] std::uint32_t readerAdmissionsActive() noexcept
+    {
+        return readerAdmissionGate_.activeRmw();
+    }
+
+    // ★ WORK113 R1: shutdown の強制解放を「新しい入場が始まらない」状態で実行するための
+    //   一時的な除外。fence と違い解除できるので、「releaseResources 後に close 前登録の reader は
+    //   再入場できる」規則（V11 E1）を壊さない。除外中は reacquireReaderSlot() を拒否する。
+    void beginRetireDrainExclusion() noexcept
+    {
+        // ★ 排除の公開は RMW。store に acq_rel は使えない（UB）。
+        //   ※ この語は reader 側でも RMW で読む（retireDrainExclusionActive）。
+        //     同じオブジェクトの RMW は全体順序が与えられるため、
+        //     「shutdown が admission 0 を読む」と「reader が除外なしを読む」の
+        //     双方は成立しない（片方が必ず相手の更新を見る）。
+        (void) convo::exchangeAtomic (retireDrainExclusion_, kRetireDrainExclusionBit,
+                                      std::memory_order_acq_rel);
+    }
+    void endRetireDrainExclusion() noexcept
+    {
+        (void) convo::exchangeAtomic (retireDrainExclusion_, 0u, std::memory_order_release);
+    }
+    // ★ RMW で読む（fetch_or 0）。
+    //   acq_rel にする理由: release 側面が、この直前の admission 増加（tryEnter の RMW）を
+    //   公開する。shutdown 側の RMW（acq_rel）がそれを読めば、その acquire 側面で
+    //   admission 増加が shutdown の後続の読みに可視になる。
+    //   同じ語の RMW 同士は修飾順序が全体順序になるため、片方は必ず相手の更新を見る。
+    [[nodiscard]] bool retireDrainExclusionActive() noexcept
+    {
+        return (convo::fetchOrAtomic (retireDrainExclusion_, 0u, std::memory_order_acq_rel)
+                & kRetireDrainExclusionBit) != 0u;
+    }
+    [[nodiscard]] std::uint32_t reacquireDuringDrainExclusion() const noexcept
+    {
+        return convo::consumeAtomic (reacquireDuringDrainExclusion_, std::memory_order_acquire);
+    }
 
     // 予約済みで未 enter の slot（admission 中の slot）を数える。admission gate と二重に確認する。
     [[nodiscard]] std::uint32_t admissionPendingSlots() const noexcept
@@ -189,6 +245,16 @@ public:
     {
         convo::publishAtomic(readerAdmissionSeamCtx_, ctx, std::memory_order_release);
         convo::publishAtomic(readerAdmissionSeamFn_, fn, std::memory_order_release);
+    }
+
+    // ★ WORK113 (2026-11-19 Owner 指示): exitReader() の depth デクリメント直後で
+    //   呼び出しを止める seam。「depth == 0 だが exit 処理は未完了」の窓を
+    //   決定論的に作り、shutdown の quiescence 判定との競合を検査する。
+    using ReaderExitSeam = void (*) (void*);
+    static void setReaderExitSeam (ReaderExitSeam fn, void* ctx) noexcept
+    {
+        convo::publishAtomic(readerExitSeamCtx_, ctx, std::memory_order_release);
+        convo::publishAtomic(readerExitSeamFn_, fn, std::memory_order_release);
     }
 #endif
     [[nodiscard]] bool shutdownReaderFenceEngaged() const noexcept
@@ -263,11 +329,16 @@ public:
             return DrainResult::CapabilityInvalid;
         }
 
-        const bool regClosed = convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
+        // ★ RMW で読み、後続の admission 読みと順序を結ぶ（登録側と同じ語を使う）。
+        const bool regClosed = convo::fetchOrAtomic(registrationClosed_, 0u,
+                                                    std::memory_order_acq_rel) != 0u;
         const bool fence = shutdownReaderFenceEngaged();
-        const std::uint32_t active = activeReaderCount();
+        // ★ 順序固定: admission（予約〜enter）を先に読み、活動数を最後に読む。
+        //   逆順だと「活動数 0 を読む → admission の reader が enter → admission 0」の
+        //   並びで、入場中の reader を見落とす。
         const std::uint32_t admissions = readerAdmissionsActive();
         const std::uint32_t pendingAdmissions = admissionPendingSlots();
+        const std::uint32_t active = activeReaderCount();
         const std::uint64_t minReader = getMinReaderEpoch();
         const std::uint64_t fenceEpoch = convo::consumeAtomic(epochAtFence_, std::memory_order_acquire);
         const bool epochEqual = ! isOlder(minReader, fenceEpoch) && ! isOlder(fenceEpoch, minReader);
@@ -288,6 +359,38 @@ public:
     }
 
 
+    // ★ テスト専用: 指定したインスタンスが破棄されたときに立つフラグを登録する。
+    //   target に nullptr を渡せば解除する。破棄後のオブジェクトは参照しない。
+    static void armDestructionProbeForTest (const EpochDomain* target,
+                                            std::atomic<bool>* fired) noexcept
+    {
+        destructionProbeTarget().store (target, std::memory_order_relaxed);
+        destructionProbeFlag().store (fired, std::memory_order_relaxed);
+    }
+
+    ~EpochDomain()
+    {
+        if (destructionProbeTarget().load (std::memory_order_relaxed) == this)
+        {
+            auto* fired = destructionProbeFlag().load (std::memory_order_relaxed);
+            if (fired != nullptr)
+                fired->store (true, std::memory_order_relaxed);
+        }
+    }
+
+private:
+    static std::atomic<const EpochDomain*>& destructionProbeTarget() noexcept
+    {
+        static std::atomic<const EpochDomain*> target { nullptr };
+        return target;
+    }
+    static std::atomic<std::atomic<bool>*>& destructionProbeFlag() noexcept
+    {
+        static std::atomic<std::atomic<bool>*> flag { nullptr };
+        return flag;
+    }
+
+public:
     // ★ domain tag (v2.9 §3.2): 生成側に必ず意図を書かせる（デフォルト引数なし）。
     //   契約は B-1:
     //     ・許可値は Unknown / EngineISR / EQ の 3 値のみ
@@ -403,7 +506,7 @@ public:
             enterAfterFence_.fetch_add(1, std::memory_order_relaxed);
             return -1;
         }
-        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
+        if (convo::fetchOrAtomic(registrationClosed_, 0u, std::memory_order_acq_rel) != 0u)
         {
             readerAdmissionGate_.exit();
             return -1;   // ★ X3: reader registration permanently closed（INV-X3-4）
@@ -461,7 +564,7 @@ public:
             return false;
         }
         // ★ work88 (X3 §6.3 / INV-X3-4): reserve 経由の登録も封じる（registrationClosed_ ガード）
-        if (convo::consumeAtomic(registrationClosed_, std::memory_order_acquire))
+        if (convo::fetchOrAtomic(registrationClosed_, 0u, std::memory_order_acq_rel) != 0u)
         {
             readerAdmissionGate_.exit();
             return false;
@@ -532,6 +635,17 @@ public:
         if (shutdownReaderFenceEngaged())
         {
             reacquireAfterFence_.fetch_add(1, std::memory_order_relaxed);
+            readerAdmissionGate_.exit();
+            return false;
+        }
+
+        // ★ WORK113 R1: shutdown の強制解放中は再入場を拒否する。fence と違い解除されるので、
+        //   解除後の再入場は従来どおりできる。
+        //   admission 増加（直前の tryEnter）の後に、除外語を RMW で読む。
+        //   shutdown 側も同じ語を RMW で更新するため、片方は必ず相手の更新を見る。
+        if (retireDrainExclusionActive())
+        {
+            reacquireDuringDrainExclusion_.fetch_add(1, std::memory_order_relaxed);
             readerAdmissionGate_.exit();
             return false;
         }
@@ -623,7 +737,24 @@ public:
     void exitReader(int readerIndex) noexcept override
     {
         if (readerIndex < 0 || readerIndex >= kMaxReaders)
-            return;
+            return;   // slot に触らないため計数しない
+
+        // ★ WORK113 R1: depth のデクリメントより前に増やす。
+        //   relaxed でよい。直後の depth の acq_rel RMW がこの増加を公開する。
+        (void)convo::fetchAddAtomic(readerExitInProgress_, static_cast<std::uint32_t>(1),
+                                    std::memory_order_relaxed);
+
+        // 減算は最後の provider アクセスの後（release）。早期 return（previousDepth == 0 /
+        // > 1）でもこのスコープのデストラクタで必ず 1 回だけ戻る。
+        struct ExitInProgressScope
+        {
+            std::atomic<std::uint32_t>& counter;
+            ~ExitInProgressScope() noexcept
+            {
+                (void)convo::fetchSubAtomic(counter, static_cast<std::uint32_t>(1),
+                                            std::memory_order_release);
+            }
+        } exitInProgressScope { readerExitInProgress_ };
 
         auto& slot = readers[static_cast<size_t>(readerIndex)];
         // acq_rel: 取得側 acquire で enterReader 以降の読み取りが完了していることを観測し、
@@ -631,6 +762,15 @@ public:
         const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth,
                                                               static_cast<uint32_t>(1),
                                                               std::memory_order_acq_rel);
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+        // ★ seam: depth を 0 にした直後、残りの provider アクセスの前で止める。
+        if (previousDepth == 1)
+        {
+            const auto fn = convo::consumeAtomic(readerExitSeamFn_, std::memory_order_acquire);
+            if (fn != nullptr)
+                fn (convo::consumeAtomic(readerExitSeamCtx_, std::memory_order_acquire));
+        }
+#endif
         // ★ 計測: 区画の保持時間（1ms 以上のときだけ最長値を更新）
         if (previousDepth == 1 && readerIndex >= 0 && readerIndex < kMaxReaders)
         {
@@ -758,7 +898,30 @@ public:
         return minEpoch;
     }
 
+    // ★ WORK113 R1 (2026-11-19 Owner 承認): 戻り値は reader の実人数ではなく、
+    //   「この domain をまだ触っている reader の活動数」である。
+    //   - depth > 0 のスロット数
+    //   - exitReader() 実行中の件数（depth が 0 でも provider の後処理が残る）
+    //   exit 中の reader は両方に現れることがある（一時的な二重計上）。
+    //   静止判定は「0 か否か」しか使わないため、この保守性は安全側に倒れる。
+    //   読み取り順序は depth（acquire）→ exit カウンタ（acquire）の順で固定する。
+    //   depth の acq_rel RMW を観測してから exit カウンタを読むことで、
+    //   depth を 0 にした exit の先行する増加を見落とさない。
     uint32_t activeReaderCount() const noexcept override
+    {
+        const uint32_t depthReaders = activeDepthReaderCount();
+
+        // ★ 順序固定: depth を先に読む。逆にすると「exit 開始前に 0 を読み、
+        //   depth 0 を観測する」並びで増加を見落とす。
+        const uint32_t exiting =
+            convo::consumeAtomic(readerExitInProgress_, std::memory_order_acquire);
+
+        return depthReaders + exiting;
+    }
+
+    // depth > 0 のスロット数（reader の実人数）。診断・証跡用。
+    // ゲート判定には activeReaderCount() を使うこと。
+    uint32_t activeDepthReaderCount() const noexcept override
     {
         uint32_t count = 0;
 
@@ -1241,14 +1404,25 @@ private:
 #if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
     inline static std::atomic<ReaderAdmissionSeam> readerAdmissionSeamFn_ { nullptr };
     inline static std::atomic<void*> readerAdmissionSeamCtx_ { nullptr };
+    inline static std::atomic<ReaderExitSeam> readerExitSeamFn_ { nullptr };
+    inline static std::atomic<void*> readerExitSeamCtx_ { nullptr };
 #endif
     std::atomic<std::uint32_t> reacquireAfterFence_ { 0 };
+    static constexpr std::uint32_t kRetireDrainExclusionBit = 1u;
+    std::atomic<std::uint32_t> retireDrainExclusion_ { 0u };
+    std::atomic<std::uint32_t> reacquireDuringDrainExclusion_ { 0 };
     std::atomic<std::uint32_t> enterAfterFence_ { 0 };
     std::atomic<std::uint32_t> epochIdleTimeouts_ { 0 };
     std::atomic<std::uint32_t> latePublisherAttempts_ { 0 };
     std::atomic<std::uint64_t> epochAtFence_ { 0 };
     std::atomic<std::uint64_t> drainReaderFailures_ { 0 };
     std::atomic<std::uint64_t> drainRemainingAfter_ { 0 };
+
+    // ★ WORK113 R1 (2026-11-19 Owner 承認): exitReader() を実行中の件数。
+    //   depth が 0 でも provider の後処理（residency / holdWitness / slot.epoch /
+    //   quarantineFlags）が残っている reader を数える。増加は depth のデクリメント前、
+    //   減算は最後の provider アクセス後（release）。詳細は exitReader() を参照。
+    std::atomic<std::uint32_t> readerExitInProgress_ { 0 };
 
     // 隔離（append-only・自己参照で寿命を保つ）
     inline static std::atomic<DeferredDeletionQueue*> quarantineHead_ { nullptr };
@@ -1317,7 +1491,8 @@ public:
     // ★ work88 (X3 §6.3 / INV-X3-4 / INV-ISR-04): reader registration permanently closed フラグ。
     //   closeReaderRegistration() で true（shutdown state machine の CloseReaderRegistration フェーズ）。
     //   registerReaderThread / reserveReaderThread は true 後は失敗を返す（新規登録拒否）。
-    std::atomic<bool> registrationClosed_{false};
+    // ★ WORK113 R1: 登録閉鎖は RMW で扱うため uint32（1 = 閉鎖）。
+    std::atomic<std::uint32_t> registrationClosed_{0u};
 
     // ── ★ dash2 §2.2 (Phase A2 — G19/G20): generation 実供給源 ──
     //   ShutdownRuntimeIdentity の epochGeneration / readerRegistrationGeneration を束縛する
@@ -1345,7 +1520,9 @@ public:
     // ★ work88 (X3 §6.3 / INV-X3-4): reader registration を永久に閉じる（CloseReaderRegistration）。
     //   新規登録のみを拒否し、登録済み slot は exit まで継続可能（既存 Reader の epoch 安全性維持）。
     void closeReaderRegistration() noexcept {
-        convo::publishAtomic(registrationClosed_, true, std::memory_order_release);
+        // ★ RMW で公開する。単なる store だと、登録側の「admission 増加 → 閉鎖読み」と
+        //   対にならず、双方が古い値を読む順序が残る。
+        (void) convo::exchangeAtomic(registrationClosed_, 1u, std::memory_order_acq_rel);
         // ★ dash2 §2.2 (G20): registration 状態の世代をインクリメント。
         //   ShutdownRuntimeIdentity::readerRegistrationGeneration の実供給源。
         //   registrationClosed_ の publish 後（release）に increment するため、
@@ -1354,7 +1531,7 @@ public:
                                     std::memory_order_acq_rel);
     }
     [[nodiscard]] bool readerRegistrationClosed() const noexcept {
-        return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire);
+        return convo::consumeAtomic(registrationClosed_, std::memory_order_acquire) != 0u;
     }
 
     // ★ dash2 §2.2 (G19/G20): generation 公開アクセサ（ShutdownRuntime / Proof 生成用）。

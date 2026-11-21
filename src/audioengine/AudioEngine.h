@@ -1897,8 +1897,10 @@ public:
         const auto terminalResident = (m_retireRouter != nullptr)
             ? m_retireRouter->terminalReclaimResidentCount() : static_cast<std::size_t>(0);
         // ★ Step 5-III-A: Q/E/D observation snapshot (single-call consistency)
+        // ★ WORK113 R1: ここは slot 占有の観測なので depth のみを使う
+        //   （activity は exit 中の reader を含み、実人数と一致しない）。
         const auto readerCount = (m_retireRouter != nullptr)
-            ? m_retireRouter->activeReaderCount() : 0u;
+            ? m_retireRouter->activeDepthReaderCount() : 0u;
         const auto minReader = (m_retireRouter != nullptr)
             ? m_retireRouter->minReaderEpoch() : std::uint64_t{0};
         const auto pendingRetire = (m_retireRouter != nullptr)
@@ -5053,6 +5055,11 @@ captureEpochQuiescenceEvidence() const noexcept
     evidence.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
     if (m_retireRouter != nullptr)
     {
+        // ★ WORK113 R1: 保守的な活動数（exit 処理中を含む）。
+        //   0 は「この domain を触っている reader が居ない」。
+        //   ただし 0 だけでは静止とは言えない。予約済みで未 enter の slot は
+        //   depth 0 でここに入らないが、後から入場できる。静止判定には
+        //   readerActivityZeroNonRt()（admission と予約 slot も見る）を使うこと。
         evidence.activeReaders = m_retireRouter->activeReaderCount();
         evidence.minReaderEpoch = m_retireRouter->minReaderEpoch();
         evidence.captured = true;
@@ -5069,10 +5076,38 @@ captureEpochQuiescenceEvidence() const noexcept
 //   - reclaim: reclaimShutdownQuiescent（Permit consume — single-use）
 //   - 戻り値: reclaim 成功時 true（Permit 消費済み）。Proof 不成立 / Permit なし / 二重使用は false。
 //   ［NonRT のみ。AC-ISR-1: Audio Thread からは呼ばない］
+// ★ WORK113 R1: shutdown の強制解放を「新しい入場が始まらない」状態で実行するための一時的な除外。
+//   fence と違い解除するので、V11 E1（releaseResources 後に close 前登録の reader は
+//   再入場できる）を壊さない。二重に囲んでも外側が解除するまで維持される。
+struct RetireDrainExclusionScope
+{
+    explicit RetireDrainExclusionScope (convo::EpochDomain& d) noexcept
+        : domain (d), engaged (! d.retireDrainExclusionActive())
+    {
+        if (engaged)
+            domain.beginRetireDrainExclusion();
+    }
+    ~RetireDrainExclusionScope()
+    {
+        if (engaged)
+            domain.endRetireDrainExclusion();
+    }
+    RetireDrainExclusionScope (const RetireDrainExclusionScope&) = delete;
+    RetireDrainExclusionScope& operator= (const RetireDrainExclusionScope&) = delete;
+
+    convo::EpochDomain& domain;
+    const bool engaged;
+};
+
 inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
 {
     if (handle.isNull())
         return false;
+
+    // ★ WORK113 R1: Q4 の観察から reclaim まで、新しい reader の再入場を排除する。
+    //   closeReaderRegistration() 後でも reacquireReaderSlot() は通るため、この間に
+    //   入場した reader は Q4 に計上されない。
+    RetireDrainExclusionScope drainExclusion (m_epochDomain);
 
     // Q0〜Q7 の観測値（EpochDomain / RetireRouter / ShutdownRuntime から収集）
     convo::isr::ShutdownRuntime::QuiescenceObservation obs;
@@ -5085,8 +5120,8 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
     obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
                           && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
-    obs.activeReadersZero = (m_retireRouter != nullptr)
-        ? (m_retireRouter->activeReaderCount() == 0) : true;                  // Q4
+    // ★ WORK113 R1: Q4 も単一判定を使う（exit 処理中は 0 にならない）。
+    obs.activeReadersZero = readerActivityZeroNonRt();                        // Q4
     // ★ Q5 (2026-11-08): EpochQuiescenceEvidence（H.11.13.3）。bool ではなく観測束で渡し、
     //   ShutdownRuntime が quiescent() と generation 一致を検証する。
     obs.epochEvidence = captureEpochQuiescenceEvidence();
@@ -5114,6 +5149,21 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
         handle, dspHandleRuntime_, *m_retireRouter, std::move(*permit));
 }
 
+// ★ WORK113 R1 (2026-11-19 Owner 承認): reader 静止の単一判定。
+//   値は EpochDomain::activeReaderCount()（depth > 0 のスロット数＋exitReader 実行中の件数）。
+//   Q4（proof の入力）と checked drain の前提が同じ判定を使う。
+[[nodiscard]] bool readerActivityZeroNonRt() noexcept
+{
+    // ★ 順序固定: admission（予約〜enter）を先に読み、活動数を最後に読む。
+    //   逆順だと「活動数 0 を読む → admission の reader が enter → admission 0」の
+    //   並びで、入場中の reader を見落とす。
+    if (m_epochDomain.readerAdmissionsActive() != 0)
+        return false;
+    if (m_epochDomain.admissionPendingSlots() != 0)
+        return false;
+    return m_epochDomain.activeReaderCount() == 0;
+}
+
 // ★ WORK113 Queue/Gate/Drain（v4.13 §3/§4）: shutdown の最終 drain。
 //   順序: reader fence → publish gate 閉鎖 + 5 秒待ち → 最終 retire → proof → capability
 //         → queue 取り出し → checked drain → 結果（非成功は隔離して deleter を実行しない）。
@@ -5124,9 +5174,10 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     //       D / Q / E / T の drain を済ませていること（terminal shutdown の停止状態は解除しない）。
     // 静止条件: active reader 0・admission（予約〜enter）0・admission 中の slot 0。
     //   admission は fence 閉鎖後に開始できないため、ここが 0 なら以後の入場は起きない。
-    if (m_epochDomain.activeReaderCount() != 0
-        || m_epochDomain.readerAdmissionsActive() != 0
-        || m_epochDomain.admissionPendingSlots() != 0)
+    // ★ 順序固定: admission を先に読み、活動数を最後に読む（enter 完了の取りこぼし防止）。
+    const std::uint32_t readerAdmissions = m_epochDomain.readerAdmissionsActive();
+    const std::uint32_t pendingAdmissionSlots = m_epochDomain.admissionPendingSlots();
+    if (readerAdmissions != 0 || pendingAdmissionSlots != 0 || ! readerActivityZeroNonRt())
     {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
         juce::Logger::writeToLog("[DRAIN_DIAG] checkedDrain skipped=readers_not_quiescent");
@@ -5144,8 +5195,7 @@ inline bool finalizeAndDrainRetireQueueNonRt() noexcept
     obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
                           && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
-    obs.activeReadersZero = (m_retireRouter != nullptr)
-        ? (m_retireRouter->activeReaderCount() == 0) : true;
+    obs.activeReadersZero = readerActivityZeroNonRt();
     obs.epochEvidence = captureEpochQuiescenceEvidence();
     obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();
     obs.epochGeneration = obs.epochEvidence.epochGeneration;

@@ -213,6 +213,15 @@ public:
     explicit ISRRetireRouter(convo::IEpochProvider& provider,
                              convo::isr::WorldRetirementReferenceObserver* referenceObserver = nullptr) noexcept;
 
+    ~ISRRetireRouter();
+
+    // ★ テスト専用: 指定したインスタンスが破棄されたときに立つフラグを登録する。
+    //   他のインスタンスの破棄に動作されないため、テスト対象の router が
+    //   生存したときだけフラグは立たない（破棄後のオブジェクトは参照しない）。
+    //   target に nullptr を渡せば解除する。
+    static void armDestructionProbeForTest (const ISRRetireRouter* target,
+                                            std::atomic<bool>* fired) noexcept;
+
     ISRRetireRouter(const ISRRetireRouter&) = delete;
     ISRRetireRouter& operator=(const ISRRetireRouter&) = delete;
     ISRRetireRouter(ISRRetireRouter&&) = delete;
@@ -223,6 +232,8 @@ public:
     uint64_t snapshotEpoch() const noexcept;
     uint64_t publishEpoch() noexcept override;
     uint32_t activeReaderCount() const noexcept override;
+    // ★ WORK113 R1: depth のみの件数（slot 使用率の監視用）。
+    uint32_t activeDepthReaderCount() const noexcept override;
     int readerCapacity() const noexcept override;
     uint64_t currentEpoch() const noexcept override;
     uint64_t getMinReaderEpoch() const noexcept override;
