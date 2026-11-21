@@ -987,17 +987,21 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             convo::publishAtomic(progress.status, Status::Running, std::memory_order_release);
-            const std::uint64_t epochNow =
-                convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
-            if (epochNow != trackedOptimizerEpoch)
-            {
-                // 復元後は復元されたスコアを比較の基準にする（古い baseline を残さない）。
-                trackedOptimizerEpoch = epochNow;
-                bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
-            }
-            const std::uint64_t optimizerEpochAtSample = epochNow;
+            // ★ review: setState() は optimizerMutex の中で epoch を進めてから bestScore を
+            //   公開する。epoch と baseline をこの mutex の外で別々に読むと、新しい epoch と
+            //   古いスコアの組を掴み、以降の世代が復元後の基準を飛ばしてしまう。
+            //   読み取りと sampling を同じ臨界区間に入れ、復元を丸ごと観測する。
+            std::uint64_t optimizerEpochAtSample = 0;
             {
                 std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                optimizerEpochAtSample =
+                    convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
+                if (optimizerEpochAtSample != trackedOptimizerEpoch)
+                {
+                    // 復元後は復元されたスコアを比較の基準にする（古い baseline を残さない）。
+                    trackedOptimizerEpoch = optimizerEpochAtSample;
+                    bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
+                }
                 optimizer.sample(candidatePopulationMatrix());
             }
 
@@ -1061,11 +1065,22 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                     bestScore = bestCandidateScore;
             }
 
-            if (committed && bestCandidateScore < std::numeric_limits<double>::max())
+            // ★ review: "Latest score" は評価した最新の世代のスコアを出す。改善しなかった
+            //   世代や、確定済みの基準を更新しなかった世代でも公開する（履歴は改善のみ）。
+            //   復元で無効になった世代は公開しないため、epoch 照合と同じ臨界区間で書く。
+            if (bestCandidateScore < std::numeric_limits<double>::max())
             {
-                convo::publishAtomic(progress.latestScore, bestCandidateScore, std::memory_order_release);
-                appendHistoryPoint(bestCandidateScore);
+                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                if (convo::consumeAtomic(optimizerStateEpoch, std::memory_order_relaxed)
+                    == optimizerEpochAtSample)
+                {
+                    convo::publishAtomic(progress.latestScore, bestCandidateScore,
+                                         std::memory_order_release);
+                }
             }
+
+            if (committed)
+                appendHistoryPoint(bestCandidateScore);
 
             convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
             convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
