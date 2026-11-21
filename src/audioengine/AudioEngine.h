@@ -6203,6 +6203,9 @@ public:
     //   待つ/待たないの判断（同期契約）は変えず、時間だけを差し替える。
     //   設定経路は friend のテストアクセスだけで、製品コードからは設定できない。
     std::atomic<int> shutdownWaitTimeoutMs_ { 5000 };
+    // ★ テスト専用: publisher idle の待ちだけを差し替える（0 = shutdownWaitTimeoutMs_ と同じ）。
+    //   admission の待ち（意図的に短くする対象）と一緒に延ばさないために分ける。
+    std::atomic<int> shutdownPublisherWaitTimeoutMs_ { 0 };
     uint64_t engineInstanceId_{0};
 
     // ==================================================================

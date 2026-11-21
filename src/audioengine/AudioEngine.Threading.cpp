@@ -11,6 +11,10 @@
 #include "ISRCoordinatorLoop.h"            // ★ FUTURE-9: coordinatorLoop_ complete type
 #include "RtMeasureRing.h"                 // R-06 / U2: 1 秒ごとの非 RT 集計
 
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    #include "core/DrainTestObservation.h"   // ★ WORK113 DQ-V2 v2: テスト専用の破棄観測
+#endif
+
 //==============================================================================
 // [P0-15] AudioEngine.Threading.cpp — 3PR分割済み.
 // 共通定数は AudioEngine.Retire.cpp に移動.
@@ -21,6 +25,10 @@
 //   **解放しない**（所有権は呼び出し側に残る）。void 版は後方互換のラッパー。
 DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 {
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ WORK113 DQ-V2 v2: 再試行の入口を観測する（対象ポインタのみ計数）。
+    convo::testobs::noteEntry (p);
+#endif
     if (p == nullptr)
         return DestroyOutcome::Destroyed;
 
@@ -44,6 +52,12 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
             // pin 残留: 解放しない。**所有権はここでエンジンの再試行リストに移す**
             //   （呼び出し側が void deleter でも、この関数を直接呼んでも同じ）。
             //   これが無いと「破棄されないまま所有権だけ消える」= 指摘のリークになる。
+            // ★ WORK113 DQ-V2: Deferred の記録は、リストに戻す前に実行する。
+            //   直後に pin が外れると別の再試行が破棄に成功し、
+            //   観測対象が解除されて deferred が計上されないことがある。
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+            convo::testobs::noteDeferred (p);
+#endif
             owner->deferDestroyRetry(static_cast<DSPCore*>(p));
             juce::Logger::writeToLog(juce::String::formatted(
                 "[F1_DESTROY_DEFERRED] dsp=%p pins still held: ownership retained by retry list", p));
@@ -55,6 +69,12 @@ DestroyOutcome AudioEngine::destroyDSPCoreNodeRetryable(void* p) noexcept
 
     auto* core = static_cast<DSPCore*>(p);
     core->~DSPCore();
+#if defined(CONVOPEQ_ENABLE_DRAIN_TEST_FACTORY)
+    // ★ WORK113 DQ-V2 v2: 破棄完了と解放経路の到達を、まだ有効なポインタで記録する。
+    //   解放後の値は識別に使わない。
+    convo::testobs::noteDestroyed (core);
+    convo::testobs::noteReleaseImminent (core);
+#endif
     convo::aligned_free(core);
     return DestroyOutcome::Destroyed;
 }

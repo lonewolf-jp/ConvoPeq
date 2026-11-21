@@ -25,6 +25,7 @@
 #include "AudioEngineHarness.h"
 #include "DeferredPublicationTestAccess.h"
 #include "audioengine/ISRRetireRouter.h"
+#include "core/DrainTestObservation.h"   // ★ WORK113 DQ-V2 v2: テスト専用の破棄観測
 
 #include <atomic>
 #include <chrono>
@@ -3053,6 +3054,12 @@ public:
         engine.shutdownWaitTimeoutMs_.store (ms, std::memory_order_release);
     }
 
+    // ★ publisher idle の待ちだけを差し替える。admission の待ちは変えない。
+    static void setShutdownPublisherWaitTimeout (AudioEngine& engine, int ms) noexcept
+    {
+        engine.shutdownPublisherWaitTimeoutMs_.store (ms, std::memory_order_release);
+    }
+
     // ★ WORK113: reader が実際に保持する provider（AudioEngine::getRetireRouter() の戻り値）。
     static convo::IReaderEpochProvider& readerProvider (AudioEngine& engine) noexcept
     {
@@ -3115,6 +3122,12 @@ public:
     static std::size_t deferredResident (AudioEngine& engine) noexcept
     {
         return engine.deferredDestroyResidentCount();
+    }
+
+    // ★ WORK113 DQ-V2 v2: 再試行を明示的に 1 回実行する（陽性対照用）。
+    static std::size_t retryDeferred (AudioEngine& engine) noexcept
+    {
+        return engine.retryDeferredDestroys();
     }
 
     // ★ WORK113: 生産（~​AudioEngine）と同じ順序で terminal shutdown の前提を作る。
@@ -4074,27 +4087,174 @@ bool checkRetainedStoresHoldOwnership()
 }
 
 //==============================================================================
-// ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): deferred DSPCore が hold 経路で
-//   再処理（再試行破棄）されないこと。DiagObjectRegistry の destroyedTotal で示す。
 //==============================================================================
+// ★ WORK113 DQ-V2 v2 (2026-11-19 Owner 承認): DIAG 非依存で「再試行されていない」ことを観測する。
+//   観測点は destroyDSPCoreNodeRetryable() の入口・戻り値・aligned_free の直前である。
+//   ポインタの値は照合にだけ使い、解放後の値を識別子として保存しない。
+//   陽性対照（pin 残留 → Deferred / 解放後 → Destroyed）が成立しなければ、
+//   陰性対照の 0 は証拠にできない。
+//==============================================================================
+struct DeferredObservation
+{
+    std::uint64_t id { 0 };
+    std::uint32_t attempts { 0 };
+    std::uint32_t deferred { 0 };
+    std::uint32_t destroyed { 0 };
+    bool released { false };
+};
+
+DeferredObservation readDeferredObservation() noexcept
+{
+    DeferredObservation o;
+    auto& l = convo::testobs::log();
+    o.id = convo::consumeAtomic (l.targetId, std::memory_order_acquire);
+    o.attempts = convo::consumeAtomic (l.attempts, std::memory_order_acquire);
+    o.deferred = convo::consumeAtomic (l.deferredAttempts, std::memory_order_acquire);
+    o.destroyed = convo::consumeAtomic (l.destroyedAttempts, std::memory_order_acquire);
+    o.released = convo::consumeAtomic (l.released, std::memory_order_acquire);
+    return o;
+}
+
 bool checkDeferredCoreNotRetried()
 {
     bool ok = true;
 
-    convo::isr::ISRRetireRouter* routerPtr = nullptr;
-    juce::ignoreUnused (routerPtr);
-
-    std::uint32_t destroyedBefore = 0;
-    std::size_t deferredBefore = 0;
-    bool deferredSeen = false;
-
+    // (1) 陽性対照: 再試行が実際に呼ばれ、結果が区別して記録されること。
     {
         auto engine = std::make_unique<AudioEngine>();
         ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
 
+        auto core = convo::aligned_make_unique<AudioEngine::DSPCore>();
+        auto* raw = core.release();
+        const auto handle = engine->registerDSPHandleForRuntime (raw);
+        if (handle.isNull())
+        {
+            DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire (raw);
+            std::fprintf(stderr, "[DQ-V2-1] FAIL: handle registration failed\n");
+            return false;
+        }
+
+        std::uint64_t id = 0;
+        {
+            auto pin = engine->tryPinDSPHandle (handle);
+            if (! static_cast<bool>(pin))
+            {
+                // ★ 登録は成功しているが pin が取れない場合、raw は台帳が保有している。
+                //   そのまま return すると fixture の teardown でも解放されずリークする。
+                //   teardown と同じ順（台帳解除 → 実体破棄）で戻す。
+                (void) engine->retireDSPHandleForRuntime (raw);
+                DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire (raw);
+                std::fprintf(stderr, "[DQ-V2-2] FAIL: could not pin\n");
+                return false;
+            }
+            if (AudioEngine::destroyDSPCoreNodeRetryable (raw) != DestroyOutcome::Deferred)
+            {
+                std::fprintf(stderr, "[DQ-V2-3] FAIL: defer failed\n");
+                return false;
+            }
+
+            // ここから観測を開始する（最初の Deferred は数えない）。識別子はここで発行する。
+            id = convo::testobs::setTarget (raw);
+
+            // pin 残留のまま再試行 → Deferred と在住 1。
+            // ★ 戻り値（破棄した件数）も表明する。Deferred を返せだけで破棄している
+            //   実装は 0 を返すので、observer が破棄を記録していてもここで検出できる。
+            const std::size_t pinnedRetried = ShutdownHoldTestAccess::retryDeferred (*engine);
+            if (pinnedRetried != 0u)
+            {
+                std::fprintf(stderr, "[DQ-V2-4b] FAIL: pinned retry reported %zu destroyed (want 0)\n",
+                             pinnedRetried);
+                ok = false;
+            }
+            const auto held = readDeferredObservation();
+            if (held.id != id || held.attempts != 1u || held.deferred != 1u
+                || held.destroyed != 0u || held.released)
+            {
+                std::fprintf(stderr, "[DQ-V2-4] FAIL: pinned retry not observed "
+                                     "(id=%llu attempts=%u deferred=%u destroyed=%u released=%d)\n",
+                             static_cast<unsigned long long> (held.id),
+                             static_cast<unsigned> (held.attempts),
+                             static_cast<unsigned> (held.deferred),
+                             static_cast<unsigned> (held.destroyed),
+                             held.released ? 1 : 0);
+                ok = false;
+            }
+            if (ShutdownHoldTestAccess::deferredResident (*engine) != 1u)
+            {
+                std::fprintf(stderr, "[DQ-V2-5] FAIL: resident != 1 while pinned\n");
+                ok = false;
+            }
+        }
+
+        // pin 解放後の再試行 → Destroyed と解放経路。
+        const std::size_t unpinnedRetried = ShutdownHoldTestAccess::retryDeferred (*engine);
+        if (unpinnedRetried != 1u)
+        {
+            std::fprintf(stderr, "[DQ-V2-6b] FAIL: unpinned retry reported %zu destroyed (want 1)\n",
+                         unpinnedRetried);
+            ok = false;
+        }
+        const auto done = readDeferredObservation();
+        if (done.id != id || done.attempts != 2u || done.destroyed != 1u || ! done.released)
+        {
+            std::fprintf(stderr, "[DQ-V2-6] FAIL: unpinned retry not observed "
+                                 "(id=%llu attempts=%u destroyed=%u released=%d)\n",
+                         static_cast<unsigned long long> (done.id),
+                         static_cast<unsigned> (done.attempts),
+                         static_cast<unsigned> (done.destroyed),
+                         done.released ? 1 : 0);
+            ok = false;
+        }
+        if (ShutdownHoldTestAccess::deferredResident (*engine) != 0u)
+        {
+            std::fprintf(stderr, "[DQ-V2-7] FAIL: resident != 0 after the unpinned retry\n");
+            ok = false;
+        }
+
+        // 解放経路で観測対象が外れていること（アドレス再利用の前に解除される）。
+        if (convo::testobs::hasTarget())
+        {
+            std::fprintf(stderr, "[DQ-V2-7b] FAIL: target was not cleared by the release path\n");
+            ok = false;
+        }
+
+        // 観測を解除する（解放済みポインタを保持し続けない）。
+        convo::testobs::clearTarget();
+        if (convo::testobs::hasTarget())
+        {
+            std::fprintf(stderr, "[DQ-V2-8] FAIL: observation target was not cleared\n");
+            ok = false;
+        }
+
+        if (ok)
+            std::printf ("[DQ-V2] positive control: PASS (pinned retry -> Deferred, resident 1; "
+                         "unpinned retry -> Destroyed, released)\n");
+    }
+
+    // (2) 陰性対照: hold 経路（非静止）では再試行が呼ばれない。
+    //   ★ 「再試行 0 回」は、hold 経路を通らずに破棄された場合でも成立する。
+    //   実際に hold 経路（非静止 → 基盤をプロセス寿命へ移す）を通ったことを、
+    //   DIAG に依存しないプロセス定数で確かめる。
+    const int abandonedBeforeHold = ShutdownHoldTestAccess::abandonedReaderSubstrates();
+    const int overflowsBeforeHold = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+    // ★ 保持の理由が admission であることを見分けるため、publisher と admission の
+    //   idle 失敗回数を前後で比べる。publisher のタイムアウトでも同じ保持になる。
+    const int publisherFailuresBeforeHold = AudioEngine::shutdownPublisherIdleFailuresForTest();
+    const int admissionFailuresBeforeHold = AudioEngine::shutdownReaderAdmissionIdleFailuresForTest();
+    std::uint32_t destroyedTotalBefore = 0;
+    std::size_t deferredBefore = 0;
+    std::uint64_t id = 0;
+
+    {
+        auto engine = std::make_unique<AudioEngine>();
+        ShutdownHoldTestAccess::setShutdownWaitTimeout (*engine, 50);
+        // ★ 保持の理由は admission。publisher は idle なので、タイムアウトしない予算を与える。
+        //   admission 側は 50 ms のままで、意図的な待機を長引しない。
+        ShutdownHoldTestAccess::setShutdownPublisherWaitTimeout (*engine, 5000);
+
         if (ShutdownHoldTestAccess::reserveReaderAdmission (*engine, "deferred") < 0)
         {
-            std::fprintf(stderr, "[DQ-V2-1] FAIL: admission reservation failed\n");
+            std::fprintf(stderr, "[DQ-V2-9] FAIL: admission reservation failed\n");
             return false;
         }
 
@@ -4104,7 +4264,7 @@ bool checkDeferredCoreNotRetried()
         if (handle.isNull())
         {
             DeferredPublicationTestAccess::destroyCoreNodeWithoutRetire (raw);
-            std::fprintf(stderr, "[DQ-V2-2] FAIL: handle registration failed\n");
+            std::fprintf(stderr, "[DQ-V2-10] FAIL: handle registration failed\n");
             return false;
         }
 
@@ -4112,51 +4272,113 @@ bool checkDeferredCoreNotRetried()
             auto pin = engine->tryPinDSPHandle (handle);
             if (! static_cast<bool>(pin))
             {
-                std::fprintf(stderr, "[DQ-V2-3] FAIL: could not pin\n");
+                std::fprintf(stderr, "[DQ-V2-11] FAIL: could not pin\n");
                 return false;
             }
-            deferredSeen = (AudioEngine::destroyDSPCoreNodeRetryable (raw)
-                            == DestroyOutcome::Deferred);
+            if (AudioEngine::destroyDSPCoreNodeRetryable (raw) != DestroyOutcome::Deferred)
+            {
+                std::fprintf(stderr, "[DQ-V2-12] FAIL: defer failed\n");
+                return false;
+            }
         }
 
         deferredBefore = ShutdownHoldTestAccess::deferredResident (*engine);
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-        destroyedBefore = convo::diag::registry().totals().destroyedTotal;
+        destroyedTotalBefore = convo::diag::registry().totals().destroyedTotal;
 #endif
 
-        if (! deferredSeen || deferredBefore != 1u)
+        if (deferredBefore != 1u)
         {
-            std::fprintf(stderr, "[DQ-V2-4] FAIL: defer failed (seen=%d resident=%zu)\n",
-                         deferredSeen ? 1 : 0, deferredBefore);
-            // 破棄前に明示的に解放してリークを避ける
-            (void) AudioEngine::destroyDSPCoreNodeRetryable (raw);
+            std::fprintf(stderr, "[DQ-V2-13] FAIL: defer resident=%zu (expected 1)\n",
+                         deferredBefore);
             return false;
         }
-        // ここで ~AudioEngine（hold 経路 → retryDeferredDestroys は実行されない）
+
+        // 観測を開始する。引き続き admission を保持し、~AudioEngine は hold 経路を選ぶ。
+        id = convo::testobs::setTarget (raw);
     }
 
-#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-    const auto destroyedAfter = convo::diag::registry().totals().destroyedTotal;
-    if (destroyedAfter != destroyedBefore)
+    // ★ hold 経路が実行されたこと（非静止で基盤がプロセス寿命へ移された）。
     {
-        std::fprintf(stderr, "[DQ-V2-5] FAIL: deferred core was destroyed in the hold path (%u -> %u)\n",
-                     static_cast<unsigned>(destroyedBefore), static_cast<unsigned>(destroyedAfter));
+        const int abandonedAfterHold = ShutdownHoldTestAccess::abandonedReaderSubstrates();
+        const int overflowsAfterHold = ShutdownHoldTestAccess::abandonedSubstrateOverflows();
+        const bool holdPathRan = (abandonedAfterHold == abandonedBeforeHold + 1)
+                              || (overflowsAfterHold == overflowsBeforeHold + 1);
+        if (! holdPathRan)
+        {
+            std::fprintf(stderr, "[DQ-V2-13b] FAIL: teardown did not take the admission-hold path "
+                                 "(abandoned %d -> %d, overflow %d -> %d)\n",
+                         abandonedBeforeHold, abandonedAfterHold,
+                         overflowsBeforeHold, overflowsAfterHold);
+            ok = false;
+        }
+        // ★ 保持の理由が admission であること。
+        if (AudioEngine::shutdownReaderAdmissionIdleFailuresForTest() == admissionFailuresBeforeHold)
+        {
+            std::fprintf(stderr, "[DQ-V2-13c] FAIL: admission idle failure did not increase "
+                                 "(hold was not caused by the held admission)\n");
+            ok = false;
+        }
+        if (AudioEngine::shutdownPublisherIdleFailuresForTest() != publisherFailuresBeforeHold)
+        {
+            std::fprintf(stderr, "[DQ-V2-13d] FAIL: publisher idle timed out during teardown "
+                                 "(failures %d -> %d)\n",
+                         publisherFailuresBeforeHold,
+                         AudioEngine::shutdownPublisherIdleFailuresForTest());
+            ok = false;
+        }
+    }
+
+    const auto held = readDeferredObservation();
+    if (held.id != id)
+    {
+        std::fprintf(stderr, "[DQ-V2-14] FAIL: observation id changed (%llu != %llu)\n",
+                     static_cast<unsigned long long> (held.id),
+                     static_cast<unsigned long long> (id));
+        ok = false;
+    }
+    if (held.attempts != 0u)
+    {
+        std::fprintf(stderr, "[DQ-V2-15] FAIL: retry was called in the hold path (%u times)\n",
+                     static_cast<unsigned> (held.attempts));
+        ok = false;
+    }
+    if (held.deferred != 0u || held.destroyed != 0u || held.released)
+    {
+        std::fprintf(stderr, "[DQ-V2-16] FAIL: deferred core was touched in the hold path "
+                             "(deferred=%u destroyed=%u released=%d)\n",
+                     static_cast<unsigned> (held.deferred),
+                     static_cast<unsigned> (held.destroyed),
+                     held.released ? 1 : 0);
         ok = false;
     }
 
-    if (ok)
-        std::printf("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
-                    "destroyedTotal unchanged %u, retry not executed)\n",
-                    deferredBefore, static_cast<unsigned>(destroyedAfter));
-#else
-    // DIAG OFF では DiagObjectRegistry が存在しないため、resident の不変だけを確認する。
-    if (ok)
-        std::printf("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
-                    "destroyedTotal unavailable with DIAG OFF, retry not executed)\n",
-                    deferredBefore);
+    // 観測を解除する。
+    convo::testobs::clearTarget();
+    if (convo::testobs::hasTarget())
+    {
+        std::fprintf(stderr, "[DQ-V2-17] FAIL: observation target was not cleared\n");
+        ok = false;
+    }
+
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+    const auto destroyedTotalAfter = convo::diag::registry().totals().destroyedTotal;
+    if (destroyedTotalAfter != destroyedTotalBefore)
+    {
+        std::fprintf(stderr, "[DQ-V2-18] FAIL: destroyedTotal changed in the hold path (%u -> %u)\n",
+                     static_cast<unsigned> (destroyedTotalBefore),
+                     static_cast<unsigned> (destroyedTotalAfter));
+        ok = false;
+    }
 #endif
+
+    if (ok)
+        std::printf ("[DQ-V2] deferred DSPCore hold: PASS (resident=%zu before teardown, "
+                     "retry attempts=0, released=false)\n", deferredBefore);
     return ok;
 }
+
+
 
 //==============================================================================
 // ★ WORK113 (2026-11-18 Owner 指示 / 検証単位): proof 不成立時の drain end-to-end。

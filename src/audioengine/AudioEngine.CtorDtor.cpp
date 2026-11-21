@@ -335,8 +335,13 @@ AudioEngine::~AudioEngine()
     m_epochDomain.engageShutdownReaderFence();
     const int shutdownWaitMs =
         convo::consumeAtomic(shutdownWaitTimeoutMs_, std::memory_order_acquire);
+    // ★ publisher idle の待ちは admission と分ける。テストは admission だけを意図的に
+    //   短くし、publisher はスケジューリングのぶらつきでタイムアウトしない予算にできる。
+    const int publisherWaitOverride =
+        convo::consumeAtomic(shutdownPublisherWaitTimeoutMs_, std::memory_order_acquire);
+    const int publisherWaitMs = publisherWaitOverride > 0 ? publisherWaitOverride : shutdownWaitMs;
     const bool terminalPublishersIdle =
-        m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(shutdownWaitMs));
+        m_epochDomain.closePublishersAndWaitIdle(std::chrono::milliseconds(publisherWaitMs));
     if (! terminalPublishersIdle)
     {
         (void) convo::fetchAddAtomic(s_shutdownPublisherIdleFailures_, 1, std::memory_order_acq_rel);
