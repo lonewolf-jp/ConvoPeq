@@ -20,7 +20,7 @@
 
 重要な変化は 3 つある。
 
-1. 添付 HTML の「高」14 件のうち、3 件は指摘そのものがコードと合わない（C-48、C-49、C-50）。3 件は通常の経路では到達しないか、影響が 1 ブロックの過渡である（C-30、C-31、C-32）。残る 8 件が高になる。
+1. 添付 HTML の「高」14 件のうち、3 件は指摘そのものがコードと合わない（C-48、C-49、C-50。C-49 の判定は末尾の追記で訂正した）。3 件は通常の経路では到達しないか、影響が 1 ブロックの過渡である（C-30、C-31、C-32）。残る 8 件が高になる。
 2. 条件付きとしていた C-01（旧 H-01）と C-04（旧 H-04）は、スレッド構成と join の有無を確認し、競合と上書きの経路を特定した。
 3. 未検証だった C-38（旧 L-07）は、モノラル入力の Mid バンドで null 書き込みになることを確認した。通常再生では DSPCore が 2 通道を渡すため到達しない。C-39 は 2 の冪ブロックで成立しない条件付き、C-26 は根拠なしと確定した。
 
@@ -98,7 +98,7 @@
 |---|---|---|---|---|---|---|
 | C-47 | 非バグ | アナライザーの有効ボタンは既定でトグルする | `src/SpectrumAnalyzerComponent.h:188` | NOT-01 | 訂正 | JUCE が既定で設定する |
 | C-48 | 非バグ | copyLatest の読み順が書き込み順と逆 | `src/AudioSegmentBuffer.h:103-133` | PRI-02 | 訂正 | 両方 writePosition → totalSamples |
-| C-49 | 非バグ | リミッターのソフトニーが動作しない | `src/audioengine/SimplePeakLimiter.h:41-70` | PRI-05 | 訂正 | desiredGain は 1 未満 |
+| C-49 | 非バグ | リミッターのソフトニーが動作しない | `src/audioengine/SimplePeakLimiter.h:41-70` | PRI-05 | 訂正（追記で再訂正） | desiredGain は 1 未満（式の符号が誤り。追記参照） |
 | C-50 | 非バグ | EQ 係数に isfinite(sr) がなく NaN を通す | `EQProcessor.Coefficients.cpp:151,185,446` | PRI-10 | 訂正 | 検査は揃っている |
 | C-51 | 非バグ | 学習器の静的プールが終了時にデッドロックする | `src/NoiseShaperLearner.cpp:21,1492-1497` | MED-05 | 訂正 | WeakReference で寿命を確認 |
 | C-52 | 非バグ | stopRequested と stop_token が食い違う | `src/NoiseShaperLearner.cpp:853-859` | MED-11 | 訂正 | どちらでも終了する |
@@ -180,7 +180,7 @@
 ### 9.9 訂正の根拠
 
 - C-48: 書き込みは 104 または 112 行で `writePosition` を release し、118 行で `totalSamples` を release する。読み出しは 128 行で `writePosition`、129 行で `totalSamples` を acquire する。順序は一致する。
-- C-49: `clipStart = threshold - knee * 0.5`（41 行）。ニー区間は `clipStart < peak <= threshold` なので `threshold / peak < 1`、`kneeShape > 0` となり、`desiredGain < 1` になる。`desiredGain < envelope` は成立する。
+- C-49: `clipStart = threshold - knee * 0.5`（41 行）。ニー区間は `clipStart < peak <= threshold` なので `threshold / peak < 1`、`kneeShape > 0` となり、`desiredGain < 1` になる。`desiredGain < envelope` は成立する。（この式は符号が誤りである。末尾の追記で訂正した。）
 - C-50: `calcSVFCoeffs` は 151 行で `!std::isfinite(sr)` を検査する。185 行と 446 行でも `g` と `k` の有限性を見る。`computeEstimatedMaxGainComplex` の呼出し元（`RebuildDispatch.cpp:819-824`）は現在の `EQState` を渡すため、`getTotalGain()` と対象が一致する。
 - C-54: `threshold = 0.95 - 0.45 * sat`、`knee = 0.05 + 0.35 * sat`。`sat` は `Parameters.cpp:112` で 0〜1 に制限される。`knee` の最大は 0.4、`threshold` の最小は 0.5 で、逆転しない。
 
@@ -221,13 +221,15 @@
 
 ## 追記（2026-11-22 07:30 JST）
 
-本文は 2026-11-21 12:01 時点の記録である。その後の実測で状態が変わった項目をここに追記する。本文の表と本文は書き換えていない。
+本文は 2026-11-21 12:01 時点の記録である。その後の実測で状態が変わった項目と、判定の誤りをここに追記する。本文の解析はそのまま残し、追記を参照する印だけを 3 箇所に足した。
 
 | ID | 本文の状態 | 現在の状態 | 根拠 |
 | --- | --- | --- | --- |
 | C-24 | 要再測定 | 維持（原因コード無し）。再測定では学習 XML の寄与を特定できなかった | PR #232（計画）、PR #234（実測）、`doc/work113/20261122-0618_C24計測/report.md` |
-| C-27 | 確認 | 検証完了。MSVC の AVX2/FMA 経路で ymm と vfmadd の生成を確認し、性能を測定した。Issue #215 はクローズ | PR #233、`doc/work113/20261122-0526_231検証/report.md` |
+| C-27 | 確認 | 命令生成の受入条件は満たした。性能はカーネル単体で 1 回測っただけで、#231 が求める方法（4 タップ、N ≥ 20、中央値と IQR）は未達のため #231 を再開した。Issue #215 はクローズ | PR #233、`doc/work113/20261122-0526_231検証/report.md` |
+| C-49 | 非バグ（訂正） | 判定を訂正する。ニー区間では `desiredGain >= 1` となり、ソフトニーは動作しない。指摘は正しく、「確認（ソフトニー無効）」が妥当 | #238、`src/audioengine/SimplePeakLimiter.h:41-70` |
 
 - C-24 の実測では、設定読込（S2）の絶対値が 799.1 ms で固定ゲート 400 ms を超えた。内訳は測っておらず、原因は未分類である。この超過は #236 で追跡する。学習 XML の増分は S4 の 6.6 ms だけで、S2 の増分はドリフト以下だった。
 - C-22 は判定不能のまま独立して維持する。C-39 は条件付きのまま変更しない。
 - C-23、C-40、C-41 は未着手である。
+- C-49 の判定は誤りだった。本文 §9.9 は `threshold / peak < 1` と書くが、`peak <= threshold` なので `threshold / peak >= 1` である。したがって `1 - threshold / peak <= 0` となり、`desiredGain = 1 - (1 - threshold / peak) * kneeShape >= 1` になる。ニー区間でゲインは下がらず、ソフトニーは動作しない。指摘そのものは正しく、分類は「非バグ」ではなく「確認（ソフトニー無効）」が妥当である。この件は #238 で追跡する。
