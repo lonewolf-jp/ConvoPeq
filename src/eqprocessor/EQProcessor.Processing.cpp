@@ -12,9 +12,48 @@
 
 #include "audioengine/AtomicAccess.h"
 
-#if defined(__AVX2__) || defined(__FMA__)
- #include <immintrin.h>
+// ★ C-10: the include guard and the intrinsic usage must describe the same
+//   capability. FMA intrinsics are wrapped in fmaPd/fmsPd below, so immintrin.h is
+//   required unconditionally (the SSE2 paths in this file are already unconditional).
+#include <immintrin.h>
+
+#if defined(__FMA__) || defined(_MSC_VER)
+ #define CONVOPEQ_EQ_FMA_INTRINSICS 1
+#else
+ #define CONVOPEQ_EQ_FMA_INTRINSICS 0
 #endif
+
+namespace
+{
+    // FMA when the target has it; mul+add otherwise. Same result, one rounding less
+    // when fused.
+    inline __m128d fmaPd(__m128d a, __m128d b, __m128d c) noexcept
+    {
+#if CONVOPEQ_EQ_FMA_INTRINSICS
+        return _mm_fmadd_pd(a, b, c);
+#else
+        return _mm_add_pd(_mm_mul_pd(a, b), c);
+#endif
+    }
+
+    inline __m128d fmsPd(__m128d a, __m128d b, __m128d c) noexcept
+    {
+#if CONVOPEQ_EQ_FMA_INTRINSICS
+        return _mm_fmsub_pd(a, b, c);
+#else
+        return _mm_sub_pd(_mm_mul_pd(a, b), c);
+#endif
+    }
+
+    inline __m256d fmaPd256(__m256d a, __m256d b, __m256d c) noexcept
+    {
+#if CONVOPEQ_EQ_FMA_INTRINSICS
+        return _mm256_fmadd_pd(a, b, c);
+#else
+        return _mm256_add_pd(_mm256_mul_pd(a, b), c);
+#endif
+    }
+}
 
 namespace
 {
@@ -31,7 +70,7 @@ namespace
     for (; i < vEnd; i += 4)
     {
         __m256d vData = _mm256_loadu_pd(data + i);
-        vSumSq = _mm256_fmadd_pd(vData, vData, vSumSq);
+        vSumSq = fmaPd256(vData, vData, vSumSq);
     }
     alignas(32) double temp[4];
     _mm256_store_pd(temp, vSumSq);
@@ -227,17 +266,17 @@ namespace
 
             const __m128d v3 = _mm_sub_pd(v0, ic2eq);
             // FMA: a1*ic1eq + a2*v3
-            const __m128d v1 = _mm_fmadd_pd(a1, ic1eq, _mm_mul_pd(a2, v3));
+            const __m128d v1 = fmaPd(a1, ic1eq, _mm_mul_pd(a2, v3));
             // FMA: ic2eq + a2*ic1eq + a3*v3
-            const __m128d v2 = _mm_fmadd_pd(a2, ic1eq,
-                                _mm_fmadd_pd(a3, v3, ic2eq));
+            const __m128d v2 = fmaPd(a2, ic1eq,
+                                fmaPd(a3, v3, ic2eq));
 
-            ic1eq = _mm_fmsub_pd(two, v1, ic1eq);  // 2*v1 - ic1eq
-            ic2eq = _mm_fmsub_pd(two, v2, ic2eq);  // 2*v2 - ic2eq
+            ic1eq = fmsPd(two, v1, ic1eq);  // 2*v1 - ic1eq
+            ic2eq = fmsPd(two, v2, ic2eq);  // 2*v2 - ic2eq
 
             // FMA: m0*v0 + m1*v1 + m2*v2
-            __m128d output = _mm_fmadd_pd(m0, v0,
-                              _mm_fmadd_pd(m1, v1,
+            __m128d output = fmaPd(m0, v0,
+                              fmaPd(m1, v1,
                                _mm_mul_pd(m2, v2)));
 
             if (saturation > 0.0)
@@ -709,9 +748,12 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
                 if (numChannels < 2)
                 {
                     // Mono→Mid: dataLそのまま処理、R=M
+                    // ★ C-38: dataR はモノラルで nullptr。null への copy は書き込み先が無く
+                    //   （Debug では assert、Release では未定義）、M 成分の複製は不要。
                     processBand(dataL, numSamples, band.node->coeffs,
                                 states[2][band.index].data(), saturation);
-                    juce::FloatVectorOperations::copy(dataR, dataL, numSamples);
+                    if (dataR != nullptr && dataR != dataL)
+                        juce::FloatVectorOperations::copy(dataR, dataL, numSamples);
                     continue;
                 }
                 // MとSをエンコード

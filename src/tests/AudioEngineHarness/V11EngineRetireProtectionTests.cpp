@@ -2494,6 +2494,34 @@ bool checkT10cProductionProviderPath()
 // a "0 allocations" reading is only evidence if the mechanism is known to fire
 // (P1/P2), to stay silent outside its scope (N1), and to be per-thread (N2).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// ★ C-41: keep the probe's allocations observable.
+//   icx -O2 (and MSVC /O2) may remove a new/delete pair whose pointer never
+//   escapes. The A2 self-tests then read 0 and the T1 "0 allocations" result
+//   means nothing. Storing the pointer in a volatile global forces the
+//   allocation to happen in every configuration.
+// ---------------------------------------------------------------------------
+namespace {
+const void* volatile g_a2ProbeSink = nullptr;
+
+void a2ProbeNewScalar(int value)
+{
+    int* p = new int(value);
+    g_a2ProbeSink = p;
+    delete p;
+    g_a2ProbeSink = nullptr;
+}
+
+void a2ProbeNewArray(int count)
+{
+    int* p = new int[static_cast<std::size_t>(count)];
+    p[0] = 0;
+    g_a2ProbeSink = p;
+    delete[] p;
+    g_a2ProbeSink = nullptr;
+}
+} // namespace
+
 bool checkA2ProbeMechanism()
 {
     bool ok = true;
@@ -2503,8 +2531,7 @@ bool checkA2ProbeMechanism()
     a2probe::reset();
     {
         a2probe::Scope scope;
-        int* p = new int(1);
-        delete p;
+        a2ProbeNewScalar(1);
     }
     if (a2probe::count() != 1)
     {
@@ -2523,8 +2550,7 @@ bool checkA2ProbeMechanism()
     a2probe::reset();
     {
         a2probe::Scope scope;
-        int* p = new int[10];
-        delete[] p;
+        a2ProbeNewArray(10);
     }
     if (a2probe::count() != 1)
     {
@@ -2541,10 +2567,8 @@ bool checkA2ProbeMechanism()
     // N1 — allocation outside the probe scope is NOT counted
     a2probe::reset();
     {
-        int* p = new int(7);
-        delete p;
-        int* q = new int[4];
-        delete[] q;
+        a2ProbeNewScalar(7);
+        a2ProbeNewArray(4);
     }
     if (a2probe::count() != 0)
     {
@@ -2566,17 +2590,14 @@ bool checkA2ProbeMechanism()
         a2probe::Scope outer;
         {
             a2probe::Scope inner;
-            int* p = new int(2);
-            delete p;                       // counted once
+            a2ProbeNewScalar(2);            // counted once
         }
         innerStillActive = a2probe::active();   // must still be true (depth 1)
-        int* q = new int(3);
-        delete q;                                // counted (depth 1)
+        a2ProbeNewScalar(3);                     // counted (depth 1)
     }
     outerReleased = !a2probe::active();
     {
-        int* r = new int(4);
-        delete r;                                // NOT counted (depth 0)
+        a2ProbeNewScalar(4);                     // NOT counted (depth 0)
     }
     const auto nestedCount = a2probe::count();
     if (!innerStillActive || !outerReleased || nestedCount != 2)
@@ -2610,10 +2631,7 @@ bool checkA2ProbeThreadIsolation()
     std::thread a([&] {
         a2probe::Scope scope;
         for (int i = 0; i < 50; ++i)
-        {
-            int* p = new int(i);
-            delete p;
-        }
+            a2ProbeNewScalar(i);
         aSeen = a2probe::count();
         aInScope.store(true, std::memory_order_release);
         while (!bDone.load(std::memory_order_acquire))
@@ -2624,10 +2642,7 @@ bool checkA2ProbeThreadIsolation()
         while (!aInScope.load(std::memory_order_acquire))
             std::this_thread::yield();
         for (int i = 0; i < 50; ++i)
-        {
-            int* p = new int(i);
-            delete p;                       // thread B is outside any scope
-        }
+            a2ProbeNewScalar(i);            // thread B is outside any scope
         bSeen = a2probe::count();
         bDone.store(true, std::memory_order_release);
     });

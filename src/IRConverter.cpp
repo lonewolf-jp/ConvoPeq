@@ -210,24 +210,39 @@ bool IRConverter::loadAudioFile(const juce::File& file,
         return false;
 
     const int64 n = reader->lengthInSamples;
-    if (n <= 0 || n > static_cast<int64>(std::numeric_limits<int>::max()))
+    // ★ C-06: a declared length alone must not drive an unbounded allocation. 2^24
+    //   samples is ~5.8 minutes at 48 kHz and far beyond any usable IR; larger files are
+    //   rejected before the work buffers are created.
+    static constexpr int64 kMaxIrSamples = int64{1} << 24;
+    if (n <= 0 || n > kMaxIrSamples)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] loadAudioFile: rejected length=" + juce::String(n));
         return false;
+    }
 
     const int channels = static_cast<int>(reader->numChannels);
-    if (channels <= 0)
+    if (channels <= 0 || channels > 8)
         return false;
 
-    juce::AudioBuffer<float> temp(channels, static_cast<int>(n));
-    if (!reader->read(&temp, 0, static_cast<int>(n), 0, true, true))
-        return false;
-
-    out.setSize(channels, static_cast<int>(n));
-    for (int ch = 0; ch < channels; ++ch)
+    try
     {
-        const float* src = temp.getReadPointer(ch);
-        double* dst = out.getWritePointer(ch);
-        for (int i = 0; i < static_cast<int>(n); ++i)
-            dst[i] = static_cast<double>(src[i]);
+        juce::AudioBuffer<float> temp(channels, static_cast<int>(n));
+        if (!reader->read(&temp, 0, static_cast<int>(n), 0, true, true))
+            return false;
+
+        out.setSize(channels, static_cast<int>(n));
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const float* src = temp.getReadPointer(ch);
+            double* dst = out.getWritePointer(ch);
+            for (int i = 0; i < static_cast<int>(n); ++i)
+                dst[i] = static_cast<double>(src[i]);
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] loadAudioFile: out of memory for " + juce::String(n) + " samples");
+        return false;
     }
 
     sampleRateOut = reader->sampleRate;

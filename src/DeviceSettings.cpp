@@ -359,9 +359,12 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
     inputHeadroomEditor.setText(juce::String(audioEngine.getInputHeadroomDb(), 1));
     inputHeadroomEditor.setJustification(juce::Justification::right);
     inputHeadroomEditor.onTextChange = [this] {
+        // ★ C-14: 上限はモード依存（ラベルと同じ computeInputHeadroomMaxDb()）。
+        //   0 dB 固定にすると「-12..-6」と表示しながら -6 超を受け付けてしまう。
+        const double maxDb = static_cast<double>(computeInputHeadroomMaxDb());
         double val = inputHeadroomEditor.getText().getDoubleValue();
         if (val < -12.0) val = -12.0;
-        if (val > 0.0) val = 0.0;
+        if (val > maxDb) val = maxDb;
         audioEngine.setInputHeadroomDb(static_cast<float>(val));
     };
 
@@ -475,8 +478,10 @@ DeviceSettings::DeviceSettings (juce::AudioDeviceManager& adm, AudioEngine& engi
 
     // ★ [work63] Audio Thread Priority toggle（再起動前提）
     addAndMakeVisible(audioThreadPriorityToggle);
-    audioThreadPriorityToggle.setButtonText("Audio Thread Priority: MMCSS");
+    // ★ C-14: 初期文言は「実際の設定」に合わせる（常に MMCSS と表示しない）。
     audioThreadPriorityToggle.setToggleState(engine.isAudioThreadPriorityMmcss(), juce::dontSendNotification);
+    audioThreadPriorityToggle.setButtonText(engine.isAudioThreadPriorityMmcss()
+        ? "Audio Thread Priority: MMCSS" : "Audio Thread Priority: Native RT");
     audioThreadPriorityToggle.setTooltip("Toggle and restart to apply");
     audioThreadPriorityToggle.onClick = [this] {
         const bool useMmcss = audioThreadPriorityToggle.getToggleState();
@@ -655,42 +660,43 @@ void DeviceSettings::updateNoiseShaperControls()
     resized();
 }
 
+float DeviceSettings::computeInputHeadroomMaxDb() const
+{
+    const bool eqBypassed = audioEngine.isEqBypassRequested();
+    const bool convBypassed = audioEngine.isConvolverBypassRequested();
+    const auto order = audioEngine.getProcessingOrder();
+
+    if (convBypassed && eqBypassed)
+        return 0.0f;                       // Bypass
+    if (convBypassed && !eqBypassed)
+        return 0.0f;                       // PEQ only
+    if (!convBypassed && !eqBypassed
+        && order == AudioEngine::ProcessingOrder::EQThenConvolver)
+        return 0.0f;                       // PEQ -> Conv
+    return -6.0f;                          // Conv only / Conv -> PEQ
+}
+
 void DeviceSettings::updateGainStagingDisplay()
 {
     const bool eqBypassed = audioEngine.isEqBypassRequested();
     const bool convBypassed = audioEngine.isConvolverBypassRequested();
     const auto order = audioEngine.getProcessingOrder();
 
-    float inputMaxDb = 0.0f;
+    const float inputMaxDb = computeInputHeadroomMaxDb();
     float makeupMinDb = 0.0f;
     float makeupMaxDb = 12.0f;
     juce::String modeText;
 
     if (convBypassed && eqBypassed)
-    {
         modeText = "Bypass";
-        inputMaxDb = 0.0f;
-    }
     else if (convBypassed && !eqBypassed)
-    {
         modeText = "PEQ only";
-        inputMaxDb = 0.0f;
-    }
     else if (!convBypassed && !eqBypassed && order == AudioEngine::ProcessingOrder::EQThenConvolver)
-    {
         modeText = "PEQ -> Conv";
-        inputMaxDb = 0.0f;
-    }
     else if (eqBypassed && !convBypassed)
-    {
         modeText = "Conv only";
-        inputMaxDb = -6.0f;
-    }
     else
-    {
         modeText = "Conv -> PEQ";
-        inputMaxDb = -6.0f;
-    }
 
     const juce::String inputText = "Input Headroom (" + juce::String(-12.0f, 1) + ".." + juce::String(inputMaxDb, 1) + " dB):";
     const juce::String makeupText = "Output Makeup (" + juce::String(makeupMinDb, 1) + ".." + juce::String(makeupMaxDb, 1) + " dB):";
@@ -1233,8 +1239,15 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
             engine.setAutoGainStagingEnabled(xml->getBoolAttribute("autoGainStagingEnabled", true));
 
             // フィルタタイプ設定の読み込み (デフォルト0 = IIR)
-            int type = xml->getIntAttribute("oversamplingType", 0);
-            engine.setOversamplingType((AudioEngine::OversamplingType)type);
+            // ★ C-13: XML は外部入力。範囲外の int を enum へ直接キャストすると
+            //   DSPCore の分岐（== LinearPhase 以外）が想定外の値で評価される。
+            const int type = xml->getIntAttribute("oversamplingType",
+                                                  static_cast<int>(AudioEngine::OversamplingType::IIR));
+            const bool typeValid = type == static_cast<int>(AudioEngine::OversamplingType::IIR)
+                                || type == static_cast<int>(AudioEngine::OversamplingType::LinearPhase);
+            engine.setOversamplingType(typeValid
+                ? static_cast<AudioEngine::OversamplingType>(type)
+                : AudioEngine::OversamplingType::IIR);
 
             // Audio Thread Priority 設定の読み込み (デフォルト "MMCSS")
             {

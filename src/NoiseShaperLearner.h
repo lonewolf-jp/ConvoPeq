@@ -226,7 +226,8 @@ private:
                            int evaluationBitDepth,
                            int& bestCandidateIndex,
                            double& bestCandidateScore,
-                           const std::stop_token& stopToken);
+                           const std::stop_token& stopToken,
+                           double safetyMargin);
     SessionSignature captureSessionSignature() noexcept;
     void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
     DrainStats drainCaptureQueue(const SessionSignature& session) noexcept;
@@ -234,13 +235,18 @@ private:
     double evaluateCandidate(EvaluationContext& context,
                              const double* candidateCoefficients,
                              int numSegments,
-                             int evaluationBitDepth) noexcept;
+                             int evaluationBitDepth,
+                             double safetyMargin) noexcept;
     double evaluateCandidateMapped(EvaluationContext& context,
                                    const double* mappedCoefficients,
                                    int numSegments,
                                    int evaluationBitDepth) noexcept;
     void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
-    void publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept;
+    // 戻り値: 復元と競合せずに結果を確定できたか。
+    [[nodiscard]] bool publishGenerationResult(const double* parcor, double score,
+                                               int evaluatedCandidates,
+                                               std::uint64_t expectedEpoch,
+                                               double safetyMargin) noexcept;
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
@@ -277,6 +283,13 @@ private:
 
     std::unique_ptr<AudioSegmentBuffer> segmentBuffer;  // ★ P0-3: ヒープ専用化
     CmaEsOptimizer optimizer;
+    // ★ C-03: the optimizer state (mean/covariance/sigma) is written by the worker
+    //   thread and read from message-thread snapshots (getState) and state restore
+    //   (setState). Serialize those accesses; audio/RT paths never touch it.
+    mutable std::mutex optimizerMutex;
+    // ★ review: increments whenever the optimizer state is replaced (setState / restored
+    //   mean). The worker discards a generation whose sample was taken before the restore.
+    std::atomic<std::uint64_t> optimizerStateEpoch { 0 };
     std::array<EvaluationWorkerSlot, kMaxParallelEvaluators> evaluationWorkers {};
     int activeEvaluationWorkerCount = 1;
     int activeAuxEvaluationWorkerCount = 0;

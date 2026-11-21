@@ -49,7 +49,8 @@ public:
                 return false;                       // 他スレッド所有（depth も owner も触らない）
 
             convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-            return rootEnterSucceeded_;             // nested は外側の成否を返す
+            // nested は外側の成否を返す（同一スレッドが書いた値を読む）
+            return convo::consumeAtomic(rootEnterSucceeded_, std::memory_order_acquire);
         }
 
         // 2) 所有者が空き: CAS で所有権を先に確保する（ここが線形化点）
@@ -64,7 +65,7 @@ public:
                 return false;                       // 競合に負けた（状態は変更しない）
 
             convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-            return rootEnterSucceeded_;
+            return convo::consumeAtomic(rootEnterSucceeded_, std::memory_order_acquire);
         }
 
         // 3) 所有権を得た: depth 0→1
@@ -74,7 +75,7 @@ public:
         if (tid >= 0)
         {
             epochProvider->enterReader(tid);
-            rootEnterSucceeded_ = true;
+            convo::publishAtomic(rootEnterSucceeded_, true, std::memory_order_release);
             measureIdx_ = convo::ReaderMeasureRegistry::claim ("RCUReader",
                                                                static_cast<std::uint32_t> (tid), 1u,
                                                                this, epochProvider);
@@ -82,7 +83,7 @@ public:
         }
 
         // 4) slot 取得失敗: owner と depth をロールバック
-        rootEnterSucceeded_ = false;
+        convo::publishAtomic(rootEnterSucceeded_, false, std::memory_order_release);
         convo::ReaderMeasureRegistry::enterFailures_.fetch_add (1u, std::memory_order_relaxed);
         convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
         uint64_t expectedOwnerOnRelease = my;
@@ -122,7 +123,7 @@ public:
     /** ★ P1-A: 今回の enter() が成功し epoch 保護下有効かを返す */
     [[nodiscard]] bool rootEnterSucceeded() const noexcept
     {
-        return rootEnterSucceeded_;
+        return convo::consumeAtomic(rootEnterSucceeded_, std::memory_order_acquire);
     }
 
     /** ★ WORK113 (2026-11-18 Owner 指示): 保護区間内にいるか（nestingDepth > 0）。
@@ -141,7 +142,7 @@ public:
         //   previousDepth==0: underflow → 安全のためリセット
         if (previousDepth == 0)
         {
-            rootEnterSucceeded_ = false;
+            convo::publishAtomic(rootEnterSucceeded_, false, std::memory_order_release);
             convo::ReaderMeasureRegistry::underflows_.fetch_add (1u, std::memory_order_relaxed);   // ★ 計測
             // underflowガード: 0 を release で再公開し、展開 depth を修正。
             convo::publishAtomic(nestingDepth, 0, std::memory_order_release);
@@ -163,9 +164,14 @@ public:
         }
         if (convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire) != currentThreadToken())
         {
-            rootEnterSucceeded_ = false;  // 所有者不一致でもリセット
+            convo::publishAtomic(rootEnterSucceeded_, false, std::memory_order_release);  // 所有者不一致でもリセット
             return;
         }
+
+        // ★ C-01: 成否フラグは所有者解放より「先」に落とす。逆順だと、解放直後に
+        //   別スレッドの enter() が true を書いた後で旧所有者の false が上書きし、
+        //   新しい所有者の nested 判定が失敗する（fail-closed で音声が素通しになる）。
+        convo::publishAtomic(rootEnterSucceeded_, false, std::memory_order_release);
 
         // acq_rel: activeThreadId を原子的に取得（+クリア）；acquire で acquireThreadSlot の release と HB。
         const int tid = convo::exchangeAtomic(activeThreadId, -1, std::memory_order_acq_rel);
@@ -178,9 +184,6 @@ public:
         }
         // release: ownerThreadToken を 0 に戻し、次の enter() の CAS acquire と HB 。
         convo::publishAtomic(ownerThreadToken, static_cast<uint64_t>(0), std::memory_order_release);
-
-        // ★ P1-A: 正常 cleanup 完了 — リセット
-        rootEnterSucceeded_ = false;
     }
 
 private:
@@ -232,8 +235,10 @@ private:
     std::atomic<uint64_t> ownerThreadToken { 0 };
     IReaderEpochProvider* epochProvider = nullptr;
     int measureIdx_ = -1;   // ★ 計測: ReaderMeasureRegistry のレコード番号
-    // ★ P1-A: per-enter 成否追跡（non-atomic: RAII thread confinement 下で安全）
-    bool rootEnterSucceeded_ = false;
+    // ★ P1-A / C-01: per-enter 成否追跡。所有者スレッドだけが true/false を書く設計だが、
+    //   「所有者解放 → 次スレッドの enter → 旧所有者の false 書き込み」の順序が成立し得るため、
+    //   フラグ自体を atomic にしてデータ競合を無くす。意味論は従来どおり thread-confined。
+    std::atomic<bool> rootEnterSucceeded_ { false };
 };
 
 class RCUReaderGuard

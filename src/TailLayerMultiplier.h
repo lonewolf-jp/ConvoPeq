@@ -56,4 +56,15 @@ inline constexpr int kTailL1L2MultDefault = 8;
     return (requested - lower >= upper - requested) ? upper : lower;
 }
 
+/// Air Absorption (0) と Layer Tail Contouring (1) は L2 の分解能を保つため、
+/// 倍率を 8 以上へ引き上げる（MKLNonUniformConvolver::SetImpulse の規則）。
+/// 保存値・表示値・実効値を一致させるため、setter 側もこの関数を使う。
+[[nodiscard]] constexpr int effectiveTailL1L2Multiplier(int requested, int tailMode) noexcept
+{
+    const int sanitized = sanitizeTailL1L2Multiplier(requested);
+    if (tailMode == 0 || tailMode == 1)
+        return (sanitized < 8) ? 8 : sanitized;
+    return sanitized;
+}
+
 } // namespace convo

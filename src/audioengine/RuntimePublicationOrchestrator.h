@@ -377,7 +377,6 @@ private:
     PublicationExecutor executor_;
     DSPTransition transition_;
     DSPLifetimeManager lifetime_;
-    convo::RCUReader publicationReader;
 };
 
 } // namespace convo::isr

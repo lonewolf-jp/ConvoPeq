@@ -5,6 +5,7 @@
 //============================================================================
 #include "ConvolverControlPanel.h"
 #include "MKLNonUniformConvolver.h" // ★ SR-02 (S-3): L0 coverage 表示の単一権威（kL0PartsHardCap）
+#include "TailLayerMultiplier.h"     // ★ C-20: 2 冪への丸め規則（単一権威）
 #include "MixedPhaseOptimizationComponent.h"
 #include "ConvolverSettingsComponent.h"
 #include <cmath>
@@ -278,7 +279,12 @@ private:
         }
         else if (slider == &tailMultSlider)
         {
-            engine.setConvolverTailL1L2Multiplier(static_cast<int>(std::round(tailMultSlider.getValue())));
+            // ★ C-20: only powers of two exist in the engine geometry. Snap the control
+            //   so the number the user sees is the number the engine applies.
+            const int snapped = convo::sanitizeTailL1L2Multiplier(
+                static_cast<int>(std::round(tailMultSlider.getValue())));
+            tailMultSlider.setValue(snapped, juce::dontSendNotification);
+            engine.setConvolverTailL1L2Multiplier(snapped);
         }
     }
 

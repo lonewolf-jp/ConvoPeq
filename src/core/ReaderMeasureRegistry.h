@@ -139,15 +139,20 @@ public:
         }
         if (aggIdx < 0)
         {
+            // ★ C-29: claim the slot as "initializing" (2), write the tag, and only then
+            //   publish "ready" (1). Publishing ready first let concurrent readers match an
+            //   empty or half-written tag and either miss the entry or read torn text.
             for (int i = 0; i < kTags; ++i)
             {
                 std::uint32_t expected = 0;
-                if (convo::compareExchangeAtomic (aggs_[i].used, expected, 1,
+                if (convo::compareExchangeAtomic (aggs_[i].used, expected, 2,
                                                   std::memory_order_acq_rel,
                                                   std::memory_order_relaxed))
                 {
                     std::memset (aggs_[i].tag, 0, sizeof (aggs_[i].tag));
                     std::strncpy (aggs_[i].tag, tag, sizeof (aggs_[i].tag) - 1);
+                    convo::publishAtomic (aggs_[i].used, std::uint32_t{1},
+                                          std::memory_order_release);
                     aggIdx = i;
                     break;
                 }

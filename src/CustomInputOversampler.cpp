@@ -190,10 +190,9 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     vSum = _mm_hadd_pd(vSum, vSum);
     double sum = _mm_cvtsd_f64(vSum);
 
-    // AVX→legacy SSE 境界
-#if defined(__AVX2__)
-    _mm256_zeroupper();
-#endif
+    // ★ C-46: an explicit _mm256_zeroupper() is redundant here — the compiler emits
+    //   vzeroupper at the function boundary when the ABI requires it, and the scalar tail
+    //   below uses no vector registers.
 
     // Scalar remainder
     for (; i < n; ++i)
@@ -207,7 +206,10 @@ double CustomInputOversampler::dotProductAvx2(const double* __restrict x,
     return sum;
 }
 
-#if defined(__AVX2__) && defined(__FMA__)
+// ★ C-27: MSVC never defines __FMA__ even with /arch:AVX2, so the old
+//   `__AVX2__ && __FMA__` condition removed the fast path from every MSVC build.
+//   The intrinsics are available whenever AVX2 is enabled on MSVC.
+#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
 double CustomInputOversampler::dotProductDecimateAvx2(
     const double* __restrict history,
     const double* __restrict coeffs,
@@ -659,7 +661,7 @@ void CustomInputOversampler::decimateStage(const Stage& stage,
         }
 
         // ── P1-2: stride-2 dot product（AVX2） ──
-#if defined(__AVX2__) && defined(__FMA__)
+#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
         if (stage.convCount >= 8)
         {
             // 8重アンロール dotProductDecimateAvx2（convCount>=8 で効果的）

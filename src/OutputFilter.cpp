@@ -25,7 +25,10 @@ namespace convo {
 BiquadCoeff OutputFilter::makeLPF(double fc, double Q, double fs) noexcept
 {
     const double nyq = fs * 0.4999;
-    if (fc >= nyq || Q <= 0.0 || fs <= 0.0)
+    // ★ C-11: fc <= 0 must be rejected like makeHPF does. A zero/negative corner
+    //   produced a filter whose numerator and denominator both collapsed to a
+    //   pass-through with a DC offset instead of the documented identity.
+    if (fc <= 0.0 || fc >= nyq || Q <= 0.0 || fs <= 0.0)
         return makeIdentity();
 
     const double w0    = 2.0 * juce::MathConstants<double>::pi * fc / fs;

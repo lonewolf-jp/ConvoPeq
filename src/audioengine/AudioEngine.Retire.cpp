@@ -65,11 +65,15 @@ void AudioEngine::drainDeferredRetireQueues(bool allowDuringShutdown) noexcept
     //   (allowDuringShutdown=true) are never suppressed.
     // ★ F1'-b (2026-10-25) 監査対応（欠陥 A）: 延期リストも「保留あり」とみなす。
     //   これを含めないと、D/Q/E/T が空のとき早期 return して再試行に到達しない。
+    // ★ C-12: pendingReclaimHandles_ だけが残っている場合も drain を実行する。
+    //   ここに含めないと、retire 済みだが epoch 未達で延期された handle を再試行する
+    //   経路が「他が空」のときに限って消え、slot が解放されないまま残る。
     if (!allowDuringShutdown
         && m_retireRouter->pendingRetireCount() == 0
         && m_retireRouter->residentCountAtomic() == 0
         && deferredDestroyResidentAtomic() == 0
-        && dspHandleRuntime_.deferredQuarantineDestroyCount() == 0)
+        && dspHandleRuntime_.deferredQuarantineDestroyCount() == 0
+        && pendingReclaimHandleCount() == 0)
         return;
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();

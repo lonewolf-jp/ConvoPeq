@@ -12,17 +12,14 @@ void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, D
     std::lock_guard<std::mutex> lock(mutex);
     if (count >= kCapacity)
     {
-        // 容量超過: テールのエントリを強制実行してキューを空ける
-        // (安全側に倒れる前に deleter を呼び出す)
-        if (deleter && ptr)
-        {
-            // ★ domain tag: レガシー DeletionQueue は本設計の対象外（到達しない）。
-            //   万一到達した場合は「ドメイン未特定」として Unknown を記録する。
-            convo::isr::RetireLatencyRecorder::instance().recordComplete (
-                ptr, convo::isr::RetireLatencyRecorder::Path::QueueOverflow,
-                convo::RetireDomainId::Unknown);   // ★ A(D1)
-            deleter(ptr);
-        }
+        // ★ C-09: 容量超過時に deleter を即実行してはいけない。このキューは epoch を
+        //   持つ遅延解放キューであり、enqueue 時点で reader がまだ参照している可能性が
+        //   ある。即時解放は Use-After-Free になるため、ここでは「解放せずに捨てる」
+        //   （リークはするが安全側）を選ぶ。件数は overflowDropCount() で観測できる。
+        //   このレガシー経路は現行構成では到達しない（DeferredDeletionQueue が本系統）。
+        //   RetireLatencyRecorder へは「完了」を記録しない。解放していないため、
+        //   記録すると遅延統計が実際より良く見えてしまう。
+        overflowDrops.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     queue[count++] = {ptr, deleter, epoch, type};

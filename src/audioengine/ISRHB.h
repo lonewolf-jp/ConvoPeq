@@ -61,6 +61,10 @@ public:
 
 private:
     std::vector<HBTraceEvent> traceEvents_;
+    // ★ C-25: the diagnostic trace is written by many threads and never drained during a
+    //   run. Cap it so a long diagnostic session cannot exhaust memory; when full, the
+    //   older half is discarded and the newest events are kept.
+    static constexpr std::size_t kMaxTraceEvents = 200000;
     std::mutex traceMutex_;
     std::atomic<uint64_t> eventCount_{0};
 };

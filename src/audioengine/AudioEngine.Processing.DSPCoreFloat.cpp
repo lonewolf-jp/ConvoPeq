@@ -374,6 +374,19 @@ void AudioEngine::DSPCore::process(const juce::AudioSourceChannelInfo& bufferToF
         processBlock = originalBlock;
     }
 
+    // ★ C-31: if the dry capture buffers are missing (allocation failure) the blend below
+    //   cannot run. Under a full bypass the DSP chain is already passing the input through,
+    //   so wet == dry and the correct action is to finish the fade immediately instead of
+    //   leaving the smoother mid-fade (which would attenuate the output on the next block).
+    const bool haveDryCapture = dryBypassBufferDoubleL
+                             && dryBypassBufferDoubleR
+                             && dryBypassCapacityDouble >= numSamples;
+    if (!haveDryCapture && ramp.bypassFadeGainFloat.isSmoothing())
+    {
+        jassertfalse; // prepareToPlay() must always allocate these buffers
+        ramp.bypassFadeGainFloat.setCurrentAndTargetValue(requestedFullBypass ? 0.0f : 1.0f);
+    }
+
     // ★ B01: Float 版 bypass blend (Double 版と同じ dryBypassBufferDouble を使用)
     {
         const bool bypassBlendRequested = ramp.bypassFadeGainFloat.isSmoothing() || requestedFullBypass;

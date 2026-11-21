@@ -25,7 +25,6 @@ RuntimePublicationOrchestrator::RuntimePublicationOrchestrator(AudioEngine& engi
     , executor_()
     , transition_(engine)
     , lifetime_(engine)
-    , publicationReader(engine.getRetireRouter())
 {
     telemetryRecorder_.setStateOwner(&stateOwner_);
     // ★ P1-6: 起動直後の誤検出防止（メンバ初期化子での順序問題を避けるためコンストラクタ本体で初期化）
@@ -51,8 +50,13 @@ PublicationAdmission::Decision RuntimePublicationOrchestrator::trySubmitImpl(
     const bool worldReadProtected = submitReadGuard.rootEnterSucceeded();
 
     // ---- Phase 1: Admission ----
+    // ★ C-01: use the same call-local reader for admission. This function runs on the
+    //   Message thread, the RebuildThread and CoordinatorLoop workers, so a member
+    //   reader would be entered/exited concurrently and its non-atomic
+    //   rootEnterSucceeded_ flag would race. A local reader keeps every reader state
+    //   thread-confined (nested enter on the same thread only increments depth).
     // ★ evaluate() は必須。バイパス禁止。
-    const convo::RuntimeReaderContext pubCtx{ publicationReader, convo::ObserveChannel::Publication };
+    const convo::RuntimeReaderContext pubCtx{ submitReader, convo::ObserveChannel::Publication };
     auto decision = admission_.evaluate(req, engine_, pubCtx);
     if (decision != PublicationAdmission::Decision::Accepted)
     {

@@ -10,6 +10,7 @@
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/RCUReader.h"
 #include "core/TimeUtils.h"
+#include "TailLayerMultiplier.h"   // ★ C-20: tailL1L2Multiplier の 2 冪丸め
 
 #include "audioengine/AtomicAccess.h"
 
@@ -50,6 +51,11 @@ namespace
 
     inline double floorNoLibm(double x) noexcept
     {
+        // ★ C-35: converting NaN, ±Inf or |x| >= 2^63 to long long is undefined behaviour.
+        //   Those values cannot come from a valid delay position; return them unchanged so
+        //   the caller's masking/validation sees the bad value instead of a garbage index.
+        if (!(x >= -9.0e18 && x <= 9.0e18))
+            return x;
         const auto truncated = static_cast<long long>(x);
         const double truncatedAsDouble = static_cast<double>(truncated);
         return (truncatedAsDouble > x)
@@ -890,6 +896,11 @@ void ConvolverProcessor::process(juce::dsp::AudioBlock<double>& block, const Dia
 
 void ConvolverProcessor::setMix(float mixAmount)
 {
+    // ★ C-07: NaN/Inf must never reach the mix smoother. jlimit() does not filter
+    //   non-finite input, and a NaN mix target turns the wet gain into NaN, which
+    //   silences the wet path for as long as the smoother keeps the value.
+    if (!convo::numeric_policy::isFinite(static_cast<double>(mixAmount)))
+        return;
     float newVal = juce::jlimit(0.0f, 1.0f, mixAmount);
     float prev;
     {
@@ -995,6 +1006,9 @@ void ConvolverProcessor::setIRLengthManualOverride(bool isManual)
 
 void ConvolverProcessor::setSmoothingTime(float timeSec)
 {
+    // ★ C-07: same non-finite rejection as the IR length and tail setters.
+    if (!convo::numeric_policy::isFinite(static_cast<double>(timeSec)))
+        return;
     float clampedTime = juce::jlimit(SMOOTHING_TIME_MIN_SEC, SMOOTHING_TIME_MAX_SEC, timeSec);
     float prev;
     {
@@ -1053,6 +1067,10 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
 
 void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 {
+    // ★ C-07: a NaN crossover reaches the mixed-phase filter design and poisons the
+    //   wet path. Reject non-finite input and keep the previous value.
+    if (!convo::numeric_policy::isFinite(static_cast<double>(hz)))
+        return;
     const float clamped = juce::jlimit(MIXED_F1_MIN_HZ, MIXED_F1_MAX_HZ, hz);
     float currentEnd;
     {
@@ -1088,6 +1106,9 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 
 void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 {
+    // ★ C-07: see setMixedTransitionStartHz.
+    if (!convo::numeric_policy::isFinite(static_cast<double>(hz)))
+        return;
     float currentStart;
     {
         pendingOverrideLock.enter();
@@ -1155,13 +1176,20 @@ void ConvolverProcessor::setTailMode(TailMode mode)
                                      static_cast<int>(TailMode::Bypass),
                                      static_cast<int>(mode));
     int prev;
+    int prevMult;
+    int newMult;
     {
         pendingOverrideLock.enter();
         prev = pendingOverride.tailMode;
+        prevMult = pendingOverride.tailL1L2Multiplier;
         pendingOverride.tailMode = clamped;
+        // ★ C-20 / review: Air Absorption と Layer Tail Contouring は実効倍率が 8 以上になる。
+        //   保存値も同じ値へ引き上げ、表示と実効値を一致させる。
+        newMult = convo::effectiveTailL1L2Multiplier(prevMult, clamped);
+        pendingOverride.tailL1L2Multiplier = newMult;
         pendingOverrideLock.exit();
     }
-    if (prev != clamped)
+    if (prev != clamped || prevMult != newMult)
         postCoalescedChangeNotification();
 }
 
@@ -1226,11 +1254,15 @@ void ConvolverProcessor::setTailStrength(float strength)
 
 void ConvolverProcessor::setTailL1L2Multiplier(int multiplier)
 {
-    const int clamped = juce::jlimit(TAIL_L1L2_MULT_MIN, TAIL_L1L2_MULT_MAX, multiplier);
+    // ★ C-20: the convolver geometry only accepts powers of two (TailLayerMultiplier.h),
+    //   and Air Absorption / Layer Tail Contouring raise the applied value to 8.
+    //   Store the value the engine will actually use so the slider shows it.
+    int clamped;
     int prev;
     {
         pendingOverrideLock.enter();
         prev = pendingOverride.tailL1L2Multiplier;
+        clamped = convo::effectiveTailL1L2Multiplier(multiplier, pendingOverride.tailMode);
         pendingOverride.tailL1L2Multiplier = clamped;
         pendingOverrideLock.exit();
     }

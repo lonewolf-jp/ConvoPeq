@@ -299,7 +299,9 @@ inline double dotProductAvx2Ref(const double* __restrict x,
 }
 #endif // __AVX2__
 
-#if defined(__AVX2__) && defined(__FMA__)
+// ★ C-27: production (CustomInputOversampler.cpp) enables the FMA path on MSVC too;
+//   the reference must use the same condition or the fidelity comparison diverges.
+#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
 //============================================================================
 // loadStride2Ref — production CIO.cpp:54-67 と同一構造の独立実装。
 //   { ptr[0], ptr[-2], ptr[-4], ptr[-6] } を返す stride-2 ロード。
@@ -549,7 +551,9 @@ inline void decimateStageRef(StageModel& stage,
             continue;
         }
 
-#if defined(__AVX2__) && defined(__FMA__)
+// ★ C-27: production (CustomInputOversampler.cpp) enables the FMA path on MSVC too;
+//   the reference must use the same condition or the fidelity comparison diverges.
+#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
         if (stage.convCount >= 8)
         {
             acc += dotProductDecimateAvx2Ref(history + (base - stage.convParity), coeffs, stage.convCount);

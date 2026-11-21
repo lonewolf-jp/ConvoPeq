@@ -5,27 +5,72 @@
 // UIコンポーネントの配置とオーディオデバイス管理を行う
 //============================================================================
 #include "MainWindow.h"
+#include "MainApplication.h"
 #include <cmath>
+#include <limits>
 #include "audioengine/AtomicAccess.h"
 
 namespace
 {
+    // ★ C-15: containsOnly() は空文字を許し、"1+2" のような文字種だけ合う文字列も
+    //   通してしまう（getIntValue() は先頭の数値だけを返す）。CLI 入力は外部入力なので、
+    //   「符号は先頭 1 個、残りは数字だけ」を明示的に検査する。
     bool tryParseIntOption(const juce::String& text, int& outValue)
     {
-        if (!text.containsOnly("+-0123456789"))
+        const auto trimmed = text.trim();
+        if (trimmed.isEmpty())
             return false;
 
-        outValue = text.getIntValue();
+        int start = 0;
+        if (trimmed[0] == '+' || trimmed[0] == '-')
+            start = 1;
+        if (start >= trimmed.length())
+            return false;
+
+        for (int i = start; i < trimmed.length(); ++i)
+            if (!juce::CharacterFunctions::isDigit(trimmed[i]))
+                return false;
+
+        const auto parsed = trimmed.getLargeIntValue();
+        if (parsed < static_cast<juce::int64>(std::numeric_limits<int>::min())
+            || parsed > static_cast<juce::int64>(std::numeric_limits<int>::max()))
+            return false;
+
+        outValue = static_cast<int>(parsed);
         return true;
     }
 
     bool tryParseFloatOption(const juce::String& text, float& outValue)
     {
-        if (!text.containsOnly("+-0123456789."))
+        const auto trimmed = text.trim();
+        if (trimmed.isEmpty())
             return false;
 
-        outValue = text.getFloatValue();
-        return text.containsAnyOf("0123456789");
+        int start = 0;
+        if (trimmed[0] == '+' || trimmed[0] == '-')
+            start = 1;
+
+        bool seenDigit = false;
+        bool seenDot = false;
+        for (int i = start; i < trimmed.length(); ++i)
+        {
+            const auto ch = trimmed[i];
+            if (ch == '.')
+            {
+                if (seenDot)
+                    return false;
+                seenDot = true;
+                continue;
+            }
+            if (!juce::CharacterFunctions::isDigit(ch))
+                return false;
+            seenDigit = true;
+        }
+
+        if (!seenDigit)
+            return false;
+        outValue = trimmed.getFloatValue();
+        return true;
     }
 
     juce::String normalizeCliValue(juce::String value)
@@ -266,10 +311,15 @@ MainWindow::MainWindow (const juce::String& name)
     // シングルクライアントASIOや不安定なドライバをデフォルトで除外
     if (! blacklistFile.existsAsFile())
     {
-        blacklistFile.replaceWithText ("# ASIO Driver Blacklist\n"
-                                       "# Add partial driver names to exclude them from the list.\n"
-                                       "BRAVO-HD\n"
-                                       "ASIO4ALL\n");
+        // ★ C-16: 書込み失敗を無視すると、存在しないファイルを loadFromFile して
+        //   「ブラックリストが空」のまま起動する。失敗はログに残す。
+        const bool created = blacklistFile.replaceWithText ("# ASIO Driver Blacklist\n"
+                                                            "# Add partial driver names to exclude them from the list.\n"
+                                                            "BRAVO-HD\n"
+                                                            "ASIO4ALL\n");
+        if (! created)
+            juce::Logger::writeToLog ("[ASIO] blacklist file could not be created: "
+                                      + blacklistFile.getFullPathName());
     }
 
     asioBlacklist.loadFromFile (blacklistFile);
@@ -405,8 +455,21 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
     if (const auto logFileValue = findValue("--cli-log-file"); !logFileValue.isEmpty())
     {
         const auto logFile = juce::File::getCurrentWorkingDirectory().getChildFile(logFileValue);
-        auto fileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq CLI Log", 0);
-        juce::Logger::setCurrentLogger(fileLogger.release());
+        // ★ C-16 / review: 以前は release() して所有権を捨てていた。
+        //   MainWindow より長生きさせる必要がある（~AudioEngine のログも CLI ファイルへ
+        //   出すため）ので、MainApplication へ所有権を移す。移せない場合だけ MainWindow が持つ。
+        auto newLogger = std::make_unique<SizeCappedFileLogger>(logFile, "ConvoPeq CLI Log",
+                                                                static_cast<juce::int64>(8) << 20);
+        if (auto* app = dynamic_cast<MainApplication*>(juce::JUCEApplication::getInstance()))
+        {
+            app->adoptCliLogger(std::move(newLogger));
+        }
+        else
+        {
+            cliFileLogger = std::move(newLogger);
+            previousLogger = juce::Logger::getCurrentLogger();
+            juce::Logger::setCurrentLogger(cliFileLogger.get());
+        }
         juce::Logger::writeToLog("[CLI] Log file: " + logFile.getFullPathName());
     }
 
@@ -1595,6 +1658,10 @@ MainWindow::~MainWindow()
     eqPanel.reset();
     convolverPanel.reset();
     juce::Logger::writeToLog("[DIAG] ~MainWindow: complete");
+    // ★ C-16: FileLogger は MainWindow が所有する。カレントロガーを元に戻してから
+    //   メンバ破棄（unique_ptr）で解放する。戻さないと Logger が破棄済み領域を指す。
+    if (cliFileLogger != nullptr)
+        juce::Logger::setCurrentLogger(previousLogger);
 }
 
 //--------------------------------------------------------------

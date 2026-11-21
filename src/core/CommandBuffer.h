@@ -31,7 +31,10 @@ template <typename T, size_t Capacity>
 #pragma warning(disable : 4324) // Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
 class SPSCRingBuffer {
-    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
+    // ★ C-37: 0 & (0-1) == 0, so Capacity == 0 passed the power-of-two check and produced
+    //   a buffer that always reported full.
+    static_assert(Capacity > 0 && (Capacity & (Capacity - 1)) == 0,
+                  "Capacity must be a non-zero power of two");
     static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
 
 public:

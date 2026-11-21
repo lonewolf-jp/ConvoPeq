@@ -32,6 +32,10 @@ void HBTraceRuntime::recordEdge(const HBEdge& edge) noexcept
 
     {
         std::lock_guard<std::mutex> lock(traceMutex_);
+        if (traceEvents_.size() >= kMaxTraceEvents)
+            traceEvents_.erase(traceEvents_.begin(),
+                               traceEvents_.begin()
+                                   + static_cast<std::ptrdiff_t>(kMaxTraceEvents / 2));
         traceEvents_.push_back(event);
     }
 

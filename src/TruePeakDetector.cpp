@@ -127,6 +127,15 @@ double TruePeakDetector::processBlock(const double* dataL, const double* dataR, 
     if (numSamples <= 0 || !upsampleBuffer)
         return 0.0;
 
+    // ★ C-40 / review: the per-stage histories are rebuilt for the LAST prepare() block
+    //   size, which may be smaller than the allocated sanitizedCapacity. Clamp to the
+    //   current stage limit, not to the allocation size.
+    const int preparedMax = (stages[0].maxInputSamples > 0)
+                              ? stages[0].maxInputSamples
+                              : sanitizedCapacity;
+    if (preparedMax > 0 && numSamples > preparedMax)
+        numSamples = preparedMax;
+
     // 入力の非有限値（NaN/Inf）を履歴へ入れない。履歴に入ると FIR 出力が
     // 非有限になり、流れ出るまで検出値が落ちる。正常入力ではコピーしない。
     const double* inputL = dataL;

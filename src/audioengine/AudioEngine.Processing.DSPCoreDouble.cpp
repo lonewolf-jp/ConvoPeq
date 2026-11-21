@@ -281,7 +281,12 @@ void AudioEngine::DSPCore::processDoubleToBuffer(const juce::AudioBuffer<double>
     const int numSamples = source.getNumSamples();
     const int numChannels = std::min(2, source.getNumChannels());
 
-    if (numSamples <= 0 || destination.getNumSamples() < numSamples)
+    // ★ C-30: the DSP core contract is stereo. A mono destination used to reach
+    //   destination.getWritePointer(1) and write out of bounds. Fail closed (silence)
+    //   instead of trusting the caller.
+    if (numSamples <= 0
+        || destination.getNumChannels() < 2
+        || destination.getNumSamples() < numSamples)
     {
         destination.clear();
         return;
@@ -505,6 +510,17 @@ void AudioEngine::DSPCore::processDouble(juce::AudioBuffer<double>& buffer,
             }
             softClipOS.processDown(osBlock, originalBlock, nChOS);
         }
+    }
+
+    // ★ C-31 (Double 版): dry capture が無い場合はブレンドできない。フルバイパス中は
+    //   処理系が素通しなので wet == dry であり、フェードを即完了させるのが正しい。
+    const bool haveDryCaptureDouble = dryBypassBufferDoubleL
+                                   && dryBypassBufferDoubleR
+                                   && dryBypassCapacityDouble >= numSamples;
+    if (!haveDryCaptureDouble && ramp.bypassFadeGainDouble.isSmoothing())
+    {
+        jassertfalse; // prepareToPlay() must always allocate these buffers
+        ramp.bypassFadeGainDouble.setCurrentAndTargetValue(requestedFullBypass ? 0.0 : 1.0);
     }
 
     const bool bypassBlendRequested = ramp.bypassFadeGainDouble.isSmoothing() || requestedFullBypass;

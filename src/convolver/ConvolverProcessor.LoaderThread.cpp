@@ -69,12 +69,20 @@ void ConvolverProcessor::LoaderThread::run()
         ConvolverProcessor& p;
         juce::WeakReference<ConvolverProcessor> weakP;
         const juce::Thread& t;
+        const std::uint64_t requestGeneration;
         bool success = false;
         ~FlagResetter() {
             if (!success) {  // ← 修正: threadShouldExit 条件を削除
                 auto wp = weakP;
-                const bool queued = juce::MessageManager::callAsync([wp] {
+                const auto gen = requestGeneration;
+                const bool queued = juce::MessageManager::callAsync([wp, gen] {
                     if (auto* o = wp.get()) {
+                        // ★ C-04: a superseded loader must not clear the flags of the load
+                        //   that replaced it. The old thread is intentionally not joined
+                        //   (non-blocking load start), so its failure path can run after a
+                        //   newer request has already set isLoading/isRebuilding again.
+                        if (!o->isConvolverGenerationCurrent(gen))
+                            return;
                         convo::publishAtomic(o->isLoading, false, std::memory_order_release); // release: timer/UI の isLoading acquire と HB
                         convo::publishAtomic(o->isRebuilding, false, std::memory_order_release); // release: timer/load 経路 acquire と HB
                     }
@@ -88,13 +96,15 @@ void ConvolverProcessor::LoaderThread::run()
                         // atomic 状態のみ整合性を維持する（次回ロード時のフラグ競合防止）。
                         // UI コンポーネント状態は更新されない可能性があるが、これは仕様であり、
                         // Shutdown 完了後の再初期化で UI 状態はリセットされる。
+                        if (!o->isConvolverGenerationCurrent(gen))
+                            return;
                         convo::publishAtomic(o->isLoading, false, std::memory_order_release);
                         convo::publishAtomic(o->isRebuilding, false, std::memory_order_release);
                     }
                 }
             }
         }
-    } resetter { owner, weakOwner, *this };
+    } resetter { owner, weakOwner, *this, requestGenerationId };
 
     LoadResult result = performLoad(this);
 
@@ -106,10 +116,17 @@ void ConvolverProcessor::LoaderThread::run()
     {
         auto wp = weakOwner;
         const juce::String error = result.errorMessage;
-        const bool queued = juce::MessageManager::callAsync([wp, error]()
+        const std::uint64_t errorGen = requestGenerationId;
+        const bool queued = juce::MessageManager::callAsync([wp, error, errorGen]()
         {
             if (auto* o = wp.get())
+            {
+                // ★ review: same generation rule as the flag reset. A superseded loader
+                //   must not replace the newer load's status with its own error.
+                if (!o->isConvolverGenerationCurrent(errorGen))
+                    return;
                 o->handleLoadError(error);
+            }
         });
 
         if (!queued)
@@ -881,6 +898,10 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
         phaseMode == ConvolverProcessor::PhaseMode::Mixed)
     {
         bool wasCancelled = false;
+        // ★ C-18: convertToMinimumPhase() is best-effort. It returns an empty buffer when
+        //   the FFT would exceed the size limit or the MKL plan fails; validateBuffer()
+        //   below then rejects it and the linear IR is kept. That fallback is intentional
+        //   (the filter stays usable), but it means Minimum mode can silently run linear.
         auto minPhaseIR = ConvolverProcessorInternal::convertToMinimumPhase(stepTrimmed, shouldStop, &wasCancelled);
         if (wasCancelled) return false;
 

@@ -42,6 +42,20 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
     if (isShutdownInProgress())
     {
+        // ★ C-34: the MMCSS revert used to live below this early return, so a callback that
+        //   arrived while shutdown was in progress skipped AvRevertMmThreadCharacteristics.
+        {
+            const auto mmcssPolicy = getCurrentMmcssPolicy();
+            if (mmcssPolicy == MmcssPolicy::SelfManagedProAudio
+                || mmcssPolicy == MmcssPolicy::SelfManagedPlayback)
+            {
+                if (convo::consumeAtomic(mmcssShutdownRequested, std::memory_order_acquire))
+                {
+                    revertMmcssOnAudioThread();
+                    convo::publishAtomic(mmcssShutdownRequested, false, std::memory_order_release);
+                }
+            }
+        }
         shutdownRuntime_.markLateCallback();
         bufferToFill.clearActiveBufferRegion();
         return;
@@ -768,8 +782,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const uint64_t wc = convo::fetchAddAtomic(
             rtLocalState_.callbackTimingWriteCount,
             uint64_t{1}, std::memory_order_relaxed);
+        // ★ C-17: fetch_add の戻り値は加算前の値＝この書き込みの絶対番号。
+        //   読み出し側は [wc - slots, wc) を i % slots で引くため、writer も wc % slots。
         const size_t idx = static_cast<size_t>(
-            (wc - 1) % RTLocalState::kCallbackTimingSlots);
+            wc % RTLocalState::kCallbackTimingSlots);
         auto& entry = rtLocalState_.callbackTimingHistory[idx];
         entry.callbackIndex = thisCallbackIndex;
         entry.processTimeUs = processTime;

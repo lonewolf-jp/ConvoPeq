@@ -9,6 +9,8 @@
 
 #include <JuceHeader.h>
 
+#include "SizeCappedFileLogger.h"
+
 class MainWindow; // フォワード宣言
 
 class MainApplication : public juce::JUCEApplication
@@ -36,9 +38,16 @@ public:
     // オーディオコールバックも安全に停止される。
     void shutdown() override;
 
+    // ★ review: --cli-log-file のロガーは MainWindow より長生きさせる。
+    //   ~AudioEngine と shutdown の最終ログを CLI ファイルへ出すため、
+    //   所有権を MainApplication へ移す。
+    void adoptCliLogger (std::unique_ptr<SizeCappedFileLogger> logger);
+
 private:
     std::unique_ptr<MainWindow> mainWindow;
-    std::unique_ptr<juce::FileLogger> fileLogger;
+    std::unique_ptr<SizeCappedFileLogger> fileLogger;
+    std::unique_ptr<SizeCappedFileLogger> cliLogger;
+    juce::Logger* loggerBeforeCli = nullptr;
 
     // ★ Live evidence: `--verify-runtime-evidence-live`（実 Runtime 実行に基づく証拠）
     //   既存の `--verify-runtime-evidence`（Exporter 単体呼び出し）とは独立したモード。

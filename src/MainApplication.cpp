@@ -142,7 +142,11 @@ void MainApplication::initialise(const juce::String& commandLine)
     {
         const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
         const auto logFile = exeDir.getChildFile("ConvoPeq.log");
-        fileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq Log", 0);
+        // ★ C-23: bound the log file while the process runs. JUCE's FileLogger applies
+        //   maxInitialFileSizeBytes only in its constructor; SizeCappedFileLogger also
+        //   checks at write time and rotates once to <name>.1.
+        fileLogger = std::make_unique<SizeCappedFileLogger>(logFile, "ConvoPeq Log",
+                                                            static_cast<juce::int64>(8) << 20);
         juce::Logger::setCurrentLogger(fileLogger.get());
         juce::Logger::writeToLog("Logger initialized: " + logFile.getFullPathName());
     }
@@ -233,6 +237,22 @@ void MainApplication::initialise(const juce::String& commandLine)
         engine->getAffinityManager().applyMessageThreadPolicy();
 }
 
+void MainApplication::adoptCliLogger (std::unique_ptr<SizeCappedFileLogger> logger)
+{
+    if (logger == nullptr)
+        return;
+
+    if (cliLogger != nullptr)
+    {
+        juce::Logger::setCurrentLogger (loggerBeforeCli);
+        cliLogger.reset();
+    }
+
+    loggerBeforeCli = juce::Logger::getCurrentLogger();
+    cliLogger = std::move (logger);
+    juce::Logger::setCurrentLogger (cliLogger.get());
+}
+
 void MainApplication::shutdown()
 {
     juce::Logger::writeToLog("[DIAG] MainApplication::shutdown() enter");
@@ -275,6 +295,14 @@ void MainApplication::shutdown()
 
     juce::Logger::writeToLog("MainApplication shutting down.");
     juce::Logger::writeToLog("[D123] LOGGER_DETACH / SHUTDOWN_END");
+    // ★ review: CLI ロガーは mainWindow.reset()（~AudioEngine を含む）の後まで保持し、
+    //   ここで元のロガーへ戻してから解放する。
+    if (cliLogger != nullptr)
+    {
+        juce::Logger::setCurrentLogger (loggerBeforeCli);
+        cliLogger.reset();
+        loggerBeforeCli = nullptr;
+    }
     juce::Logger::setCurrentLogger(nullptr);
     fileLogger.reset();
 
