@@ -8,6 +8,10 @@
 //   このクラスは書き込みのたびにサイズを見て、上限に達したら 1 回だけローテートする
 //   （<name>.1 へ退避）。ディスク上の合計は 2 × cap 未満に収まる。
 //
+//   起動時に既存ログが上限を超えている場合は、末尾 cap バイトだけを残して切り詰める
+//   （退避へ丸ごと移すと、巨大な旧ログがそのまま残る）。
+//   ローテートに失敗した場合は、その場で切り詰める。それも失敗したら書込みを捨てる。
+//
 //   書き込み方式は juce::FileLogger と同じ（メッセージごとに FileOutputStream を開く）。
 //   ロガーは任意のスレッドから呼ばれるため、内部で直列化する。
 //==============================================================================
@@ -27,9 +31,7 @@ public:
     {
         const juce::ScopedLock sl (lock);
 
-        // 既存ファイルが上限を超えていたら退避してから始める。
-        if (logFile.existsAsFile() && logFile.getSize() > cap)
-            rotateLocked();
+        trimToCapLocked();
 
         if (! logFile.exists())
             logFile.create();
@@ -49,7 +51,11 @@ protected:
         const auto incoming = static_cast<juce::int64> (message.getNumBytesAsUTF8()) + 2;
 
         if (logFile.getSize() + incoming > cap)
-            rotateLocked();
+        {
+            // 退避も切り詰めもできなければ、上限を守るためにこの 1 行を捨てる。
+            if (! rotateLocked())
+                return;
+        }
 
         writeLocked (message);
     }
@@ -62,13 +68,64 @@ private:
                                        + logFile.getFileExtension());
     }
 
-    void rotateLocked()
+    // 戻り値: 上限内に収まる状態になったか（退避または切り詰めに成功）。
+    bool rotateLocked()
     {
+        if (! logFile.existsAsFile())
+            return logFile.create();
+
         auto previous = rotatedFile();
         previous.deleteFile();
-        if (logFile.existsAsFile())
-            logFile.moveFileTo (previous);
-        logFile.create();
+
+        if (logFile.moveFileTo (previous))
+            return true;
+
+        // 退避できない（バックアップがロックされている等）。その場で空にして上限を守る。
+        return logFile.replaceWithText ({});
+    }
+
+    // 起動時: 既存ログが上限を超えていたら、末尾 cap バイトだけを残す。
+    void trimToCapLocked()
+    {
+        const auto size = logFile.getSize();
+        if (size <= cap)
+            return;
+
+        juce::TemporaryFile temp (logFile);
+        {
+            juce::FileOutputStream out (temp.getFile());
+            juce::FileInputStream in (logFile);
+
+            if (! (out.openedOk() && in.openedOk()))
+            {
+                // 切り詰められない場合は退避を試す。それも駄目なら空にする。
+                rotateLocked();
+                return;
+            }
+
+            in.setPosition (size - cap);
+
+            // 行の途中から始めない。
+            for (;;)
+            {
+                const auto c = in.readByte();
+                if (c == 0)
+                    return;
+                if (c == '\n' || c == '\r')
+                {
+                    out << c;
+                    break;
+                }
+            }
+
+            out.writeFromInputStream (in, -1);
+        }
+
+        if (! temp.overwriteTargetFileWithTemporary())
+        {
+            temp.getFile().deleteFile();
+            rotateLocked();
+        }
     }
 
     void writeLocked (const juce::String& message)

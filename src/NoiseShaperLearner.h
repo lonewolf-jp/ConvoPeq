@@ -226,7 +226,8 @@ private:
                            int evaluationBitDepth,
                            int& bestCandidateIndex,
                            double& bestCandidateScore,
-                           const std::stop_token& stopToken);
+                           const std::stop_token& stopToken,
+                           double safetyMargin);
     SessionSignature captureSessionSignature() noexcept;
     void resetLearningSession(const SessionSignature& session, bool resume) noexcept;
     DrainStats drainCaptureQueue(const SessionSignature& session) noexcept;
@@ -234,13 +235,15 @@ private:
     double evaluateCandidate(EvaluationContext& context,
                              const double* candidateCoefficients,
                              int numSegments,
-                             int evaluationBitDepth) noexcept;
+                             int evaluationBitDepth,
+                             double safetyMargin) noexcept;
     double evaluateCandidateMapped(EvaluationContext& context,
                                    const double* mappedCoefficients,
                                    int numSegments,
                                    int evaluationBitDepth) noexcept;
     void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
-    void publishGenerationResult(const double* parcor, double score, int evaluatedCandidates) noexcept;
+    void publishGenerationResult(const double* parcor, double score, int evaluatedCandidates,
+                                 std::uint64_t expectedEpoch, double safetyMargin) noexcept;
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
