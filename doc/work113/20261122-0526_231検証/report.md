@@ -89,7 +89,7 @@ icx（参考）:
 2. `compile_commands.json` から `src/CustomInputOversampler.cpp` のコマンドを取り出し、`/GL` を外して `/Fo` を差し替えてコンパイルする。
 3. 同じコマンドの `/arch:AVX2` を `/arch:SSE2` に変えて、スカラー版を作る。
 4. `dumpbin /disasm` で関数ごとの命令、`ymm`、`vfmadd` を数える。
-5. 製品構成の実行ファイルを作る。`cmake --build build-msvc --target ConvoPeq --parallel 4` の後に、`dumpbin /symbols ConvoPeq.exe` と `dumpbin /disasm ConvoPeq.exe` を実行する。
+5. 製品構成の実行ファイルを作る。`cmake --build build-msvc --target ConvoPeq --parallel 4` の後、`dumpbin /symbols build-msvc/ConvoPeq_artefacts/Release/ConvoPeq.exe` と `dumpbin /disasm build-msvc/ConvoPeq_artefacts/Release/ConvoPeq.exe` を実行する。実行ファイルはリポジトリ直下ではなく、このパスに置かれる。
 6. カーネルのベンチマークを `cl /O2 /Ob2 /arch:AVX2` でビルドし、31・63・127 タップで 20 万回呼ぶ。
 
 ## 8. 参照
