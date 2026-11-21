@@ -12,22 +12,26 @@ C-24（旧 MED-18「学習 XML の再解析で起動と終了が遅い」）を�
 | `noise_shaper_learn.xml` | `DeviceSettings::saveNoiseShaperState`（`src/DeviceSettings.cpp:853`）、`loadNoiseShaperState`（同 917） | 10 サンプルレート × 3 ビット深度 × 6 モード = 180 個の `<State>`。各状態は mean 9、covariance 45、bestCoefficients 9 などの属性を持つ | 約 280 KB（過去の記録） |
 | `learned_state.xml` | `NoiseShaperLearner::saveLearnedState`（`src/NoiseShaperLearner.cpp:1501`）、`loadLearnedState`（同 1523） | 単一状態。属性は 5 個 + 係数 9 + CMA mean 9 | 約 2 KB |
 
-- 起動時は `DeviceSettings::loadSettings` の先頭で `loadNoiseShaperState` を呼ぶ（同 1070）。終了時は `DeviceSettings::saveSettings` の先頭で `saveNoiseShaperState` を呼ぶ（同 1017）。保存側は既存ファイルを一度 parse してから 180 状態を書き直す。
-- したがって、候補は「180 状態の parse と適用」「180 状態の再構築と書込み」である。`learned_state.xml` は単一状態なので、単独では遅延の主因になりにくい。
+- 起動時は `DeviceSettings::loadSettings` の先頭で `loadNoiseShaperState` を呼ぶ（同 1070）。終了時は `DeviceSettings::saveSettings` の先頭で `saveNoiseShaperState` を呼ぶ（同 1017）。
+- 保存側は、状態が 1 件も無い場合でも 180 bank の要素を組み立ててファイルを書き直す。既存ファイルがあれば、まず parse してから作り直す。
+- したがって候補は「180 状態の parse と適用」と「180 bank の再構築と書込み」である。`learned_state.xml` は単一状態なので、単独では遅延の主因になりにくい。
 
 ## 2. 測定対象と範囲
 
-### 2.1 区間
+### 2.1 区間と境界の取得方法
 
-| 区間 | 開始 | 終了 |
-| --- | --- | --- |
-| S1 起動全体 | プロセス開始 | `[D123] SHUTDOWN` 系の初期化完了に相当する既存マーカー（`MainApplication` の初期化完了ログ） |
-| S2 設定読込 | `DeviceSettings::loadSettings` の直前 | 同関数の復帰（`loadNoiseShaperState` を含む） |
-| S3 終了全体 | 終了要求（CLI の `--cli-exit-ms` 経過） | プロセス終了 |
-| S4 設定保存 | `DeviceSettings::saveSettings` の直前 | 同関数の復帰（`saveNoiseShaperState` を含む） |
-| S5 ファイル単体 | ファイル open | parse 完了（S5a）／write 完了（S5b） |
+既存のログだけで全境界が取れるわけではない。取れない境界は、コミットしない計測専用ビルドにタイムスタンプを足して測る。
 
-S1〜S4 は既存ログのタイムスタンプ（ミリ秒）と ETW の CPU サンプルで求める。S5 は一時的な計測用 TU（コミットしない）で、対象ファイルを直接 parse／write して求める。
+| 区間 | 開始 | 終了 | 取得方法 |
+| --- | --- | --- | --- |
+| S1 起動全体 | 起動ハーネスが `CreateProcess` 直前に記録する t0 | `MainApplication::initialise` の末尾（`mainWindow->runCommandLineAutomation` の直後） | 既存ログに起動完了のマーカーは無い。終了側は計測専用ビルドで追加する。t0 にはプロセス生成時間が含まれる |
+| S2 設定読込 | `loadSettings()` の直前（`src/MainWindow.cpp:355`） | 同関数の復帰直後 | 既存ログに前後のマーカーは無い。計測専用ビルドで追加する |
+| S3 終了全体 | `[DIAG] MainApplication::shutdown() enter`（`src/MainApplication.cpp:258`）。参考として `[CLI] Auto-exit flush: shutting down`（`MainWindow.cpp:1554`）も記録する | プロセスの終了（ハーネスの `WaitForExit`） | `[D123] LOGGER_DETACH / SHUTDOWN_END`（`MainApplication.cpp:297`）はロガー切断の前で、プロセス終了ではないため終点に使わない |
+| S4 設定保存 | `[DIAG] ~MainWindow: step 6 saveSettings`（`MainWindow.cpp:1641`） | 同 `step 7 removeAudioCallback`（同 1644） | この 2 行はデストラクタ経路にだけ存在する。`saveSettings` の内側（parse と再構築）まで分けるため、計測専用ビルドで `saveNoiseShaperState` の前後にも印を付ける |
+| S5 ファイル単体 | ファイル open | parse 完了（S5a）／write 完了（S5b） | 一時的な計測用 TU（コミットしない）で直接測る |
+
+- 計測専用ビルドは、タイムスタンプの出力だけを足したビルドである。製品コードへはコミットしない。
+- S4 の対象はデストラクタ経路の同期保存とする。`MainWindow.cpp:349` の `callAsync` 経由の保存は別経路なので測定対象外とし、その旨を報告書に書く。
 
 ### 2.2 測定条件
 
@@ -44,7 +48,8 @@ E0 を基準に、E1・E2・E3 との差を求める。E2−E0 が `noise_shaper
 
 - 学習アルゴリズムの計算時間（C-24 の対象は読み書きと再構築）。
 - 音声処理のリアルタイム性能。
-- ドライバ初期化そのものの最適化。ただし計測で主因と判明した場合は、C-24 とは別の項目として起票する。
+- ドライバ初期化そのものの最適化。計測で主因と判明した場合は、C-24 とは別の項目として起票する。
+- `MainWindow.cpp:349` の非同期保存経路。
 
 ## 3. 測定環境
 
@@ -57,13 +62,15 @@ E0 を基準に、E1・E2・E3 との差を求める。E2−E0 が `noise_shaper
 
 ## 4. 測定方法と再現条件
 
-1. 各条件でファイルを配置し、サイズ・SHA-256・`<State>` の個数を記録する。
-2. ウォームアップとして 1 回起動・終了し、結果には含めない（ページキャッシュと JIT の影響を除く）。
-3. 各条件 10 回、起動と終了を繰り返す。順序は E0 → E1 → E2 → E3 を 10 周し、条件間のドリフトを平均化する。
-4. 各回の S1〜S4 を既存ログのタイムスタンプから求め、中央値・IQR・最小・最大を記録する。
-5. 代表的な 3 回について ETW（`wpr -start CPU`）で CPU サンプルを取り、S2・S4 の内訳（XML parse、属性読取、`setAdaptiveNoiseShaperState`、書込み）を確認する。
-6. S5 は一時的な計測用 TU で、`noise_shaper_learn.xml` と `learned_state.xml` をそれぞれ 20 回 parse／write し、中央値を記録する。
-7. 生データは CSV で残し、集計値だけでなく各回の値を残す。
+1. 各条件のファイルを準備し、サイズ・SHA-256・`<State>` の個数を記録する。
+2. 計測専用ビルドで、S1 終了・S2 前後・S4 内側のタイムスタンプを追加する（コミットしない）。
+3. **ウォームアップの前と、各測定回の前**に、条件どおりのファイル状態へ戻す。終了時の `saveNoiseShaperState` は E0・E1 でも `noise_shaper_learn.xml` を書くため、戻さないと次の回の条件が崩れる。戻した後もサイズと SHA-256 を再確認する。
+4. ウォームアップとして 1 回起動・終了し、結果には含めない（ページキャッシュと初回初期化の影響を除く）。
+5. 各条件 10 回、起動と終了を繰り返す。順序は E0 → E1 → E2 → E3 を 10 周し、条件間のドリフトを平均化する。
+6. 各回の S1〜S4 を、ハーネスの時刻と計測専用ビルドのタイムスタンプから求める。中央値・IQR・最小・最大を記録する。
+7. 代表的な 3 回について ETW を取る。CPU サンプルだけでは書込みの待ち時間を帰属できないため、`wpr -start CPU -start FileIO` で CPU とファイル I/O を同時に取り、S2・S4 の内訳（XML parse、属性読取、`setAdaptiveNoiseShaperState`、書込み、待ち）を確認する。
+8. S5 は一時的な計測用 TU で、`noise_shaper_learn.xml` と `learned_state.xml` をそれぞれ 20 回 parse／write し、中央値を記録する。S5 には再構築が含まれないため、再構築込みの評価は S4 の絶対値で行う。
+9. 生データは CSV で残し、集計値だけでなく各回の値を残す。
 
 再現条件として、同じ条件で 2 日以上あけて 2 回実施し、中央値の差が 10% 以内であることを確認する。
 
@@ -75,10 +82,14 @@ E0 を基準に、E1・E2・E3 との差を求める。E2−E0 が `noise_shaper
 | 起動の裾（S1 の E3−E0 p95） | 1,000 ms 以下 | 1,000 ms 超 |
 | 終了の寄与（S3 の E3−E0 中央値） | 300 ms 以下 | 300 ms 超 |
 | 終了の裾（S3 の E3−E0 p95） | 600 ms 以下 | 600 ms 超 |
+| 設定読込の絶対値（S2 の E2 中央値） | 400 ms 以下 | 400 ms 超 |
+| 設定保存の絶対値（S4 の E2 中央値、再構築と書込みを含む） | 300 ms 以下 | 300 ms 超 |
 | `noise_shaper_learn.xml` の parse と適用（S2 の E2−E0 中央値） | 300 ms 以下 | 300 ms 超 |
 | `noise_shaper_learn.xml` の書込み（S4 の E2−E0 中央値） | 150 ms 以下 | 150 ms 超 |
 | 再現性（同一条件 10 回の IQR / 中央値） | 30% 以内 | 30% 超 |
 
+- 絶対値の 2 行は、E0 でも走る処理（180 bank の再構築など）を取りこぼさないために置く。差分だけでは、両条件に共通する遅い処理が相殺される。
+- S5 は再構築を含まないため、S5 の値だけで保存全体を合格にしない。保存全体は S4 の絶対値で判定する。
 - しきい値は体感の目安として置いた製品判断であり、測定前に確定する。測定後に動かさない。
 - 再現性が 30% を超えた測定は判定に使わず、環境を整えて再測定する。
 
@@ -88,6 +99,8 @@ E0 を基準に、E1・E2・E3 との差を求める。E2−E0 が `noise_shaper
 | --- | --- |
 | すべて合格 | 「再現せず」としてクローズする。根拠を報告書に残す |
 | 起動または終了が不合格で、ETW の主因が XML の parse／write／再構築 | 「確認」に変更し、修正設計（差分保存、遅延読込、バイナリ形式など）を作る |
+| S2 または S4 だけが不合格で、S1・S3 が合格 | 「確認（対象処理が基準超え）」とし、修正設計の対象を該当区間に限定する。起動・終了の体感に影響しない場合は優先度を下げて追跡を続け、クローズはしない |
+| S4 の絶対値だけが不合格で、S4 の E2−E0 が合格 | 「確認（既存の保存処理が基準超え）」とし、再構築と書込みのどちらが重いかを ETW と S5 で切り分けてから設計する |
 | 不合格だが主因が別（ドライバ初期化、プラグイン走査など） | C-24 は「原因コード無し」のまま維持し、主因を別項目として起票する |
 | 計測不能（環境要因、再現性不足） | 保留を維持し、理由と再測定条件を記録する |
 
@@ -104,3 +117,4 @@ E0 を基準に、E1・E2・E3 との差を求める。E2−E0 が `noise_shaper
 - 原因を推定した段階でのコード変更。
 - 測定前のしきい値変更。
 - 測定していない項目を「改善した」「解決した」と記録すること。
+- 計測専用のタイムスタンプを製品コードへコミットすること。
