@@ -25,7 +25,7 @@
 - 起点は `origin/main` の `a9598d34751794c31d4da23048baed0c8e679e24`（2026-11-21 09:33）。
 - 独立 worktree を作り、未コミット変更を持ち込んでいない。`git status` は作業開始時点で空だった。
 - ビルドは MSVC ではなく Intel oneAPI 2026.2（icx）Release。`build.bat` ではなく cmake を直接呼び、`vcvars64` と `MKLROOT`／`IPPROOT`／`LIB` を明示した。
-- コード改修のコミットは `712ecb55`、`07446a56`、`8c1668a9`、`cc1bee36`、`5f15bd8c`（親 `a9598d34`）。46 ファイル、1,100 行追加・180 行削除程度（報告書と AGENTS.md を含む）。
+- コード改修のコミットは `712ecb55`、`07446a56`、`8c1668a9`、`cc1bee36`、`5f15bd8c`（親 `a9598d34`）。コードは 45 ファイル、1,114 行追加・211 行削除（5 コミット）。これに本報告書 1 件を加えて 46 ファイルになる。
 
 ## 3. 高 8 件
 
@@ -114,7 +114,7 @@ C-26、C-47〜C-55 はコードを変えない。C-26 はソース走査がす�
 | C-36 | equal-power 近似が [0,1] に収まり、単調で、x=1 で 1 を超えない |
 | C-37 | SPSC リングの容量・FIFO・pop 後の再 push |
 
-MSVC 14.52.37025 で単体にコンパイルして実行し、16 項目すべて PASS（終了コード 0）を確認した。
+実行ファイルを単体で起動し、16 項目すべて PASS（終了コード 0）を確認した。
 
 ### 7.2 静的ゲート
 
@@ -128,7 +128,7 @@ icx 2026.2 Release で全 263 ステップをビルドし、エラー 0（終了
 
 ### 7.4 ctest 全件
 
-`ctest --test-dir build -C Release` を実行し、63/63 が成功した。新規の `Fix55ContractTests` も含む。最終実行は 181.16 秒である。
+`ctest --test-dir build -C Release` を実行し、63/63 が成功した。新規の `Fix55ContractTests` も含む。実行時間は回によって 152〜183 秒で、最終実行は 159.32 秒である。
 
 最初の実行では 61/63 だった。内訳は次の 2 件で、どちらもコードの退行ではない。
 
@@ -176,9 +176,11 @@ CodeRabbit のレビューで 10 件の指摘があり、すべて反映した�
 | epoch と復元後スコアを mutex の外で別々に読み、新しい epoch と古いスコアの組を掴み得る | 読み取り・基準の更新・sampling を同一の臨界区間へ入れる |
 | `latestScore` が改善時しか更新されず「Latest score」の表示が古いまま残る | 評価が有効な世代すべてで公開し、履歴は改善時のみとする。復元で無効になった世代は epoch 照合の下で除外 |
 
+4 回のレビューで合計 19 件（10、5、2、2）の指摘があり、すべて反映した。
+
 ### 7.6 PR #229 の CI
 
-PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 のコード改修の最終コミット `408c07e9` で、17 件のチェックがすべて成功した（1 件はディスパッチ専用の意図的な skip）。以降のコミットはこの報告書だけである。
+PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 のコード改修の最終コミット `408c07e9` と、報告書だけのコミット `38ca32c7` の双方で、17 件のチェックがすべて成功した（1 件はディスパッチ専用の意図的な skip）。所要時間は `408c07e9` の実行値である。これ以降のコミットも本報告書だけである。
 
 | チェック | 結果 | 所要 |
 | --- | --- | --- |
@@ -190,7 +192,7 @@ PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 のコード改修の最終�
 | lint-audioengine、compliance-list-md、authority-static-checks、authority-runtime-tests、audit-report-verification | 成功 | 各 17〜43 秒 |
 | CodeRabbit | 成功（4 回目のレビューで新規指摘なし） | 5 分 34 秒 |
 
-マージ状態は `MERGEABLE` / `CLEAN` である。
+確認時点のマージ状態は `MERGEABLE` / `CLEAN` である。
 
 ## 8. C-ID ごとの検証根拠
 
@@ -203,11 +205,11 @@ PR https://github.com/lonewolf-jp/ConvoPeq/pull/229 のコード改修の最終�
 | ctest 全件 63/63 | 退行の有無（全ターゲット） |
 | コード読解 | C-01〜C-08、C-09〜C-17、C-23、C-25、C-27〜C-35、C-38、C-40、C-43、C-45、C-46 |
 
-実行で確かめたのは、契約テスト、静的ゲート、コンパイル、ctest である。レースの再現（TSan）とメモリ使用量の実測は、この環境では行っていない。CI の Sanitizer ジョブに委ねる。
+実行で確かめたのは、契約テスト、静的ゲート、コンパイル、ctest である。レース検出（TSan）とメモリ検査（ASan）は手元では回していない。CI（PR #229）の TSan ジョブと RelWithDebInfo ASan ジョブで成功を確認した（§7.6）。手元で再現した結果ではない。
 
 ## 9. 変更ファイル
 
-追跡ファイル 40 件を変更し、2 件を追加した（合計 42 件）。
+追跡ファイル 43 件を変更し、2 件を追加した（コードは 45 件）。これに本報告書を加えて 46 件になる。
 
 - 製品コード: `CacheManager.cpp`、`ConvolverControlPanel.cpp`、`ConvolverProcessor.h`、`CustomInputOversampler.cpp`、`DeviceSettings.{h,cpp}`、`IRConverter.cpp`、`LoudnessMeter.cpp`、`MKLNonUniformConvolver.cpp`、`MainApplication.{h,cpp}`、`MainWindow.{h,cpp}`、`NoiseShaperLearner.{h,cpp}`、`OutputFilter.cpp`、`SizeCappedFileLogger.h`（新規）、`TailLayerMultiplier.h`、`TruePeakDetector.cpp`
 - audioengine: `AudioEngine.Processing.AudioBlock.cpp`、`AudioEngine.Processing.BlockDouble.cpp`、`AudioEngine.Processing.DSPCoreDouble.cpp`、`AudioEngine.Processing.DSPCoreFloat.cpp`、`AudioEngine.Retire.cpp`、`ISRHB.{h,cpp}`、`RuntimePublicationOrchestrator.{h,cpp}`
