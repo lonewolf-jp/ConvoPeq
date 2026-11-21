@@ -1,6 +1,6 @@
 # C-24 再測定の結果（2026-11-22 06:18 JST）
 
-`doc/work113/20261121-2333_C24計画/report.md` の固定条件で C-24（旧 MED-18「学習 XML の再解析で起動と終了が遅い」）を測定した。結論を先に書く。XML の寄与は 10 ms 未満で、報告された遅延は再現しない。起動と終了の差はドリフトと同程度で、判定には使えない。S2 の絶対値ゲートだけが不合格だった。主因はデバイス初期化で、XML ではない。
+`doc/work113/20261121-2333_C24計画/report.md` の固定条件で C-24（旧 MED-18「学習 XML の再解析で起動と終了が遅い」）を測定した。結論を先に書く。判定に使える測定量は S4 の +6.1 ms だけで、報告された遅延は観測されなかった。ただし S1 と S3 の差はドリフト以下で判定不能であり、遅延の上限を測って示したわけではない。S2 の絶対値ゲートは不合格だったが、XML の無い E0 でも 797.6 ms かかるため、XML は原因ではない。
 
 ## 1. 環境と材料
 
@@ -23,7 +23,7 @@
 
 ## 2. 方法
 
-- 計測専用ビルドに `QueryPerformanceCounter` のマークを 7 箇所入れた。`initialise` の先頭と末尾、`loadSettings` の前後、`saveSettings` の前後、`shutdown` の先頭と末尾だ。出力は環境変数 `CONVOPEQ_M24_TRACE` があるときだけ。測定後にソースから外し、コミットしていない。
+- 計測専用ビルドに `QueryPerformanceCounter` のマークを 8 箇所入れた。`initialise` の先頭と末尾、`loadSettings` の前後、`saveSettings` の前後、`shutdown` の先頭と末尾だ。出力は環境変数 `CONVOPEQ_M24_TRACE` があるときだけ。測定後にソースから外し、コミットしていない。
 - ハーネスも `CreateProcess` の直前と `WaitForExit` の直後に QPC を記録した。プロセス生成と終了の残差を求めるためである。
 - 4×4 の均衡ラテン方格を 5 回繰り返した。各条件が各位置に 5 回ずつ入る。合計 20 周、80 回である。
 - 区間は S1（起動全体）、S2（設定読込）、S3（終了全体）、S4（設定保存）。差分は条件ごとの中央値の差、裾は p95 の差（最近順位法、20 回で 19 番目）、再現性は IQR / 中央値で評価した。
@@ -57,15 +57,17 @@
 
 ### 3.2 固定ゲートとの比較
 
+ドリフトの影響を受けた行は、値は残しつつ判定を「判定不能」にした。§4 の規則による。
+
 | 指標 | 固定値 | 実測 | 判定 |
 | --- | ---: | ---: | --- |
-| 起動の寄与（S1: E3−E0 中央値） | 500 ms 以下 | +4.5 ms | 合格 |
-| 起動の裾（S1: E3 p95 − E0 p95） | 1,000 ms 以下 | +1.8 ms | 合格 |
-| 終了の寄与（S3: E3−E0 中央値） | 300 ms 以下 | +7.8 ms | 合格 |
-| 終了の裾（S3: E3 p95 − E0 p95） | 600 ms 以下 | +6.5 ms | 合格 |
+| 起動の寄与（S1: E3−E0 中央値） | 500 ms 以下 | +4.5 ms | 判定不能（ドリフト） |
+| 起動の裾（S1: E3 p95 − E0 p95） | 1,000 ms 以下 | +1.8 ms | 判定不能（ドリフト） |
+| 終了の寄与（S3: E3−E0 中央値） | 300 ms 以下 | +7.8 ms | 判定不能（ドリフト） |
+| 終了の裾（S3: E3 p95 − E0 p95） | 600 ms 以下 | +6.5 ms | 判定不能（ドリフト） |
 | S2 の絶対値（E2 中央値） | 400 ms 以下 | 806.6 ms | 不合格 |
 | S4 の絶対値（E2 中央値） | 300 ms 以下 | 36.0 ms | 合格 |
-| S2 の増分（E2−E0 中央値） | 300 ms 以下 | +9.0 ms | 合格 |
+| S2 の増分（E2−E0 中央値） | 300 ms 以下 | +9.0 ms | 判定不能（ドリフト） |
 | S4 の増分（E2−E0 中央値） | 150 ms 以下 | +6.2 ms | 合格 |
 
 ## 4. ドリフトの評価
@@ -89,14 +91,15 @@
 
 結論は単純だ。
 
-- C-24 の主張は支持されない。学習 XML の再解析が起動と終了を遅くする、という話だ。判断は変えない。`noise_shaper_learn.xml` を置いた条件の増分は、S4 で 6.1 ms、S2 で 9.0 ms だった。起動と終了の差は 4.5 ms と 7.8 ms で、ドリフト（20 ms 前後）より小さい。
-- ただし、固定ゲートの「S2 の絶対値 400 ms」は 806.6 ms で不合格である。S2 には `DeviceSettings::loadSettings` の全体が入り、その大半は `deviceManager.initialise` によるデバイス初期化である。E0 でも 797.6 ms なので、XML の寄与ではない。
-- 計画の優先順位（原因が XML でなければ「主因が別」の行を優先する）に従い、C-24 は「原因コード無し」のまま維持する。S2 の絶対値については、デバイス初期化の所要として別に扱う。この測定だけでは、800 ms が妥当かどうかは判断できない。要件が決まっていないためである。
+- C-24 の主張は観測されなかった。学習 XML の再解析が起動と終了を遅くする、という話だ。判定に使える増分は S4 の 6.1 ms だけである。S2 の増分 9.0 ms はドリフトで判定不能、起動と終了の差（4.5 ms、7.8 ms）もドリフト以下で判定不能だった。
+- 「遅延が無い」とまでは言えない。S1 と S3 は判定不能であり、上限も測れていない。言えるのは、この分解能では差を検出できなかった、というところまでだ。
+- 固定ゲートの「S2 の絶対値 400 ms」は 806.6 ms で不合格である。ただし XML の無い E0 でも 797.6 ms かかる。XML が原因でないことは言える。S2 の内訳は測っていないので、`deviceManager.initialise` が大半というのは仮説である。
+- 計画の優先順位（原因が XML でなければ「主因が別」の行を優先する）に従い、C-24 は「原因コード無し」のまま維持する。S2 の絶対値は、デバイス初期化を含む設定読込の所要として別に扱う。800 ms が妥当かどうかは、要件が決まっていないため判断しない。
 
 ## 6. 留保
 
 - 測定は 1 台の端末だけ。ビルドも MSVC Release の 1 構成である。計画は icx も挙げていた。実施していない。以上が留保だ。
-- 計測専用のマークは `initialise`、`loadSettings`、`saveSettings`、`shutdown` の 4 箇所に入れた。製品コードには残していない。
+- 計測専用のマークは 4 区間 8 箇所に入れた。製品コードには残していない。
 - ETW は取得していない。内訳は区間の実測値で判断した。待ち時間の分解まではしていない。
 - 起動と終了の差はドリフト以下である。「差がない」とは主張しない。言えるのは「この分解能では検出できない」までだ。
 - `learned_state.xml` の読み込みは学習スレッドで起きるため、S1 に含まれるかは実行のタイミングに依存する。E1 と E0 の差が小さいことから、少なくとも今回は影響が小さい。
@@ -107,11 +110,60 @@
 2. `cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=cl` で構成し、`cmake --build build-msvc --target ConvoPeq --parallel 4` でビルドする。
 3. `%APPDATA%\ConvoPeq` を丸ごと退避する。
 4. 条件 E0〜E3 を 4×4 の均衡ラテン方格で 20 周し、各回の前にファイルを戻してハッシュを確認する。
-5. 各回のマークから S1〜S4 を求め、中央値・p95・IQR とドリフトを計算する。
+5. 各回のマークから S1〜S4 を求め、中央値・p95・IQR とドリフトを計算する。ハーネスは `harness.py`、生データは `c24_measure.csv` にある。
+6. 測定が終わったら `%APPDATA%\ConvoPeq` を退避から戻し、3 ファイルの SHA-256 が一致することを確認する。異常終了時も同じ手順で戻す。
 
 ## 8. 参照
 
 - 計画: `doc/work113/20261121-2333_C24計画/report.md`
 - C-24 の登録: `doc/work113/20261121-1201_詳細検証/report.md`
 - 対象コード: `src/DeviceSettings.cpp`（853、917、1017、1070）、`src/NoiseShaperLearner.cpp`（1501、1523）
-- 生データ: 80 行の CSV（条件、区間、ハッシュ、ドリフトの計算を含む）
+- 生データ: `c24_measure.csv`（80 行。条件、区間、ハッシュ、残差）
+- ハーネス: `harness.py`
+- 計測用ヘッダとマーク位置: 付録 A
+
+## 付録 A: 計測用のマーク
+
+計測専用ビルドにだけ入れたヘッダは次のとおり。`CONVOPEQ_M24_TRACE` が無いときは何もしない。
+
+```cpp
+#pragma once
+#include <windows.h>
+#include <cstdio>
+#include <cstdlib>
+
+namespace m24trace
+{
+    inline void mark (const char* tag) noexcept
+    {
+        const char* path = std::getenv ("CONVOPEQ_M24_TRACE");
+        if (path == nullptr)
+            return;
+
+        LARGE_INTEGER counter;
+        QueryPerformanceCounter (&counter);
+
+        FILE* file = nullptr;
+        if (fopen_s (&file, path, "a") == 0 && file != nullptr)
+        {
+            std::fprintf (file, "%s %lld\n", tag, static_cast<long long> (counter.QuadPart));
+            std::fclose (file);
+        }
+    }
+}
+```
+
+マークの位置は次の 8 箇所。いずれも `m24trace::mark("<tag>")` を 1 行足すだけである。
+
+| マーク | ファイル | 位置 |
+| --- | --- | --- |
+| `init_start` | `src/MainApplication.cpp` | `initialise` の直前 |
+| `init_end` | 同上 | `applyMessageThreadPolicy` の直後（`initialise` の末尾） |
+| `s2_start` | `src/MainWindow.cpp` | `loadSettings()` の直前（355 行付近） |
+| `s2_end` | 同上 | `loadSettings()` の直後 |
+| `s4_start` | 同上 | `~MainWindow` の `DeviceSettings::saveSettings` の直前（1642 行付近） |
+| `s4_end` | 同上 | 同呼出しの直後 |
+| `shutdown_start` | `src/MainApplication.cpp` | `shutdown` の直前 |
+| `shutdown_end` | 同上 | `shutdown` の末尾（`timeEndPeriod(1)` の後） |
+
+ハーネス `harness.py` は、各回の前に条件のファイルを戻し、`CreateProcess` の前後で QPC を取り、マークを読んで CSV に 1 行ずつ書く。生データは `c24_measure.csv` にある。
