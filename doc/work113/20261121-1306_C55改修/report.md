@@ -25,7 +25,7 @@
 - 起点は `origin/main` の `a9598d34751794c31d4da23048baed0c8e679e24`（2026-11-21 09:33）。
 - 独立 worktree を作り、未コミット変更を持ち込んでいない。`git status` は作業開始時点で空だった。
 - ビルドは MSVC ではなく Intel oneAPI 2026.2（icx）Release。`build.bat` ではなく cmake を直接呼び、`vcvars64` と `MKLROOT`／`IPPROOT`／`LIB` を明示した。
-- コード改修のコミットは `712ecb55` と `07446a56`（親 `a9598d34`）。46 ファイル、1,090 行追加・180 行削除（報告書と AGENTS.md を含む）。
+- コード改修のコミットは `712ecb55`、`07446a56`、`8c1668a9`（親 `a9598d34`）。46 ファイル、1,090 行追加・180 行削除（報告書と AGENTS.md を含む）。
 
 ## 3. 高 8 件
 
@@ -151,6 +151,16 @@ CodeRabbit のレビューで 10 件の指摘があり、すべて反映した�
 | 公開係数が評価時の `coeffSafetyMargin` で丸められていない | 評価と同じ `clampCoeff` を公開時にも適用 |
 | A2 プローブの volatile がポインタ先に付いていた | `const void* volatile` に修正 |
 | TruePeak の上限が確保サイズで、再 prepare 後の履歴長と合わない | `stages[0].maxInputSamples` で制限 |
+
+2 回目のレビューで 5 件の追加指摘があり、同じくすべて反映した（コミット `8c1668a9`）。
+
+| 指摘 | 対応 |
+| --- | --- |
+| CLI ロガーを ~MainWindow で戻すため、~AudioEngine のログが CLI ファイルに残らない | 所有権を `MainApplication` へ移し、`mainWindow.reset()` の後まで保持 |
+| 復元が update の後・公開の前に来ると、古い世代が復元値を上書きする | 公開を optimizer mutex 内で epoch 照合してから行う。message thread の bank 書込みも同じ epoch で判定 |
+| 評価と公開で `coeffSafetyMargin` を別々に読む | 世代ごとに 1 回読み、評価と公開へ同じ値を渡す |
+| 起動時に巨大な旧ログを丸ごと退避する | 末尾 `cap` バイトへ切り詰めてから使う |
+| 退避に失敗すると上限を超えて追記し続ける | 退避失敗時はその場で切り詰め、それも失敗したら書込みを捨てる |
 
 ## 8. C-ID ごとの検証根拠
 
