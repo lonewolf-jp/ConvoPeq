@@ -912,6 +912,16 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     target_compile_options(TailLayerMultiplierTests PRIVATE /EHsc /utf-8)
     add_test(NAME TailLayerMultiplierTests COMMAND TailLayerMultiplierTests)
 
+    # ★ C-55 改修: C-ID 登録簿のうち外部依存なしで決定的に検証できる契約
+    #   （C-20 / C-29 / C-36 / C-37）。JUCE も MKL も要らない。
+    add_executable(Fix55ContractTests
+        src/tests/Fix55ContractTests.cpp
+    )
+    target_include_directories(Fix55ContractTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(Fix55ContractTests PRIVATE cxx_std_20)
+    target_compile_options(Fix55ContractTests PRIVATE /EHsc /utf-8)
+    add_test(NAME Fix55ContractTests COMMAND Fix55ContractTests)
+
     # ★ Week2: boundExcessDb 分布測定ベンチマーク
     #   JUCE/MKL に依存しない純粋数学ベンチマーク。
     add_executable(EQBoundExcessBenchmark
@@ -2857,7 +2867,12 @@ if(ENABLE_ASAN)
         ScopedEpochReaderStructuralTests
         STG11EQRetireTests
         STG11D2SnapshotRetireTests
-        TerminalTelemetryContractTests)
+        TerminalTelemetryContractTests
+        # ★ C-43: these four were the only test targets missing from the ASan list.
+        AdmissionPackedStateTests
+        DrainContractTests
+        LoaderCurrencyContractTests
+        invariant_INV3_INV5Tests)
     foreach(tgt IN LISTS CONVOPEQ_ASAN_TEST_TARGETS)
         if(TARGET ${tgt})
             if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")

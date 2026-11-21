@@ -883,7 +883,7 @@ private:
         StereoConvolver()
         {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            liveCount.fetch_add(1, std::memory_order_relaxed);
+            convo::fetchAddAtomic(liveCount, 1u, std::memory_order_relaxed);
 #endif
         }
 
@@ -919,7 +919,7 @@ private:
         // デストラクタは空（実際の解放は retire 経由）
         ~StereoConvolver() {
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-            const uint32_t oldLive = liveCount.fetch_sub(1, std::memory_order_relaxed);
+            const uint32_t oldLive = convo::fetchSubAtomic(liveCount, 1u, std::memory_order_relaxed);
             (void)oldLive;
             jassert(oldLive > 0);
 #endif

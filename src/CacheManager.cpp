@@ -170,17 +170,53 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     if (headerOut.key != expectedKey)
         return false;
 
-    if (static_cast<int>(headerOut.fftSize) != expectedFftSize)
+    if (headerOut.fftSize != static_cast<uint64_t>(expectedFftSize))
         return false;
 
-    const int64 headerSize = (headerOut.version == 1)
-                           ? static_cast<int64>(sizeof(CacheHeaderV1))
-                           : static_cast<int64>(sizeof(CacheHeader));
+    // ★ C-05: validate every size-bearing header field before mmap. The old code only
+    //   checked that header+dataSize+timeDomain matched the file length, so a crafted
+    //   cache could declare channels*samples far beyond timeDomainSizeBytes and make the
+    //   time-domain memcpy read past the mapping.
+    const uint64_t fileSize = static_cast<uint64_t>(juce::jmax<int64_t>(0, file.getSize()));
+    const uint64_t headerSizeU = (headerOut.version == 1)
+                               ? static_cast<uint64_t>(sizeof(CacheHeaderV1))
+                               : static_cast<uint64_t>(sizeof(CacheHeader));
 
-    const int64 expectedTotalSize = headerSize
-                                  + static_cast<int64>(headerOut.dataSize)
-                                  + static_cast<int64>(headerOut.timeDomainSizeBytes);
-    if (file.getSize() != expectedTotalSize)
+    if (headerOut.dataSize == 0 || (headerOut.dataSize % sizeof(double)) != 0)
+        return false;
+    if (headerOut.numChannels < 1 || headerOut.numChannels > 8)
+        return false;
+    if (headerOut.numPartitions < 1 || headerOut.numPartitions > (uint64_t{1} << 24))
+        return false;
+    // 2^20 is far above any usable partition FFT and keeps the product below from wrapping.
+    if (headerOut.fftSize < 64
+        || headerOut.fftSize > (uint64_t{1} << 20)
+        || (headerOut.fftSize & (headerOut.fftSize - 1)) != 0)
+        return false;
+    // Partition payload is numPartitions * fftSize doubles (numPartitions already counts
+    // the channel dimension — see IRConverter::convert).
+    if (headerOut.numPartitions * headerOut.fftSize * sizeof(double) != headerOut.dataSize)
+        return false;
+
+    if (headerOut.timeDomainSizeBytes > 0)
+    {
+        if (headerOut.timeDomainChannels < 1 || headerOut.timeDomainChannels > 8)
+            return false;
+        if (headerOut.timeDomainNumSamples < 1 || headerOut.timeDomainNumSamples > (uint64_t{1} << 28))
+            return false;
+        if (headerOut.timeDomainChannels * headerOut.timeDomainNumSamples * sizeof(double)
+            != headerOut.timeDomainSizeBytes)
+            return false;
+    }
+    else if (headerOut.timeDomainChannels != 0 || headerOut.timeDomainNumSamples != 0)
+    {
+        return false;
+    }
+
+    const uint64_t expectedTotalSize = headerSizeU
+                                     + headerOut.dataSize
+                                     + headerOut.timeDomainSizeBytes;
+    if (fileSize != expectedTotalSize)
         return false;
 
     return true;

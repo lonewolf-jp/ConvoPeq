@@ -46,11 +46,16 @@ void LoudnessMeter::reset() noexcept
 
 void LoudnessMeter::processBlock(const double* dataL, const double* dataR, int numSamples) noexcept
 {
+    // ★ C-33: the work buffer holds 2 * preparedBlockSize doubles. A block larger than the
+    //   prepared size used to write past it (fr = fl + numSamples). Metering is allowed to
+    //   analyse only the first part of an oversized block.
     if (numSamples <= 0 || !filterWorkBuffer) return;
+    if (preparedBlockSize > 0 && numSamples > preparedBlockSize)
+        numSamples = preparedBlockSize;
 
     double* fl = filterWorkBuffer.get();
-    double* fr = fl + numSamples;
     if (!fl) return;
+    double* fr = fl + numSamples;
 
     // Stage 1: Pre-filter per channel
     for (int n = 0; n < numSamples; ++n)

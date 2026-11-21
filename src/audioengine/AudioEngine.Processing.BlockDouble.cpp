@@ -721,7 +721,7 @@ void AudioEngine::processBlockDouble (juce::AudioBuffer<double>& buffer)
             rtLocalState_.callbackTimingWriteCount,
             uint64_t{1}, std::memory_order_relaxed);
         const size_t idx = static_cast<size_t>(
-            (wc - 1) % RTLocalState::kCallbackTimingSlots);
+            wc % RTLocalState::kCallbackTimingSlots);
         auto& entry = rtLocalState_.callbackTimingHistory[idx];
         entry.callbackIndex = thisCallbackIndex;
         entry.processTimeUs = processTime;

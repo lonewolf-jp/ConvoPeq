@@ -100,8 +100,8 @@ build.bat Release clean        # Clean + build
 build.bat Release nopause      # No interactive pause
 
 build.bat Release icx          # Intel icx Release
-build.bat Debug   icx          # Intel icx Debug
 build.bat Release clean icx    # Clean + icx
+# build.bat Debug icx is NOT supported (see §6.2): use MSVC for Debug.
 
 build.bat Release pgo-gen      # MSVC PGO instrumentation
 build.bat Release pgo-use      # MSVC PGO optimization
@@ -114,7 +114,8 @@ build.bat Release icx app clean
 
 # Pass extra CMake defines (-D prefix, SHIFT parsing, no quotes needed):
 build.bat Release nopause -DCONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
-build.bat Debug icx -DCONVOPEQ_REQUIRE_MKL=OFF
+# (icx Debug is unsupported; the same define for MSVC Debug:)
+build.bat Debug -DCONVOPEQ_REQUIRE_MKL=OFF
 ```
 
 > **Note**: Do not put `!` inside `-D` values — it conflicts with DelayedExpansion.
@@ -525,7 +526,7 @@ All tasks use `shell: cmd.exe`. Generator is `Ninja Multi-Config`.
 |-------|------------|-----------|
 | `Debug` | MSVC Debug, default | `build/` |
 | `Release` | MSVC Release, default | `build/` |
-| `Debug (icx)` | Intel icx Debug | `build-icx/` |
+| `Debug (icx)` | **Unsupported** — icx is Release-only (§6.2). Use `Debug`. | `build-icx/` |
 | `Release (icx)` | Intel icx Release | `build-icx/` |
 | `Release Build With PDB` | MSVC Release with full PDB | `build/` |
 
@@ -757,10 +758,7 @@ build.bat Release pgo-gen
 # (exercise app, then)
 build.bat Release pgo-use
 
-# Intel icx Debug
-build.bat Debug icx
-
-# Intel icx Release
+# Intel icx Release (icx Debug is unsupported — use MSVC for Debug)
 build.bat Release icx
 
 # Clean

@@ -94,6 +94,9 @@ private:
     bool lastLatencySrValid { false };
     bool cliAutomationTelemetryLoggingEnabled { false };
     std::atomic<bool> cliAutomationCallbacksEnabled { false };
+    // ★ C-16: --cli-log-file の FileLogger は MainWindow が所有する。
+    std::unique_ptr<juce::FileLogger> cliFileLogger;
+    juce::Logger* previousLogger { nullptr };
     bool cliAudioSetupRequested { false };
     bool cliAudioSetupMismatchLogged { false };
     int cliRequestedBufferSamples { 0 };

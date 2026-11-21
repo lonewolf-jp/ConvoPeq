@@ -65,6 +65,9 @@ public:
     using Settings = convo::NoiseShaperLearnerSettings;
 
     static constexpr int kOrder = LatticeNoiseShaper::kOrder;
+    // ★ C-08: reflection coefficients are only stable inside (-1, 1). Values restored
+    //   from the learned-state XML are clamped to this bound.
+    static constexpr double kMaxReflectionCoefficient = 0.999999;
 
     struct LearnedState
     {
@@ -240,7 +243,7 @@ private:
                                    int numSegments,
                                    int evaluationBitDepth) noexcept;
     void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
-    void publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept;
+    void publishGenerationResult(const double* parcor, double score, int evaluatedCandidates) noexcept;
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
@@ -277,6 +280,10 @@ private:
 
     std::unique_ptr<AudioSegmentBuffer> segmentBuffer;  // ★ P0-3: ヒープ専用化
     CmaEsOptimizer optimizer;
+    // ★ C-03: the optimizer state (mean/covariance/sigma) is written by the worker
+    //   thread and read from message-thread snapshots (getState) and state restore
+    //   (setState). Serialize those accesses; audio/RT paths never touch it.
+    mutable std::mutex optimizerMutex;
     std::array<EvaluationWorkerSlot, kMaxParallelEvaluators> evaluationWorkers {};
     int activeEvaluationWorkerCount = 1;
     int activeAuxEvaluationWorkerCount = 0;

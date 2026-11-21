@@ -52,8 +52,11 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     const size_t populationCount = static_cast<size_t>(CmaEsOptimizer::kPopulation * CmaEsOptimizer::kDim);
     const size_t fitnessCount = static_cast<size_t>(CmaEsOptimizer::kPopulation);
 
-    auto populationBuffer = convo::makeAlignedArray<double>(populationCount);
-    auto fitnessBuffer = convo::makeAlignedArray<double>(fitnessCount);
+    // ★ C-28: makeAlignedArray() throws std::bad_alloc, so the nullptr checks below were
+    //   dead code and the constructor threw out of the factory instead of reporting a
+    //   status. The nothrow factory makes the graceful failure path reachable.
+    auto populationBuffer = convo::makeAlignedArray_nothrow<double>(populationCount);
+    auto fitnessBuffer = convo::makeAlignedArray_nothrow<double>(fitnessCount);
     jassert(populationBuffer.get() != nullptr && fitnessBuffer.get() != nullptr);
     if (populationBuffer.get() == nullptr || fitnessBuffer.get() == nullptr)
     {
@@ -313,7 +316,10 @@ void NoiseShaperLearner::applyPhaseParams(LearningMode mode, int phase) noexcept
         currentLevelWeights = { 0.5, 0.3, 0.1, 0.1 };
     }
 
-    optimizer.setParams(optParams);
+    {
+        std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+        optimizer.setParams(optParams);
+    }
 }
 
 void NoiseShaperLearner::handleModeSwitch() noexcept
@@ -344,7 +350,10 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
         // Initialize if no saved state
         double initialCoefficients[kOrder] = {};
         engine.getAdaptiveCoefficientsForSampleRateAndBitDepth(sr, bd, initialCoefficients, kOrder);
-        optimizer.initFromParcor(initialCoefficients);
+        {
+            std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+            optimizer.initFromParcor(initialCoefficients);
+        }
 
         for (int i = 0; i < kOrder; ++i)
             convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], initialCoefficients[i], std::memory_order_release);
@@ -378,6 +387,8 @@ const NoiseShaperLearner::Progress& NoiseShaperLearner::getProgress() const noex
 
 void NoiseShaperLearner::getState(State& outState) const noexcept
 {
+    // ★ C-03: snapshot and worker update must not overlap.
+    std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
     optimizer.serializeTo(outState.mean, outState.covarianceUpperTriangle, outState.sigma);
     for (int i = 0; i < kOrder; ++i)
         outState.bestCoefficients[i] = convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire);
@@ -391,6 +402,8 @@ void NoiseShaperLearner::getState(State& outState) const noexcept
 
 void NoiseShaperLearner::setState(const State& inState) noexcept
 {
+    // ★ C-03: state restore must not overlap a worker update.
+    std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
     optimizer.deserializeFrom(inState.mean, inState.covarianceUpperTriangle, inState.sigma);
     for (int i = 0; i < kOrder; ++i)
         convo::publishAtomic(bestCoefficients[i], inState.bestCoefficients[i], std::memory_order_release);
@@ -802,16 +815,22 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
 
                         // 初期状態に戻してからシードを変える
                         setState(initialState);
-                        optimizer.setSeed(makeDeterministicRestartSeed(activeSession.sampleRateHz,
-                                                                       activeSession.bitDepth,
-                                                                       activeSession.adaptiveCoeffBankIndex,
-                                                                       activeSession.sessionId,
-                                                                       restartIdx));
+                        {
+                            std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                            optimizer.setSeed(makeDeterministicRestartSeed(activeSession.sampleRateHz,
+                                                                           activeSession.bitDepth,
+                                                                           activeSession.adaptiveCoeffBankIndex,
+                                                                           activeSession.sessionId,
+                                                                           restartIdx));
+                        }
 
                         // 数世代だけ回して良し悪しを判断
                         for (int g = 0; g < 3; ++g)
                         {
-                            optimizer.sample(candidatePopulationMatrix());
+                            {
+                                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                                optimizer.sample(candidatePopulationMatrix());
+                            }
                             int dummyIdx = 0;
                             double currentBestScore = 0.0;
                             evaluatePopulation(segmentCount,
@@ -819,7 +838,10 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                                                dummyIdx,
                                                currentBestScore,
                                                stopToken);
-                            optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+                            {
+                                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                                optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+                            }
 
                             if (currentBestScore < bestRestartScore)
                             {
@@ -941,7 +963,10 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             convo::publishAtomic(progress.status, Status::Running, std::memory_order_release);
-            optimizer.sample(candidatePopulationMatrix());
+            {
+                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                optimizer.sample(candidatePopulationMatrix());
+            }
 
             int bestCandidateIndex = 0;
             double bestCandidateScore = std::numeric_limits<double>::max();
@@ -970,7 +995,10 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                 continue;
             }
 
-            optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+            {
+                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                optimizer.update(candidatePopulationMatrix(), candidateFitnessData());
+            }
 
             CmaEsOptimizer::toParcor(candidatePopulationMatrix()[bestCandidateIndex], parcor);
             if (bestCandidateScore < bestScore && bestCandidateScore < std::numeric_limits<double>::max())
@@ -1118,7 +1146,10 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
         {
             double initialCoefficients[kOrder] = {};
             engine.getAdaptiveCoefficientsForSampleRateAndBitDepth(this->sessionSampleRate, this->sessionBitDepth, initialCoefficients, kOrder);
-            optimizer.initFromParcor(initialCoefficients);
+            {
+                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                optimizer.initFromParcor(initialCoefficients);
+            }
 
             for (int i = 0; i < kOrder; ++i)
                 convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], initialCoefficients[i], std::memory_order_release);
@@ -1432,37 +1463,65 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
     if (std::abs(savedSampleRate - sessionSampleRate) > 0.1 || savedBitDepth != sessionBitDepth)
         return false;
 
-    convo::publishAtomic(progress.bestScore, xml->getDoubleAttribute("bestScore"), std::memory_order_release);
-    convo::publishAtomic(progress.currentPhase, xml->getIntAttribute("phase"), std::memory_order_release);
-    convo::publishAtomic(progress.elapsedPlaybackSeconds, xml->getDoubleAttribute("elapsedPlaybackSeconds"), std::memory_order_release);
+    // ★ C-08: the XML is external input. Every attribute is range-checked before it is
+    //   published; a NaN/Inf or out-of-range value would otherwise reach the adaptive
+    //   filter coefficients and the progress readouts. Rejected fields keep the current
+    //   value instead of being zeroed, so one bad attribute does not reset the rest.
+    const double savedBestScore = xml->getDoubleAttribute("bestScore");
+    if (std::isfinite(savedBestScore) && savedBestScore >= 0.0)
+        convo::publishAtomic(progress.bestScore, savedBestScore, std::memory_order_release);
+
+    const int savedPhase = xml->getIntAttribute("phase");
+    if (savedPhase >= 1 && savedPhase <= 3)
+        convo::publishAtomic(progress.currentPhase, savedPhase, std::memory_order_release);
+
+    const double savedElapsed = xml->getDoubleAttribute("elapsedPlaybackSeconds");
+    if (std::isfinite(savedElapsed) && savedElapsed >= 0.0)
+        convo::publishAtomic(progress.elapsedPlaybackSeconds, savedElapsed, std::memory_order_release);
+
+    // Reflection coefficients are only meaningful inside the unit interval.
+    const auto sanitizeReflection = [](double v) noexcept
+    {
+        if (!std::isfinite(v))
+            return 0.0;
+        return juce::jlimit(-kMaxReflectionCoefficient, kMaxReflectionCoefficient, v);
+    };
 
     if (auto* coeffsXml = xml->getChildByName("BestCoefficients"))
     {
         for (int i = 0; i < kOrder; ++i)
-            convo::publishAtomic(bestCoefficients[i], coeffsXml->getDoubleAttribute("c" + juce::String(i)), std::memory_order_release);
+        {
+            const double raw = coeffsXml->getDoubleAttribute("c" + juce::String(i));
+            convo::publishAtomic(bestCoefficients[i], sanitizeReflection(raw), std::memory_order_release);
+        }
     }
 
     if (auto* cmaXml = xml->getChildByName("CmaMean"))
     {
         double mean[kOrder] = {};
         for (int i = 0; i < kOrder; ++i)
-            mean[i] = cmaXml->getDoubleAttribute("m" + juce::String(i));
+            mean[i] = sanitizeReflection(cmaXml->getDoubleAttribute("m" + juce::String(i)));
 
         // We only restore the mean, keeping other CMA state as literature defaults or engine state
         // unless we want full CMA state persistence. For now, mean + bestCoeffs is a good warm start.
-        optimizer.setMean(mean);
+        {
+            std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+            optimizer.setMean(mean);
+        }
     }
 
     return true;
 }
 
-void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept
+void NoiseShaperLearner::publishGenerationResult(const double* parcor, double score, int evaluatedCandidates) noexcept
 {
-    // coeffs are in unconstrained space, map to reflection coefficients for the engine
+    // ★ C-02: parcor is already mapped through tanh by CmaEsOptimizer::toParcor().
+    //   Applying tanh again skew-s the coefficient the engine actually applies from the
+    //   one the CMA-ES fitness evaluated. Publish the reflection coefficients as-is.
     std::array<double, kOrder> mappedCoeffs;
     for (int i = 0; i < kOrder; ++i)
     {
-        const double k = std::tanh(coeffs[i]);
+        const double k = parcor[i];
         mappedCoeffs[static_cast<size_t>(i)] = k;
         convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], k, std::memory_order_release);
     }

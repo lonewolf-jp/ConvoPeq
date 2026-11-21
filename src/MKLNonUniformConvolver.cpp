@@ -709,6 +709,9 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     {
         // Part 8 F: Bypass は「テール整形をしない」であり「層を切る」ではない。
         //   層は等倍で維持し、L0 被覆も tail 側と同じ 0.12 秒下限に揃える。
+        // ★ C-19 (設計制約): そのため Bypass 中も L1/L2 の FFT 作業領域は保持される。
+        //   再開時に再構築しないための意図的なメモリ・トレードオフであり、リークではない。
+        //   メモリを削りたい場合は setTailEnabled(false) で層自体を落とす経路を使う。
         tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.12));
         tailStrength = 1.0;
         layer1Gain = 1.0;
@@ -757,6 +760,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   IR の各サンプルへ先に掛けておけば、tailMode 1/2 ではどの分割で畳み込んでも
     //   同じ実効 IR になる（測定値は仕様書 §4.2）。
     //   tailMode 0 は周波数領域の HF 減衰が別途 block 依存なので、この限りではない。
+    // ★ C-21 (既知の設計制約): Air Absorption の HF 減衰は L1/L2 のスペクトルへ一度だけ
+    //   掛けるため、層の被覆長（= block 長で決まる）が変わると実効の減衰量も変わる。
+    //   block 長を固定運用する前提で許容しており、block 可変時に同一 IR を保証しない。
+    //   保証が必要になった場合は時間領域の減衰カーブへ移す（IR のサンプル単位ゲイン）。
     //   b1 は時間指定の生値でパーティション格子に整列しないため、block 256 でも旧実装の
     //   境界とは一致しない（仕様書 §4.1）。
     const double tailGainSampleRate = (sampleRateForTail > 0.0) ? sampleRateForTail : 48000.0;

@@ -50,6 +50,9 @@ private:
     void timerCallback() override;
     void updateBitDepthList();
     void updateGainStagingDisplay();
+    // ★ C-14: 現在の処理モードで許される Input Headroom の上限（dB）。
+    //   表示ラベルとエディタのクランプが同じ値を使うようにする。
+    [[nodiscard]] float computeInputHeadroomMaxDb() const;
     void showAdaptiveLearningWindow();
     void showAdaptiveLearningWindowImpl();
     void updateNoiseShaperControls();

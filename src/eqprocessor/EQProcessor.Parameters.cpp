@@ -92,11 +92,13 @@ void EQProcessor::setBandEnabled(int band, bool enabled)
     auto newState = new EQState(*oldState);
     newState->bands[band].enabled = enabled;
 
+    // ★ C-32: publish the new coefficients first, then request the reset. The old order
+    //   let the audio thread consume the reset while it still held the previous state, so
+    //   the cleared filter ran one block with stale coefficients.
+    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     // 有効化時はステートをリセットして、古い状態（ポップノイズの原因）を排除する
     if (enabled)
         requestBandReset(static_cast<uint32_t>(1u << band));
-
-    auto prev = exchangeCurrentState(newState, std::memory_order_acq_rel); // acq_rel: acquire で旧状態読取と HB; release で後続 loadCurrentState acquire と HB
     if (prev) {
         if (!retireEQStateDeferred(prev))
             convo::fetchAddAtomic(m_retireDropCount, uint64_t{1}, std::memory_order_relaxed);
