@@ -796,7 +796,7 @@ OpenCode V2 + OpenChamber 環境での実測。バックエンドは `opencode.e
 - 更新は `uv tool install "graphifyy[mcp]==0.9.115" --force`。**先に graphify の MCP 子プロセスを止める**
   （`CommandLine` に graphify を含む pythonw / graphify-mcp を停止。残すと `os error 32` で失敗する）。
 - `[mcp]` extra が必須。ツール環境の Python は 3.14.7（要求は 3.11.5 以上 3.15 未満）。
-- 更新後は `graphify install --platform opencode|claude|codex|copilot` でスキルを同期する。
+- 更新後はスキルを同期する。`graphify install --platform <p>` を、opencode、claude、codex、copilot の 4 つについて 1 回ずつ実行する（1 行にまとめると `|` がパイプになる）。
   同期しないと `graphify --version` が 4 件の警告を出す。opencode 向けは `~/.config/opencode/plugins/graphify.js` も書き換える。
 - **0.9.115 のセキュリティ修正**: UNC パスを含む `.sh` の `source` 行や `.git` の `gitdir:` / `commondir` を索引すると、
   Windows で外向き SMB 認証が発生し NetNTLMv2 が漏れ得た（GHSA-g6c9-j4vm-mwq4）。0.9.115 は探索をスキャンルートに限定し UNC を拒否する。

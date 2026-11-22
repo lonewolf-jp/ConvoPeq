@@ -16,7 +16,7 @@
 
 1. graphify の MCP 子プロセスを止めた。実行中の `graphify-mcp.exe` と、それを包む `nowin.py` の python が 8 個あった。exe を掴んだままだと uv が旧ツールを消せず、`os error 32` で失敗する。
 2. `uv tool install "graphifyy[mcp]==0.9.115" --force` を実行した。`[mcp]` を付けないと `graphify-mcp` が入らない。
-3. スキルを 4 環境へ同期した。`graphify install --platform opencode|claude|codex|copilot`。同期前は `graphify --version` が 4 件の警告を出していた。
+3. スキルを 4 環境へ同期した。`graphify install --platform <p>` を、opencode、claude、codex、copilot の 4 つについて 1 回ずつ実行した。同期前は `graphify --version` が 4 件の警告を出していた。
 4. バージョンを確認した。ツール環境の Python は 3.14.7 のままである。
 
 | 項目 | 値 |
