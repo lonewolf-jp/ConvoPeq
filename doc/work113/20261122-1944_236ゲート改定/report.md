@@ -132,3 +132,4 @@ S2 は設定の復元だけでなく、音声デバイスの初期化を含む�
 - C-24 計画: `doc/work113/20261121-2333_C24計画/report.md`
 - 生データ: 同フォルダの `campaign236.csv`、`campaign236_ref.csv`
 - ハーネス: `campaign.py`、`harness236.py`、`profile_guard.py`
+- 判定スクリプト: 同フォルダの `judge_gate.py`（2 つの CSV から新ゲートの各項目を判定する。2 日以上の間隔が必要なことは出力に明記される）
