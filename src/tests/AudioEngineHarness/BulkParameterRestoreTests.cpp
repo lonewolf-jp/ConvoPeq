@@ -20,13 +20,14 @@
 //   B  the six setters guarded for #236 (input headroom, output makeup, dither
 //      bit depth, noise shaper type, oversampling factor, oversampling type)
 //      dispatch nothing while a bulk restore is open.
-//   C  endBulkParameterRestore(true) dispatches exactly the collapsed rebuild
-//      and every restored value is readable.
+//   C  endBulkParameterRestore(true) dispatches the collapsed rebuild and every
+//      restored value is readable.
 //   D  a setter called after the bulk restore dispatches again: the flag is
 //      cleared, so the suppression cannot leak into normal editing.
 //
-// Negative control (mutation): with the six `!m_isRestoringState` guards removed,
-// B fails with six dispatches and D still passes.
+// Negative control (mutation): replacing the `!m_isRestoringState` guards with
+// `true` (the pre-fix behaviour) makes B report dispatches inside the restore
+// and fail; D still passes.
 
 #include "AudioEngineHarness.h"
 
