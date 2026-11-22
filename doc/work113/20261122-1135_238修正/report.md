@@ -162,7 +162,7 @@ h11 = x^3 - x^2
 SimplePeakLimiterKneeTests: PASS
 ```
 
-CTest: `ctest -C Release -R SimplePeakLimiterKneeTests` で 1/1 Passed（0.16 秒）。
+CTest: `ctest -C Release -R SimplePeakLimiterKneeTests` で 1/1 Passed（0.16 秒）。既存の `CorruptSampleGuardTests` と `GainStagingContractTests` を加えた 3 本でも 3/3 Passed だった。
 
 ## 6. 修正（Phase 5）
 
@@ -179,7 +179,8 @@ Hard Clamp、Safety Net、Release 時定数、LookAhead、他のリミッター�
 
 | 項目 | 結果 |
 | --- | --- |
-| 単体テスト | 10 チェックすべて PASS（CTest でも 1/1） |
+| 単体テスト | 10 チェックすべて PASS（CTest 1/1） |
+| 既存 DSP テスト | `CorruptSampleGuardTests`、`GainStagingContractTests` と合わせて 3/3 Passed |
 | Float 経路 | `DSPCoreIO.cpp` で `kPLThreshold` と `kPLKneeDb = 1.0` を渡す |
 | Double 経路 | `DSPCoreDouble.cpp` で同じ値・同じ呼び出し |
 | Hard Clamp との接続 | ニー終端 = -1.0 dBFS = `kOutputHeadroom`。出力上限は T（-1.5 dBFS）でクランプに達しない |
