@@ -122,7 +122,7 @@ S2 は設定の復元だけでなく、音声デバイスの初期化を含む�
 
 ## 8. 現時点の状態
 
-- 部分改善（bulk restore 中の冗長 rebuild 6 回の削除）は採用済み。回帰テスト `BulkParameterRestoreContract` が bulk 内 0 回・bulk 外で rebuild・復元値の反映を固定している。
+- 部分改善（bulk restore 中の冗長 rebuild 6 回の削除）は採用済み。PR #245 を 2026-11-22 に main へマージした（merge commit `f2dd14f5`、最終 head `3d9450d1` の CI は全項目 success）。回帰テスト `BulkParameterRestoreContract` が bulk 内 0 回・bulk 外で rebuild・復元値の反映・フラグが残らないことを固定している。
 - キャンペーン 1 は 600 ms ゲートの範囲内（557.7 ms）。
 - キャンペーン 2（2 日以上あけた独立測定）は未実施。
 - したがって **Issue #236 は未解決**である。未達は次の 2 点である。

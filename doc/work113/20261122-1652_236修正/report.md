@@ -172,14 +172,16 @@ Owner の判断により、S2 の絶対値ゲートを 400 ms から **600 ms** 
 | `check-list-compliance.ps1` | 合格（警告のみ） |
 | CLI 起動・終了 | `--cli-run --cli-exit-ms 800` で終了コード 0、`SHUTDOWN_END`、`[FAULT]` 0 |
 | 計測用コードの混入 | マークは計測用ビルドだけ。コミットした差分は `AudioEngine.Parameters.cpp` の 6 か所のみ |
-| CI（PR #245、head `5dedfa37`） | Windows MSVC / Release、RelWithDebInfo ASan、Debug TSan、CodeQL、lint-audioengine、list-compliance、isr-verify、authority-static-checks、authority-runtime-tests、audit-report-verification、CodeRabbit がすべて success（probe のみ設計どおり skipped） |
+| CI（PR #245、最終 head `3d9450d1`） | Windows MSVC / Release、RelWithDebInfo ASan、Debug TSan、CodeQL、lint-audioengine、list-compliance、isr-verify、authority-static-checks、authority-runtime-tests、audit-report-verification がすべて success（CodeRabbit と probe は skipped） |
+| main へのマージ | PR #245 を 2026-11-22 にマージ（merge commit `f2dd14f5`、親 `023917b6` と `3d9450d1`）。部分改善として採用した |
+| マージ後の Issue の扱い | Issue #236 は、2 日以上あけた独立再測定と S2 増分の判定が未了のため OPEN のまま維持 |
 
 ## 10. 未解決事項と制約
 
-- **S2 E2 = 557.7 ms で、固定ゲート 400 ms を満たさない。** 内訳の約 500 ms は ASIO デバイスの初回初期化である。今回の範囲では、この部分をアプリのコードから削減する手段を見つけられていない（他の手段を否定したものではない）。
+- **S2 E2 = 557.7 ms で、従来の固定ゲート 400 ms を満たさない。** 2026-11-22 にゲートを 600 ms へ再定義し、557.7 ms は新しいゲートの範囲内に入る。ただし独立再測定が未了のため、正式な合格ではない（§7.1）。 内訳の約 500 ms は ASIO デバイスの初回初期化である。今回の範囲では、この部分をアプリのコードから削減する手段を見つけられていない（他の手段を否定したものではない）。
 - デバイスを WASAPI に変えると初期化は 280 ms になるが、これは測定条件の変更であり、ゲートを満たすための手段には使わない。利用者の保存設定を変えない限り ASIO のままである。
 - ETW は管理者権限が無く取得できなかった（`wpr` 0xC5585011）。ASIO 初期化の内側（JUCE ラッパーとドライバ）の分離は未実施である。
-- 2 日以上あけた再測定を実施していない。
+- 2 日以上あけた再測定を実施していない（キャンペーン 2）。そのため、600 ms ゲートの正式な合格は確定していない。
 - 初回起動（設定ファイル無し）で設定ファイルが保存されない挙動は、改修前から同じで、本件の対象外である。
 
 ## 11. 判定
