@@ -4,12 +4,21 @@
 //
 // 設計: Phase 1 — LookAhead なし。Attack 0ms、Release 50-200ms 適応。
 //       Soft knee 1.0dB で自然なクリップ特性。
+//       ニーは thresholdLinear を中心に左右へ kneeDb/2 dB（対数振幅で対称）。
 // 位置付け: 既存 Hard Clamp（jlimit, Safety Net）の前段で動作する。
 // ISR: 状態は release envelope (double) のみ。LookAhead FIFO 不要。
+//
+// ★ #238: 旧実装はニーを [threshold - knee/2, threshold] に置いていた。
+//   この区間は threshold / peak >= 1 なのでゲイン削減が起きず、終端も
+//   smoothstep の t=0.5 で止まっていた。現在は境界条件から導いた 3 次
+//   エルミートで、開始点（ゲイン 1、傾き 0）から終了点（T/peak とその傾き）
+//   まで C1 で接続する。導出と数値表は
+//   doc/work113/20261122-*/report.md を参照。
 //==============================================================================
 #pragma once
 
 #include <JuceHeader.h>
+#include <cmath>
 
 class SimplePeakLimiter
 {
@@ -30,16 +39,43 @@ public:
     }
 
     // processBlock: Stereo ブロックに対してピークリミッティングを適用
-    // thresholdLinear: リミッター閾値（linear 倍率, e.g. 0.891 = -1.0dB）
-    // kneeLinear: ソフトニー幅（linear 倍率, e.g. 0.122 = 約1dB）
+    // thresholdLinear: リミッター閾値（linear 倍率。例: 0.841395 = -1.5 dBFS）
+    // kneeDb: ソフトニーの全幅（dB）。thresholdLinear を中心に左右へ kneeDb/2 dB。
+    //         0 以下・NaN はハードニー（thresholdLinear で折れる特性）として扱う。
+    //         幅の定義は振幅の dB なので、線形振幅では上下の幅が等しくない。
     void processBlock(double* dataL, double* dataR, int numSamples,
-                      double thresholdLinear, double kneeLinear) noexcept
+                      double thresholdLinear, double kneeDb) noexcept
     {
         if (dataL == nullptr || numSamples <= 0)
             return;
 
-        const double clipStart = thresholdLinear - kneeLinear * 0.5;
         const bool hasR = (dataR != nullptr);
+
+        // 不正な閾値ではリミッティングしない（ゲイン 1 のまま envelope を解放）。
+        const bool limitEnabled = (thresholdLinear > 0.0) && std::isfinite(thresholdLinear);
+        const double knee = (kneeDb > 0.0 && std::isfinite(kneeDb)) ? kneeDb : 0.0;
+        bool softKnee = limitEnabled && knee > 0.0;
+
+        // ニー境界と終端点のゲイン・傾き。指数は 1 ブロックに 2 回だけ評価する。
+        // 終端点は threshold * 10^(knee/40)（= -1.0 dBFS at the call sites）。
+        double kneeStart = thresholdLinear;
+        double kneeEnd = thresholdLinear;
+        double kneeWidth = 0.0;
+        double endGain = 1.0;
+        double endSlope = 0.0;
+
+        if (softKnee)
+        {
+            kneeStart = thresholdLinear * std::pow(10.0, -knee / 40.0);
+            kneeEnd = thresholdLinear * std::pow(10.0, knee / 40.0);
+            kneeWidth = kneeEnd - kneeStart;
+            endGain = thresholdLinear / kneeEnd;          // hard-knee gain at kneeEnd
+            endSlope = -thresholdLinear / (kneeEnd * kneeEnd);
+
+            // 極端な kneeDb で境界が非有限になったらハードニーへ落とす。
+            if (!(kneeStart > 0.0) || !std::isfinite(kneeEnd) || !(kneeEnd > kneeStart))
+                softKnee = false;
+        }
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -48,24 +84,29 @@ public:
             const double absR = hasR ? std::abs(dataR[i]) : absL;
             const double peak = juce::jmax(absL, absR);
 
-            // clipStart が負になる極端なパラメータでも 0 除算を防止
+            // 0 除算を防止（無音はゲイン 1 のまま）
             const double safePeak = juce::jmax(peak, 1.0e-12);
 
-            // 必要なゲインリダクションを計算 (soft knee)
             double desiredGain = 1.0;
-            if (safePeak > clipStart)
+            if (limitEnabled && safePeak > (softKnee ? kneeStart : thresholdLinear))
             {
-                if (safePeak <= thresholdLinear)
+                if (!softKnee || safePeak >= kneeEnd)
                 {
-                    // Knee 領域: 3次スプライン補間
-                    const double t = (safePeak - clipStart) / kneeLinear;
-                    const double kneeShape = t * t * (3.0 - 2.0 * t);
-                    desiredGain = 1.0 - (1.0 - thresholdLinear / safePeak) * kneeShape;
+                    // リミッティング領域: threshold / peak（ハードニーの特性）
+                    desiredGain = thresholdLinear / safePeak;
                 }
                 else
                 {
-                    // リミッティング領域: threshold / peak
-                    desiredGain = thresholdLinear / safePeak;
+                    // ニー領域: 両端の値と傾きを満たす 3 次エルミート
+                    //   g(kneeStart) = 1,        g'(kneeStart) = 0
+                    //   g(kneeEnd)   = T/kneeEnd, g'(kneeEnd)   = -T/kneeEnd^2
+                    const double x = (safePeak - kneeStart) / kneeWidth;
+                    const double x2 = x * x;
+                    const double x3 = x2 * x;
+                    const double h00 = 2.0 * x3 - 3.0 * x2 + 1.0;
+                    const double h01 = -2.0 * x3 + 3.0 * x2;
+                    const double h11 = x3 - x2;
+                    desiredGain = h00 + h01 * endGain + h11 * kneeWidth * endSlope;
                 }
             }
 

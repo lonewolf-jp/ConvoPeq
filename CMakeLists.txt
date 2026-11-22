@@ -337,6 +337,24 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     endif()
     add_test(NAME CorruptSampleGuardTests COMMAND CorruptSampleGuardTests)
 
+    # ★ #238: SimplePeakLimiter soft-knee static curve (expected values are
+    #   literals derived outside the implementation; see the test header).
+    add_executable(SimplePeakLimiterKneeTests
+        src/tests/SimplePeakLimiterKneeTests.cpp
+    )
+    target_include_directories(SimplePeakLimiterKneeTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_BINARY_DIR}/ConvoPeq_artefacts/JuceLibraryCode
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_link_libraries(SimplePeakLimiterKneeTests PRIVATE juce::juce_core juce::juce_gui_extra juce::juce_gui_basics)
+    target_compile_features(SimplePeakLimiterKneeTests PRIVATE cxx_std_20)
+    target_compile_options(SimplePeakLimiterKneeTests PRIVATE /utf-8)
+    add_dependencies(SimplePeakLimiterKneeTests ConvoPeq)
+    add_test(NAME SimplePeakLimiterKneeTests COMMAND SimplePeakLimiterKneeTests)
+
     # ★ D8-2-B-2: Test Infrastructure — Configurable Epoch Provider + T1/T2/T3/T4/T7/T8
     add_executable(D8_2_B_2_Tests
         src/tests/D8_2_B_2_Tests.cpp

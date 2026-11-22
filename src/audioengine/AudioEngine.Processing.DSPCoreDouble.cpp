@@ -722,13 +722,15 @@ void AudioEngine::DSPCore::processOutputDouble(juce::AudioBuffer<double>& buffer
     loudnessMeter.processBlock(dataL, dataR, numSamples);
 
     // ★ [P1-1] Simple Peak Limiter: Hard Clamp (Safety Net) の前段で動作
-    //   threshold = kOutputHeadroom - 0.5dB, knee = 1.0dB (constexpr で libm 呼び出し回避)
-    //   kOutputHeadroom = -1.0dBFS = 0.8912509381337456
-    //   0.5dB down: 0.8912509381337456 * 10^(-0.5/20) = 0.8413951287507587
-    //   1.0dB knee width: 0.8912509381337456 * (10^(1.0/20) - 1) = 0.108748
+    //   #238: threshold = kOutputHeadroom - 0.5dB = -1.5 dBFS。
+    //   ニーは threshold を中心に対数振幅で対称に置き、全幅 1.0 dB なら
+    //   -2.0 dBFS から -1.0 dBFS（= kOutputHeadroom）までになる。
+    //   終端ではハードニーの T/peak とその傾きに一致する。
+    //   以前の kPLKnee = 0.108748 は「-1 dBFS 基準の 1 dB の線形差」で、
+    //   ニー幅としては 0.58 dB しかなく、しかも終端が threshold だった。
     constexpr double kPLThreshold = 0.8413951287507587;
-    constexpr double kPLKnee = 0.108748;
-    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
+    constexpr double kPLKneeDb = 1.0;
+    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKneeDb);
 
     {
         const __m256d vLimit = _mm256_set1_pd(kOutputHeadroom);
