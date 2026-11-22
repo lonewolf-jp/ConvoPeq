@@ -1,0 +1,70 @@
+diff --git a/src/audioengine/AudioEngine.Parameters.cpp b/src/audioengine/AudioEngine.Parameters.cpp
+index 5ce3c356..1b518c29 100644
+--- a/src/audioengine/AudioEngine.Parameters.cpp
++++ b/src/audioengine/AudioEngine.Parameters.cpp
+@@ -256,7 +256,9 @@ void AudioEngine::setInputHeadroomDb(float db)
+         convo::publishAtomic(inputHeadroomDb, clampedDb, std::memory_order_release);
+         convo::publishAtomic(inputHeadroomGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
+         convo::publishAtomic(m_currentInputHeadroomDb, clampedDb, std::memory_order_release);
+-        submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
++        // ★ #236: bulk restore 中は 1 回の rebuild に畳む（endBulkParameterRestore が実行する）。
++        if (!m_isRestoringState)
++            submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+     }
+ }
+ 
+@@ -275,7 +277,9 @@ void AudioEngine::setOutputMakeupDb(float db)
+         convo::publishAtomic(outputMakeupDb, clampedDb, std::memory_order_release);
+         convo::publishAtomic(outputMakeupGain, juce::Decibels::decibelsToGain((double)clampedDb), std::memory_order_release);
+         convo::publishAtomic(m_currentOutputMakeupDb, clampedDb, std::memory_order_release);
+-        submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
++        // ★ #236: bulk restore 中は 1 回の rebuild に畳む（endBulkParameterRestore が実行する）。
++        if (!m_isRestoringState)
++            submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+     }
+ }
+ 
+@@ -421,7 +425,9 @@ void AudioEngine::setDitherBitDepth(int bitDepth)
+         convo::publishAtomic(ditherBitDepth, bitDepth, std::memory_order_release);
+         convo::publishAtomic(m_currentDitherBitDepth, bitDepth, std::memory_order_release);
+         DBG_LOG("Dither Bit Depth changed: " + juce::String(bitDepth));
+-        submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
++        // ★ #236: bulk restore 中は 1 回の rebuild に畳む（endBulkParameterRestore が実行する）。
++        if (!m_isRestoringState)
++            submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+ 
+         selectAdaptiveCoeffBankForCurrentSettings();
+ 
+@@ -521,7 +527,9 @@ void AudioEngine::setNoiseShaperType(NoiseShaperType type)
+             typeName = "Adaptive9thOrder";
+ 
+         DBG_LOG("Noise Shaper changed: " + typeName);
+-        submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
++        // ★ #236: bulk restore 中は 1 回の rebuild に畳む（endBulkParameterRestore が実行する）。
++        if (!m_isRestoringState)
++            submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+         if (!m_isRestoringState && sr > 0.0)
+         {
+@@ -637,7 +645,9 @@ void AudioEngine::setOversamplingFactor(int factor)
+         reprepareUiConvolverForProcessingGeometry(
+             convo::consumeAtomic(currentSampleRate, std::memory_order_acquire),
+             convo::consumeAtomic(maxSamplesPerBlock, std::memory_order_acquire));
+-        submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
++        // ★ #236: bulk restore 中は 1 回の rebuild に畳む（endBulkParameterRestore が実行する）。
++        if (!m_isRestoringState)
++            submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+         const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+         if (!m_isRestoringState && sr > 0.0)
+         {
+@@ -726,7 +736,9 @@ void AudioEngine::setOversamplingType(OversamplingType type)
+ {
+     convo::publishAtomic(oversamplingType, type, std::memory_order_release);
+     convo::publishAtomic(m_currentOversamplingType, type, std::memory_order_release);
+-    submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
++    // ★ #236: bulk restore 中は 1 回の rebuild に畳む（endBulkParameterRestore が実行する）。
++    if (!m_isRestoringState)
++        submitRebuildIntent(convo::RebuildKind::Structural, RebuildTelemetryReason::EnqueueSnapshotCommand, RebuildTelemetryClass::Snapshot, RebuildTelemetryPolicy::Replaceable);
+     const double sr = convo::consumeAtomic(currentSampleRate, std::memory_order_acquire);
+     if (!m_isRestoringState && sr > 0.0)
+     {

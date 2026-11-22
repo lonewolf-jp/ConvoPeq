@@ -1565,6 +1565,9 @@ int runEqDirectDriveAttribution();
 // P1PolyphaseGainCharacterization.cpp (work113 P1-1: R12-8 OFF/ON characterization)
 int runP1PolyphaseGainCharacterization(int argc, char* argv[]);
 
+// BulkParameterRestoreTests.cpp (issue #236: bulk restore collapses into one rebuild)
+int runBulkParameterRestoreContract();
+
 // P1PolyphaseGainCharacterization.cpp (P3-5-R30: Recovery-origin vehicle・test-only D1)
 int runP1RecoveryOrigin(int argc, char* argv[]);
 
@@ -1602,6 +1605,8 @@ int runFpmM2();
             return runBassBuzzMeasurement(argc, argv);
         else if (a == "--p1-char")
             return runP1PolyphaseGainCharacterization(argc, argv);
+        else if (a == "--bulk-restore-contract")
+            return runBulkParameterRestoreContract();
         else if (a == "--p1-recovery-origin")
             return runP1RecoveryOrigin(argc, argv);
         else if (a == "--fpm-m0")

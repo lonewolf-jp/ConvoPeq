@@ -2617,6 +2617,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/STG11D10EQEnumGuardTests.cpp
         src/tests/AudioEngineHarness/STG11D11TotalGainFiniteTests.cpp
         src/tests/AudioEngineHarness/STG11D12StateIntegerGuardTests.cpp
+        src/tests/AudioEngineHarness/BulkParameterRestoreTests.cpp
         src/tests/AudioEngineHarness/STG11D12NoiseShaperEnumGuardTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
@@ -2723,6 +2724,10 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     #   ConvoPeq 依存を外すことで、 icx リンカー問題の影響を回避し独立ビルドできる。
     # add_dependencies(AudioEngineHarness ConvoPeq)
     add_test(NAME AudioEngineHarness COMMAND AudioEngineHarness)
+    # Issue #236: bulk parameter restore が rebuild を 1 回に畳み、bulk 外の
+    #   setter は従来どおり rebuild することを固定する（既定スイートとは別実行）。
+    add_test(NAME BulkParameterRestoreContract COMMAND AudioEngineHarness --bulk-restore-contract)
+    set_tests_properties(BulkParameterRestoreContract PROPERTIES TIMEOUT 180)
     # V-08: structural checks must inspect THIS worktree, explicitly.
     set_tests_properties(AudioEngineHarness PROPERTIES ENVIRONMENT "CONVOPEQ_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}")
 
