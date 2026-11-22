@@ -34,16 +34,32 @@ class Guard:
                 time.sleep(0.1)
         raise RuntimeError("another measurement run holds %s" % self.lock)
 
+    def _release_lock(self):
+        if getattr(self, "lock", None) and os.path.exists(self.lock):
+            os.remove(self.lock)
+        self.lock = None
+
     def save(self):
         self._lock()
-        self.dir = tempfile.mkdtemp(prefix="m236profile-")
-        for name in NAMES:
-            src = os.path.join(APPDATA, name)
-            if os.path.exists(src):
-                dst = os.path.join(self.dir, name)
-                shutil.copyfile(src, dst)
-                self.saved[name] = dst
-        self.complete = True
+        try:
+            self.dir = tempfile.mkdtemp(prefix="m236profile-")
+            for name in NAMES:
+                src = os.path.join(APPDATA, name)
+                if os.path.exists(src):
+                    dst = os.path.join(self.dir, name)
+                    shutil.copyfile(src, dst)
+                    self.saved[name] = dst
+            self.complete = True
+        except BaseException:
+            # the callers run save() before their try/finally, so a failure here
+            # must not leave the lock (or a half snapshot) behind
+            if self.dir is not None:
+                shutil.rmtree(self.dir, ignore_errors=True)
+            self.dir = None
+            self.saved.clear()
+            self.complete = False
+            self._release_lock()
+            raise
 
     def restore(self):
         if self.dir is None:
@@ -58,6 +74,4 @@ class Guard:
                 os.remove(dst)
         shutil.rmtree(self.dir, ignore_errors=True)
         self.dir = None
-        if getattr(self, "lock", None) and os.path.exists(self.lock):
-            os.remove(self.lock)
-            self.lock = None
+        self._release_lock()

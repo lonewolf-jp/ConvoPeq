@@ -85,6 +85,10 @@ def run_once(exe, cond, idx, log):
                             stderr=subprocess.DEVNULL)
     proc.wait()
     t1 = qpc()
+    if proc.returncode != 0:
+        # a run that died still leaves the marks it wrote; reject the row
+        raise SystemExit("measurement process failed: cond=%s rc=%d"
+                         % (cond, proc.returncode))
 
     marks = {}
     cpus = {}
@@ -114,9 +118,14 @@ def run_once(exe, cond, idx, log):
     # path channel is nested in restore too. Sum only disjoint top-level
     # intervals, chosen by which path actually ran.
     if "init_end" in marks:
-        top = ["noise", "bulk", "close", "file", "parse", "init", "channel", "restore"]
+        # relaxed/fallback run after init and before channel when the device open
+        # fails first: they are part of the saved-device cost, not leftover time.
+        top = ["noise", "bulk", "close", "file", "parse", "init", "relaxed",
+               "fallback", "channel", "restore"]
     else:
-        top = ["noise", "bulk", "close", "file", "default_init", "restore"]
+        # default-device path: parse still runs when the XML is malformed, and
+        # channel is inside restore, so channel stays out of the sum.
+        top = ["noise", "bulk", "close", "file", "parse", "default_init", "restore"]
     covered = sum(row[k] for k in top if row.get(k, -1.0) > 0)
     row["unattributed"] = row["S2"] - covered
     for name in ("noise_shaper_learn.xml", "learned_state.xml"):

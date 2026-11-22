@@ -56,6 +56,9 @@ def run_once(cond, round_idx, pos):
     proc = subprocess.Popen([EXE, "--cli-run", "--cli-exit-ms", "1000", "--cli-log-file", LOG],
                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     proc.wait()
+    if proc.returncode != 0:
+        raise SystemExit("measurement process failed: cond=%s rc=%d"
+                         % (cond, proc.returncode))
     m, c = {}, {}
     for line in io.open(trace, encoding="utf-8", errors="replace"):
         p = line.split()
@@ -93,6 +96,10 @@ def run_once(cond, round_idx, pos):
 
 
 def main():
+    if os.path.exists(OUT) and os.environ.get("CONVOPEQ_CAMPAIGN_OVERWRITE") != "1":
+        # the two campaigns must stay separate files: never truncate campaign 1
+        raise SystemExit("%s already exists; move it away or set "
+                         "CONVOPEQ_CAMPAIGN_OVERWRITE=1" % OUT)
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     conds = ["E0", "E1", "E2", "E3"]
     square = [[0, 1, 2, 3], [1, 3, 0, 2], [2, 0, 3, 1], [3, 2, 1, 0]]
