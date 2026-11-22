@@ -7,6 +7,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import profile_guard
+
 EXE = r"C:\VSC_Project\fix236\build-msvc\ConvoPeq_artefacts\Release\ConvoPeq.exe"
 APPDATA = os.path.join(os.environ["APPDATA"], "ConvoPeq")
 WORK = r"C:\Users\user\AppData\Local\Temp\opencode\m236"
@@ -98,15 +101,29 @@ def main():
     cols = ["round", "pos", "cond", "S1", "S2", "S3", "S4", "S2_noise", "S2_close",
             "S2_file", "S2_parse", "S2_init", "S2_prep", "S2_channel", "S2_restore",
             "S2_final_rebuild", "S2_cpu", "init_cpu", "nsl", "nsl_sha", "ls", "ls_sha", "ds_sha"]
+    guard = profile_guard.Guard()
+    guard.save()
+    try:
+        _write(cols, conds, rows, rounds)
+    finally:
+        guard.restore()
+
+
+def _write(cols, conds, rows, rounds):
     with open(OUT, "w", encoding="utf-8", newline="\n") as out:
         out.write(",".join(cols) + "\n")
         for r, order in enumerate(rows):
             for pos, idx in enumerate(order):
                 row = run_once(conds[idx], r, pos)
-                out.write(",".join(
-                    [str(row["round"]), str(row["pos"]), row["cond"]] +
-                    ["%.1f" % row[k] for k in cols[3:17]] +
-                    [str(row["nsl"]), row["nsl_sha"], str(row["ls"]), row["ls_sha"], row["ds_sha"]]) + "\n")
+                fields = [str(row["round"]), str(row["pos"]), row["cond"]]
+                for k in cols[3:]:
+                    if k in ("nsl", "ls"):
+                        fields.append(str(row[k]))
+                    elif k.endswith("_sha"):
+                        fields.append(row[k])
+                    else:
+                        fields.append("%.1f" % row[k])
+                out.write(",".join(fields) + "\n")
                 out.flush()
                 print("r%02d p%d %s S1=%6.0f S2=%6.1f init=%6.1f restore=%5.1f final=%5.1f S3=%6.1f S4=%5.1f" % (
                     r + 1, pos + 1, row["cond"], row["S1"], row["S2"], row["S2_init"],

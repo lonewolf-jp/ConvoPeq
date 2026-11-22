@@ -1,5 +1,6 @@
 // Measurement-only QPC marks for issue #236. Not committed.
 #pragma once
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <windows.h>
@@ -29,9 +30,9 @@ namespace m236
         return marks;
     }
 
-    inline int& count() noexcept
+    inline std::atomic<int>& count() noexcept
     {
-        static int n = 0;
+        static std::atomic<int> n { 0 };
         return n;
     }
 
@@ -39,13 +40,12 @@ namespace m236
     {
         LARGE_INTEGER c;
         QueryPerformanceCounter (&c);
-        int& n = count();
+        const int n = count().fetch_add (1, std::memory_order_acq_rel);
         if (n < 256)
         {
             buffer()[n].tag = tag;
             buffer()[n].qpc = c.QuadPart;
             buffer()[n].cpu = threadCpu100ns();
-            ++n;
         }
     }
 

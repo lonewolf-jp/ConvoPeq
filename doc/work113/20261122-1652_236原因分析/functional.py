@@ -4,6 +4,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import profile_guard
 
 WORK = r"C:\Users\user\AppData\Local\Temp\opencode\m236"
 APPDATA = os.path.join(os.environ["APPDATA"], "ConvoPeq")
@@ -57,7 +61,12 @@ def normal():
 
 
 if __name__ == "__main__":
-    run("normal", normal)
-    run("no-file", no_file)
-    run("corrupt", corrupt)
-    run("bad-device", bad_device)
+    guard = profile_guard.Guard()
+    guard.save()
+    try:
+        run("normal", normal)
+        run("no-file", no_file)
+        run("corrupt", corrupt)
+        run("bad-device", bad_device)
+    finally:
+        guard.restore()

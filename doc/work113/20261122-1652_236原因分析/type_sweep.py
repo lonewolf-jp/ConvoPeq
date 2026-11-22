@@ -56,7 +56,13 @@ def run(tag, text, runs):
                 marks[p[0]] = int(p[1])
                 cpus[p[0]] = int(p[2]) if len(p) > 2 else 0
         logtext = io.open(log, encoding="utf-8", errors="replace").read() if os.path.exists(log) else ""
-        fallback = "restore failed" in logtext or "relaxed retry" in logtext
+        # loadSettings runs before --cli-log-file is installed, so its
+        # restore-failure messages never reach this file. "unknown" is the
+        # honest answer unless the log happens to contain the message.
+        if "restore failed" in logtext or "relaxed retry" in logtext:
+            fallback = "yes"
+        else:
+            fallback = "unknown"
         rows.append((tag, (marks["init_end"] - marks["init_begin"]) / 1e4,
                      (cpus["init_end"] - cpus["init_begin"]) / 1e4,
                      (marks["s2_end"] - marks["s2_begin"]) / 1e4, fallback))

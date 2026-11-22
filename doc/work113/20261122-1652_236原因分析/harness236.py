@@ -13,6 +13,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import profile_guard
+
 APPDATA = os.path.join(os.environ["APPDATA"], "ConvoPeq")
 WORK = r"C:\Users\user\AppData\Local\Temp\opencode\m236"
 FIX = r"C:\Users\user\AppData\Local\Temp\opencode\m24run\fixtures"
@@ -107,7 +110,11 @@ def run_once(exe, cond, idx, log):
     for name, a, b in SEGMENTS:
         row[name] = (marks[b] - marks[a]) / f if (a in marks and b in marks) else -1.0
         row[name + "_cpu"] = (cpus[b] - cpus[a]) / 10000.0 if (a in cpus and b in cpus) else -1.0
-    covered = sum(v for k, v in row.items() if k in [s[0] for s in SEGMENTS] and v > 0)
+    # adaptive and convolver are nested inside restore: keep them as columns but
+    # do not add them to the covered sum.
+    nested = {"adaptive", "convolver"}
+    covered = sum(v for k, v in row.items()
+                  if k in [s[0] for s in SEGMENTS] and k not in nested and v > 0)
     row["unattributed"] = row["S2"] - covered
     for name in ("noise_shaper_learn.xml", "learned_state.xml"):
         row[name] = sizes[name][0]
@@ -123,11 +130,20 @@ def main():
     if os.path.exists(log):
         os.remove(log)
 
+    guard = profile_guard.Guard()
     cols = ["idx", "cond", "S2"] + [s[0] for s in SEGMENTS] + \
            ["unattributed", "total", "S2_cpu", "prep", "prep_cpu", "aeprep", "aeprep_cpu",
             "rep", "rb", "rb_cpu", "marks",
             "noise_shaper_learn.xml", "noise_shaper_learn.xml_sha",
             "learned_state.xml", "learned_state.xml_sha"]
+    guard.save()
+    try:
+        _write(out_path, exe, runs, log, cols)
+    finally:
+        guard.restore()
+
+
+def _write(out_path, exe, runs, log, cols):
     with open(out_path, "w", encoding="utf-8", newline="\n") as out:
         out.write(",".join(cols) + "\n")
         for i in range(runs):

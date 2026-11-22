@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import profile_guard
+
 WORK = r"C:\Users\user\AppData\Local\Temp\opencode\m236"
 APPDATA = os.path.join(os.environ["APPDATA"], "ConvoPeq")
 FIX = r"C:\Users\user\AppData\Local\Temp\opencode\m24run\fixtures"
@@ -52,6 +55,15 @@ def run(exe, tag, i):
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+    guard = profile_guard.Guard()
+    guard.save()
+    try:
+        _run_all(n)
+    finally:
+        guard.restore()
+
+
+def _run_all(n):
     rows = []
     for i in range(n):
         order = [("pre", PRE), ("post", POST)] if i % 2 == 0 else [("post", POST), ("pre", PRE)]

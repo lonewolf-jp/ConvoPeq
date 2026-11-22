@@ -8,7 +8,7 @@ Issue #236 の S2（`MainWindow` からの設定読込、約 800 ms）につい�
 - デバイス初期化の 500 ms は、**ASIO ドライバの初回初期化**が主体である。同じプロセスで 2 回目の `initialise()` は約 100 ms で終わる。WASAPI では 280 ms（CPU 16〜31 ms）、DirectSound では 345〜378 ms、ASIO では 568 ms（CPU 328〜344 ms）だった。ASIO だけがプロセス内 CPU を約 300 ms 消費する。
 - サンプルレートを 48 kHz / 96 kHz / 192 kHz に変えても初期化は 540〜578 ms で変わらない。**フォーマット依存ではない**。
 - 分類は **1（デバイス初期化が主因）**、副因が **設定復元の重複 rebuild** である。XML の parse と学習 XML の読込は主因ではない（合計 9 ms 未満）。
-- 副因は修正できる（別報告 `20261122-1652_236修正/report.md`）。主因はアプリ側から制御できない部分を含むため、**S2 を 400 ms 以下にすることはこのデバイス構成では達成できない**。残存時間と根拠を §6 に記す。
+- 副因は修正した（別報告 `20261122-1652_236修正/report.md`）。修正後も S2 は 400 ms を超える。残りの約 500 ms は音声デバイスの初回初期化で、**今回の範囲ではアプリのコードから削減する手段が見つかっていない**（他の手段を否定したものではない）。残存時間と根拠を §6 に記す。
 
 ## 2. 基準と参照範囲
 
@@ -118,7 +118,7 @@ Profile Id: CPU.Verbose.Memory, FileIO.Verbose.Memory
 | Windows Audio（WASAPI） | 279.8〜294.4 ms | 16〜31 ms |
 | DirectSound | 344.5〜377.6 ms | 47〜94 ms |
 
-WASAPI は 280 ms のうち CPU が 16〜31 ms しかない。残りは待ち（`audiodg` との IPC など）である。ASIO は 568 ms のうち 328〜344 ms がプロセス内 CPU で、**ドライバの COM 実装（プロセス内）が CPU を消費している**ことを示す。JUCE の ASIO ラッパーも同じスレッドで動くため、両者の分離はできない。
+WASAPI は 280 ms のうち CPU が 16〜31 ms しかない。残りは待ち（`audiodg` との IPC など）である。ASIO は 568 ms のうち 328〜344 ms がプロセス内 CPU である。**JUCE の ASIO ラッパーとドライバの COM 実装が同じスレッドで動くため、どちらが消費しているかは分離できない**。分離にはプロファイルが必要である。
 
 ### 6.2 サンプルレート
 
@@ -187,6 +187,8 @@ ASIO のまま `audioDeviceRate` だけを変えた。
 - 測定は 1 台の端末、MSVC Release の 1 構成である。icx では測定していない。
 - 起動（S1）と終了（S3）のマークは参考値で、C-24 の区間定義（`main` の先頭、プロセス終了）と起点が違う。C-24 の S1・S3 と直接比較してはいけない。
 - 設定ファイルが存在しない初回起動では、終了時に `device_settings.xml` が書かれなかった。修正前後のバイナリで同じ挙動であり、本件の変更によるものではない（別項目）。
+- デバイス種別の比較で使った `type_sweep.py` は、`loadSettings` の失敗メッセージを CLI ログから探していた。`loadSettings` は CLI ログの設置より前に走るため、この判定は常に「失敗なし」になる。緩和再試行と fallback の発火は、この方法では確認できない。
+- 計測用ヘッダの `mark` は、音声コールバックとメインスレッドの両方から呼ばれる。測定では取りこぼしが起きても各マークの順序が保たれる範囲で使ったが、厳密な同時実行の安全性は担保していない（測定専用コード）。
 
 ## 9. 参照
 
@@ -196,4 +198,4 @@ ASIO のまま `audioDeviceRate` だけを変えた。
 - 修正報告: `doc/work113/20261122-1652_236修正/report.md`
 - 生データ: 同フォルダの `breakdown_pre.csv`、`breakdown_after_fix.csv`、`campaign236.csv`、`ab236.csv`、`rate_sweep.csv`、`type_sweep.csv`
 - 計測用ヘッダ: 同フォルダの `M236Trace.h`、適用スクリプト `instrument.py`
-- ハーネス: `harness236.py`、`campaign.py`、`ab.py`、`type_sweep.py`、`rate_sweep.py`、`functional.py`、`etw_capture.py`
+- ハーネス: `harness236.py`、`campaign.py`、`ab.py`、`type_sweep.py`、`rate_sweep.py`、`functional.py`、`etw_capture.py`、`profile_guard.py`（3 ファイルの退避と復元）

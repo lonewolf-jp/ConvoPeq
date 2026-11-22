@@ -42,12 +42,17 @@ def main():
 
     env = dict(os.environ)
     env["CONVOPEQ_M236_TRACE"] = marks
-    proc = subprocess.Popen([exe, "--cli-run", "--cli-exit-ms", "2000", "--cli-log-file", log],
-                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    pid = proc.pid
-    proc.wait()
-
-    r = subprocess.run(["wpr", "-stop", out], capture_output=True, text=True)
+    started = False
+    try:
+        proc = subprocess.Popen([exe, "--cli-run", "--cli-exit-ms", "2000", "--cli-log-file", log],
+                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        started = True
+        pid = proc.pid
+        proc.wait()
+    finally:
+        # never leave a recording running, even if the launch failed
+        r = subprocess.run(["wpr", "-stop", out] if started else ["wpr", "-cancel"],
+                           capture_output=True, text=True)
     print("wpr stop rc", r.returncode, r.stdout.strip()[:160])
     print("pid", pid, "etl", os.path.getsize(out) if os.path.exists(out) else -1)
     print("marks", open(marks).read().strip().replace("\n", " ") if os.path.exists(marks) else "none")
