@@ -134,6 +134,7 @@ bulk restore の畳み込みと、bulk restore の外の rebuild が両立して
 | C | `endBulkParameterRestore(true)` で rebuild が要求され、6 属性がすべて読める | 合格 |
 | D | bulk restore の後に setter を呼ぶと再び rebuild が要求される（フラグが残らない） | 合格 |
 
+- 製品コードで 6 つの setter を呼ぶ箇所は、`DeviceSettings::loadSettings` の bulk 区間の内側（`DeviceSettings.cpp:1147`〜`1307`）と、UI・状態適用の区間の外（`MainWindow.cpp:759`、`1351`、`DeviceSettings.cpp:281`〜`611`、`AudioEngine.StateIO.cpp`）に分かれる。区間の外では `m_isRestoringState` が false なので、rebuild の要求は従来どおり行われる。テスト A と D がこの経路を固定している。
 - 観測は既存の公開 reader（`getRebuildDispatchDiagnostics().requestCount` と `getPublicationBacklogCount()`）だけで行い、製品コードに計測を足していない。
 - ミューテーション（10 箇所の `!m_isRestoringState` を `true` に置換して改修前の挙動に戻す）では、B が「4 回」を検出して FAIL した（終了コード 1）。改修を戻すと検出できることを確認した。
 - 実行時間は約 2 秒、`ctest` の登録名は `BulkParameterRestoreContract`（タイムアウト 180 秒）。
