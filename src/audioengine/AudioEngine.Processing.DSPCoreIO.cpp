@@ -506,9 +506,12 @@ void AudioEngine::DSPCore::processOutput(const juce::AudioSourceChannelInfo& buf
     loudnessMeter.processBlock(dataL, dataR, numSamples);
 
     // ★ [P1-1] Simple Peak Limiter: Hard Clamp (Safety Net) の前段で動作
+    //   #238: ニーは threshold を中心に対数振幅で対称。1 dB 幅なら
+    //   -2.0 dBFS から -1.0 dBFS（= kOutputHeadroom）まで。終端の傾きは
+    //   ハードニーの T/peak に一致する。
     constexpr double kPLThreshold = 0.8413951287507587;  // -1.5dBFS
-    constexpr double kPLKnee = 0.108748;
-    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKnee);
+    constexpr double kPLKneeDb = 1.0;                    // knee width (dB)
+    peakLimiter.processBlock(dataL, dataR, numSamples, kPLThreshold, kPLKneeDb);
 
     // BUG-064: clamp BEFORE applyFixedLatencyDelay to match double path ordering,
     // guaranteeing the delay buffer only stores clamped values in [-kOutputHeadroom, kOutputHeadroom].

@@ -1,0 +1,11 @@
+[PASS] static soft-knee curve (11 cases)
+[PASS] knee <= 0 or NaN falls back to the hard knee
+[PASS] knee start/end are continuous (value)
+[PASS] slope is continuous at both knee boundaries (-1.059254)
+[PASS] curve is bounded by 1 and monotone (2000 points)
+[PASS] output ceiling is T (-1.5 dBFS) and the hard clamp is not reached
+[PASS] stereo uses the louder channel and scales both (0.88567908289553554)
+[PASS] right=nullptr uses the left peak
+[PASS] invalid threshold passes through without NaN
+[PASS] extreme inputs and knee widths above 6 dB stay finite and bounded
+SimplePeakLimiterKneeTests: PASS
