@@ -123,6 +123,21 @@ S1（`MainApplication::initialise` の入口から出口まで）の中央値は
 - 再測定間の差は、C-24 の計画が求める「2 日以上あけた 2 回」を今回実施していないため未検証である。1 回だけの測定で合格とは扱わない。
 - S2 の増分はドリフト以下で判定できない。学習 XML の寄与が小さいことは §6 の E0 と E2 の差（9.3 ms）で示されるが、判定規則上は「判定不能」である。
 
+### 7.2 回帰テスト（BulkParameterRestoreContract）
+
+bulk restore の畳み込みと、bulk restore の外の rebuild が両立していることを固定するテストを追加した（`src/tests/AudioEngineHarness/BulkParameterRestoreTests.cpp`、`ctest -R BulkParameterRestoreContract`、実行ファイルは `AudioEngineHarness.exe --bulk-restore-contract`）。
+
+| 検査 | 内容 | 実測 |
+| --- | --- | --- |
+| A | bulk restore の外で `setInputHeadroomDb` を呼ぶと rebuild が要求され、値が反映される | 合格 |
+| B | bulk restore 中に 6 つの setter を呼んでも rebuild 要求は 0 回 | 合格（0 回） |
+| C | `endBulkParameterRestore(true)` で rebuild が要求され、6 属性がすべて読める | 合格 |
+| D | bulk restore の後に setter を呼ぶと再び rebuild が要求される（フラグが残らない） | 合格 |
+
+- 観測は既存の公開 reader（`getRebuildDispatchDiagnostics().requestCount` と `getPublicationBacklogCount()`）だけで行い、製品コードに計測を足していない。
+- ミューテーション（10 箇所の `!m_isRestoringState` を `true` に置換して改修前の挙動に戻す）では、B が「4 回」を検出して FAIL した（終了コード 1）。改修を戻すと検出できることを確認した。
+- 実行時間は約 2 秒、`ctest` の登録名は `BulkParameterRestoreContract`（タイムアウト 180 秒）。
+
 ### 7.1 ゲートの再定義（2026-11-22）
 
 Owner の判断により、S2 の絶対値ゲートを 400 ms から **600 ms** へ再定義した。理由は、S2 が実デバイス初期化を含む区間であり、この接続先では ASIO の初回初期化に約 494 ms かかるためである。**2026-11-22 の測定が 400 ms に対して不合格だった事実は変わらない**（§7 の表をそのまま残す）。
