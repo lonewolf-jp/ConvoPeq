@@ -1,0 +1,7 @@
+type,init_ms,init_cpu_ms,S2_ms,fallback
+asio,568.3,343.8,923.8,False
+asio,567.8,328.1,944.3,False
+wasapi,294.4,31.2,631.5,False
+wasapi,279.8,15.6,641.6,False
+directsound,377.6,93.8,744.9,False
+directsound,344.5,46.9,664.2,False
