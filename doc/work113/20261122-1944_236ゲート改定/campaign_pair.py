@@ -44,6 +44,12 @@ OUT = os.path.join(HERE, "campaign236_pairs.csv")
 PAIRS = 20
 GAP_BETWEEN_PAIRS_S = 2.0
 
+# Same instrumented binary as campaigns 1 and 2. campaign.py's default points at
+# the ordinary MSVC build, which has no timing marks.
+EXE = os.environ.get(
+    "CONVOPEQ_C2_EXE",
+    r"C:\Users\user\AppData\Local\Temp\opencode\m236\exe_post.exe")
+
 
 def load_campaign():
     spec = importlib.util.spec_from_file_location(
@@ -61,8 +67,9 @@ def main():
         raise SystemExit("%s already exists; move it away first" % OUT)
 
     campaign = load_campaign()
-    if not os.path.exists(campaign.EXE):
-        raise SystemExit("measurement binary is missing: %s" % campaign.EXE)
+    if not os.path.exists(EXE):
+        raise SystemExit("measurement binary is missing: %s" % EXE)
+    campaign.EXE = EXE
 
     columns = ["pair", "order", "leg", "cond", "start_epoch", "end_epoch",
                "gap_ms", "S1", "S2", "S3", "S4", "S2_cpu", "init_cpu",
@@ -88,11 +95,8 @@ def main():
                               "%.3f" % start, "%.3f" % end, "%.0f" % gap_ms]
                     values += ["%.1f" % row[k] for k in
                                ("S1", "S2", "S3", "S4", "S2_cpu", "init_cpu")]
-                    values += [str(row["noise_shaper_learn.xml"]),
-                               row["noise_shaper_learn.xml_sha"],
-                               str(row["learned_state.xml"]),
-                               row["learned_state.xml_sha"],
-                               row["device_settings.xml"]]
+                    values += [str(row["nsl"]), row["nsl_sha"],
+                               str(row["ls"]), row["ls_sha"], row["ds_sha"]]
                     out.write(",".join(values) + "\n")
                     out.flush()
                     print("pair %02d leg %d %-2s S2=%7.1f gap=%6.0f ms"
