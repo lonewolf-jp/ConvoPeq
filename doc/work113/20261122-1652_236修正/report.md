@@ -1,6 +1,6 @@
 # #236 S2（設定読込）の改修（2026-11-22）
 
-Issue #236 の原因分析（`doc/work113/20261122-1652_236原因分析/report.md`）で特定した副因、**bulk parameter restore 中の冗長な rebuild 6 回**を修正した。修正後の S2 は 557.7 ms（E2、20 回の中央値）で、固定ゲート 400 ms は達成していない。残りの約 500 ms は音声デバイスの初回初期化で、アプリ側から制御できない。したがって **Issue は解決とせず、未解決のまま維持する**。
+Issue #236 の原因分析（`doc/work113/20261122-1652_236原因分析/report.md`）で特定した副因、**bulk parameter restore 中の冗長な rebuild 6 回**を修正した。修正後の S2 は 557.7 ms（E2、20 回の中央値）で、固定ゲート 400 ms は達成していない。残りの約 500 ms は音声デバイスの初回初期化で、今回の範囲ではアプリのコードから削減する手段が見つかっていない。したがって **Issue は解決とせず、未解決のまま維持する**。
 
 ## 1. 改修前の測定結果
 
@@ -148,6 +148,7 @@ S1（`MainApplication::initialise` の入口から出口まで）の中央値は
 | `check-list-compliance.ps1` | 合格（警告のみ） |
 | CLI 起動・終了 | `--cli-run --cli-exit-ms 800` で終了コード 0、`SHUTDOWN_END`、`[FAULT]` 0 |
 | 計測用コードの混入 | マークは計測用ビルドだけ。コミットした差分は `AudioEngine.Parameters.cpp` の 6 か所のみ |
+| CI（PR #245、head `5dedfa37`） | Windows MSVC / Release、RelWithDebInfo ASan、Debug TSan、CodeQL、lint-audioengine、list-compliance、isr-verify、authority-static-checks、authority-runtime-tests、audit-report-verification、CodeRabbit がすべて success（probe のみ設計どおり skipped） |
 
 ## 10. 未解決事項と制約
 
