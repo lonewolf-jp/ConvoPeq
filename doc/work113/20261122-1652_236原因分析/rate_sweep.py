@@ -42,9 +42,9 @@ def run(rate, tag, runs):
             if len(p) >= 2:
                 marks[p[0]] = int(p[1])
                 cpus[p[0]] = int(p[2]) if len(p) > 2 else 0
-        rows.append((rate, (marks["init_end"] - marks["init_begin"]) / f,
+        rows.append((rate, (marks["init_end"] - marks["init_begin"]) / F,
                      (cpus["init_end"] - cpus["init_begin"]) / 1e4,
-                     (marks["s2_end"] - marks["s2_begin"]) / f))
+                     (marks["s2_end"] - marks["s2_begin"]) / F))
     return rows
 
 

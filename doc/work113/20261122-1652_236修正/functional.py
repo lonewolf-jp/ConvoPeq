@@ -63,10 +63,12 @@ def normal():
 if __name__ == "__main__":
     guard = profile_guard.Guard()
     guard.save()
+    failed = 0
     try:
-        run("normal", normal)
-        run("no-file", no_file)
-        run("corrupt", corrupt)
-        run("bad-device", bad_device)
+        failed += run("normal", normal)[0] != 0
+        failed += run("no-file", no_file)[0] != 0
+        failed += run("corrupt", corrupt)[0] != 0
+        failed += run("bad-device", bad_device)[0] != 0
     finally:
         guard.restore()
+    raise SystemExit(1 if failed else 0)

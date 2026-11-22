@@ -1,4 +1,5 @@
 """Compare init cost across JUCE device types (ASIO vs WASAPI vs DirectSound)."""
+import ctypes
 import io
 import os
 import re
@@ -7,6 +8,10 @@ import subprocess
 import sys
 
 WORK = r"C:\Users\user\AppData\Local\Temp\opencode\m236"
+_k32 = ctypes.windll.kernel32
+_qpc_freq = ctypes.c_longlong()
+_k32.QueryPerformanceFrequency(ctypes.byref(_qpc_freq))
+F = _qpc_freq.value / 1000.0  # ticks per millisecond
 APPDATA = os.path.join(os.environ["APPDATA"], "ConvoPeq")
 FIX = r"C:\Users\user\AppData\Local\Temp\opencode\m24run\fixtures"
 EXE = r"C:\VSC_Project\fix236\build-msvc\ConvoPeq_artefacts\Release\ConvoPeq.exe"
@@ -63,9 +68,9 @@ def run(tag, text, runs):
             fallback = "yes"
         else:
             fallback = "unknown"
-        rows.append((tag, (marks["init_end"] - marks["init_begin"]) / 1e4,
+        rows.append((tag, (marks["init_end"] - marks["init_begin"]) / F,
                      (cpus["init_end"] - cpus["init_begin"]) / 1e4,
-                     (marks["s2_end"] - marks["s2_begin"]) / 1e4, fallback))
+                     (marks["s2_end"] - marks["s2_begin"]) / F, fallback))
     return rows
 
 

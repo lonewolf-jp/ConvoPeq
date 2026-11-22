@@ -59,7 +59,8 @@ namespace m236
         if (fopen_s (&f, path, "w") != 0 || f == nullptr)
             return;
 
-        for (int i = 0; i < count(); ++i)
+        const int n = count().load (std::memory_order_acquire);
+        for (int i = 0; i < n && i < 256; ++i)
             std::fprintf (f, "%s %lld %lld\n", buffer()[i].tag, buffer()[i].qpc, buffer()[i].cpu);
 
         std::fclose (f);

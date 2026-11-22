@@ -48,11 +48,17 @@ def main():
                                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         started = True
         pid = proc.pid
-        proc.wait()
+        try:
+            proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
     finally:
         # never leave a recording running, even if the launch failed
         r = subprocess.run(["wpr", "-stop", out] if started else ["wpr", "-cancel"],
                            capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit("wpr stop failed: %s" % (r.stdout + r.stderr).strip()[:200])
     print("wpr stop rc", r.returncode, r.stdout.strip()[:160])
     print("pid", pid, "etl", os.path.getsize(out) if os.path.exists(out) else -1)
     print("marks", open(marks).read().strip().replace("\n", " ") if os.path.exists(marks) else "none")

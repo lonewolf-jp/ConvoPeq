@@ -1,7 +1,8 @@
 """Insert measurement-only QPC marks into DeviceSettings.cpp / MainWindow.cpp (issue #236).
 
-Not committed. Run `instrument.py apply` then build, or `apply revert` to restore
-the two files from git.
+Not committed. Run `python instrument.py apply` then build, or
+`python instrument.py revert` to restore the five touched source files from git
+and delete the generated header.
 """
 import io
 import os
@@ -79,7 +80,8 @@ namespace m236
         if (fopen_s (&f, path, "w") != 0 || f == nullptr)
             return;
 
-        for (int i = 0; i < count(); ++i)
+        const int n = count().load (std::memory_order_acquire);
+        for (int i = 0; i < n && i < 256; ++i)
             std::fprintf (f, "%s %lld %lld\n", buffer()[i].tag, buffer()[i].qpc, buffer()[i].cpu);
 
         std::fclose (f);
@@ -118,7 +120,6 @@ def apply():
         print("already instrumented")
         return
 
-    write(HDR, HEADER)
 
     # include + one AutoDump instance
     ds = sub1(ds, '#include "DeviceSettings.h"', '#include "DeviceSettings.h"\n' + DS_INCLUDE, "ds include")
@@ -262,13 +263,13 @@ def apply():
 
     ds = sub1(ds,
               "            return;\n        }\n    }\n",
+              "            m236::mark(\"convolver_end\");\n"
               "            if (std::getenv(\"CONVOPEQ_M236_REINIT\") != nullptr)\n"
               "            {\n"
               "                m236::mark(\"reinit_begin\");\n"
               "                deviceManager.initialise (2, 2, xml.get(), false);\n"
               "                m236::mark(\"reinit_end\");\n"
               "            }\n"
-              "            m236::mark(\"convolver_end\");\n"
               "            m236::mark(\"restore_end\");\n"
               "            return;\n        }\n    }\n",
               "file branch end")
@@ -388,6 +389,8 @@ def apply():
               "    DeviceSettings::saveSettings (audioDeviceManager, audioEngine);\n"
               "    m236::mark(\"s4_end\");\n", "s4")
 
+    # all anchors matched: now touch the files
+    write(HDR, HEADER)
     write(DS, ds)
     write(MW, mw)
     print("instrumented")

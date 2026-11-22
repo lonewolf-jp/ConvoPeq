@@ -110,11 +110,14 @@ def run_once(exe, cond, idx, log):
     for name, a, b in SEGMENTS:
         row[name] = (marks[b] - marks[a]) / f if (a in marks and b in marks) else -1.0
         row[name + "_cpu"] = (cpus[b] - cpus[a]) / 10000.0 if (a in cpus and b in cpus) else -1.0
-    # adaptive and convolver are nested inside restore: keep them as columns but
-    # do not add them to the covered sum.
-    nested = {"adaptive", "convolver"}
-    covered = sum(v for k, v in row.items()
-                  if k in [s[0] for s in SEGMENTS] and k not in nested and v > 0)
+    # adaptive and convolver are nested inside restore. On the default-device
+    # path channel is nested in restore too. Sum only disjoint top-level
+    # intervals, chosen by which path actually ran.
+    if "init_end" in marks:
+        top = ["noise", "bulk", "close", "file", "parse", "init", "channel", "restore"]
+    else:
+        top = ["noise", "bulk", "close", "file", "default_init", "restore"]
+    covered = sum(row[k] for k in top if row.get(k, -1.0) > 0)
     row["unattributed"] = row["S2"] - covered
     for name in ("noise_shaper_learn.xml", "learned_state.xml"):
         row[name] = sizes[name][0]
