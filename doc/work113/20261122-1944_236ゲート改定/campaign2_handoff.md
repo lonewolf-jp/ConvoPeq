@@ -15,6 +15,7 @@
 | ハーネス | このフォルダの `campaign.py`（`campaign2.py` が読み込む） |
 | フィクスチャ | `C:\Users\user\AppData\Local\Temp\opencode\m24run\fixtures` |
 
+- 実行ファイルとフィクスチャが消えていた場合（一時フォルダの整理など）は、別のバイナリで測り直さない。比較可能性が崩れるためである。Dropbox の `/ConvoPeq-236-s2-20261122/bin/exe_post.exe` と `/fixtures/` に同じものを置いてあるので、それを元のパスへ戻してから測る。再ビルドする場合は `instrument.py apply` と MSVC Release の手順で作り、どちらを使ったかを報告書に書く。
 - デバイス種別（WASAPI など）へ切り替えない。ゲートを通すための条件変更はしない。
 - `%APPDATA%\ConvoPeq` は `profile_guard.py` が退避・復元する。手で触らない。
 - 測定中は他の負荷（ビルド、別のアプリの音声処理）を走らせない。
