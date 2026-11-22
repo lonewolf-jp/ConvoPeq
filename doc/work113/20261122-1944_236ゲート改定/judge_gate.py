@@ -9,6 +9,11 @@ difference between the two campaign medians <= 10%. S4 stays at 300 ms and
 Exit codes: 0 all conditions pass, 1 a measured condition fails, 2 a condition
 is undecided (drift makes the S2 increment unusable), 3 the input data is not
 usable (missing marks, non-finite or negative timings, wrong row count).
+
+The S2 increment uses the C-24 drift rule with both estimators the plan names:
+the first-half/second-half median difference and a regression of the value on
+its measured position. The larger magnitude is compared with 20% of the
+increment.
 """
 import csv
 import math
@@ -74,8 +79,28 @@ def iqr_over_med(v):
     return (st.median(s[(n + 1) // 2:]) - st.median(s[:n // 2])) / st.median(s)
 
 
-def drift(v):
+def half_drift(v):
+    """Drift estimator 1 (C-24): median of the second half minus the first half."""
     return med(v[10:]) - med(v[:10])
+
+
+def regression_drift(v):
+    """Drift estimator 2 (C-24): the slope of the value against its measured
+    position, expressed over the whole measured span."""
+    n = len(v)
+    xs = list(range(n))
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(v) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, v))
+    slope = sxy / sxx if sxx else 0.0
+    return slope * (n - 1)
+
+
+def drift(v):
+    """C-24 evaluates drift with both estimators; the larger magnitude is used,
+    so a slow trend that hides inside one half cannot pass unnoticed."""
+    return max(abs(half_drift(v)), abs(regression_drift(v)))
 
 
 def report(name, data):
@@ -111,12 +136,16 @@ def main():
          "%.1f ms" % (med(b["E2"]["S4"]) - med(b["E0"]["S4"]))),
     ]
 
-    # the S2 increment keeps the C-24 drift rule
+    # the S2 increment keeps the C-24 drift rule: both estimators, larger wins
     inc = med(b["E2"]["S2"]) - med(b["E0"]["S2"])
-    dr = max(abs(drift(b["E2"]["S2"])), abs(drift(b["E0"]["S2"])))
+    dr = max(drift(b["E2"]["S2"]), drift(b["E0"]["S2"]))
+    print("  S2 drift (campaign 2): E2 half=%.1f reg=%.1f | E0 half=%.1f reg=%.1f"
+          % (half_drift(b["E2"]["S2"]), regression_drift(b["E2"]["S2"]),
+             half_drift(b["E0"]["S2"]), regression_drift(b["E0"]["S2"])))
     if dr > 0.2 * abs(inc):
         checks.append(("S2 E2-E0 verdict", None,
-                       "%.1f ms, undecidable (drift %.1f ms)" % (inc, dr)))
+                       "%.1f ms, undecidable (drift %.1f ms > 20%% of %.1f ms)"
+                       % (inc, dr, abs(inc))))
     else:
         checks.append(("S2 E2-E0 <= 300", inc <= 300.0, "%.1f ms" % inc))
 
