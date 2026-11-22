@@ -788,3 +788,35 @@ OpenCode V2 + OpenChamber 環境での実測。バックエンドは `opencode.e
   `a2ProbeNewScalar` / `a2ProbeNewArray`。製品コードの `operator new` 置換は不要。
 - `TailLayerPerfTests` は `wall/cpu > 1.25` を「外乱」として失敗させる。ビルドや他の負荷と
   同時に走らせず、単独で実行する。
+
+## ツール更新 2026-11-22（graphify 0.9.115・icx Release ビルドの実測）
+
+### graphify 0.9.111 → 0.9.115
+
+- 更新は `uv tool install "graphifyy[mcp]==0.9.115" --force`。**先に graphify の MCP 子プロセスを止める**
+  （`CommandLine` に graphify を含む pythonw / graphify-mcp を停止。残すと `os error 32` で失敗する）。
+- `[mcp]` extra が必須。ツール環境の Python は 3.14.7（要求は 3.11.5 以上 3.15 未満）。
+- 更新後はスキルを同期する。`graphify install --platform <p>` を、opencode、claude、codex、copilot の 4 つについて 1 回ずつ実行する（1 行にまとめると `|` がパイプになる）。
+  同期しないと `graphify --version` が 4 件の警告を出す。opencode 向けは `~/.config/opencode/plugins/graphify.js` も書き換える。
+- **0.9.115 のセキュリティ修正**: UNC パスを含む `.sh` の `source` 行や `.git` の `gitdir:` / `commondir` を索引すると、
+  Windows で外向き SMB 認証が発生し NetNTLMv2 が漏れ得た（GHSA-g6c9-j4vm-mwq4）。0.9.115 は探索をスキャンルートに限定し UNC を拒否する。
+- **AST キャッシュのスキーマが 50 → 51**。`graphify update .` は「前回から変わったファイル」だけを再抽出する（全件再抽出ではない）。
+- C++ 側の改善: `std::` 修飾型を同名プロジェクトシンボルへ誤配線しない、到達不能な前方宣言が宣言/定義の折り畳みを妨げない、
+  別ドライブの AST キャッシュで include 同一性が空になる問題の修正、完全一致ノード ID の優先解決。
+- 実測（ConvoPeq）: MCP 11 ツール、`graph_stats` = 71,126 ノード / 90,063 エッジ、`Built at commit 4d476d5c (matches HEAD)`。
+  `graphify update .` は約 5 分、`graph.json` は 70.6 MB。ラベルは 2,189 件保存済みに対しコミュニティ 3,449 件で、
+  343 件がハブ名へ改名された（`graphify label` は LLM バックエンドが必要。今回は未実行）。
+- 更新で MCP を止めたセッションでは graphify ツールが消える。opencode サーバの再起動で戻る。
+  再起動前でも `mcp-probe.py` に設定と同じコマンド（`pythonw nowin.py graphify-mcp.exe --transport stdio --graph <abs>`）を渡せば検証できる。
+
+### icx Release ビルド（`build.bat Release clean icx app nopause`）
+
+- **PATH から Octave の mingw64 を外す**。残すと CMake が `ld.exe` / `ar.exe` を検出して構成に失敗する。
+- `build.bat` の icx モードは oneAPI の `setvars.bat` を呼び、`MKLROOT` / `IPPROOT` / `LIB` を自分で設定する。`vcvarsall.bat` は呼ばない。
+- **clean が要る条件**: `build-identity` ゲートが `compiler_path` の表記差（刻印はフルパス、現在は `-DCMAKE_CXX_COMPILER=icx`）を
+  不一致として停止する。ゲートの指示どおり `clean` で作り直す。コンパイラが同じでも表記が違うだけで止まる。
+- 標準入力をリダイレクトした状態では 2 つの表示ノイズが出る。`timeout /t 2` の
+  `ERROR: Input redirection is not supported` と、UTF-8 の日本語 REM 行が分割される `'M' is not recognized`。
+  どちらも終了コード 0 で生成物に影響しない。
+- 実測: 141 ステップ、8.4 分、`ConvoPeq.exe` 48,817,152 B、icx の警告 156 行、エラー 0。
+  `--cli-run --cli-exit-ms 1500` は終了コード 0、192 kHz で処理時間 平均 521〜535 µs・最大 900 µs。
