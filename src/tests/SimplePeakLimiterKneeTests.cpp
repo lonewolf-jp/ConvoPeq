@@ -253,8 +253,28 @@ namespace
             std::printf ("FAIL huge knee: gain=%.17g expected=%.17g\n", hard, kT / 1.4);
             ok = false;
         }
+        // Widths above kMaxKneeDb (6 dB) also fall back; 6 dB itself keeps the
+        // T ceiling (the construction starts to overshoot at about 6.12 dB).
+        const double justAbove = appliedGain (1.2, 6.5);
+        if (!near (justAbove, kT / 1.2))
+        {
+            std::printf ("FAIL 6.5 dB knee should be hard: gain=%.17g expected=%.17g\n",
+                         justAbove, kT / 1.2);
+            ok = false;
+        }
+        for (int i = 0; i <= 500; ++i)
+        {
+            const double p = 0.5 + 3.5 * static_cast<double> (i) / 500.0;
+            const double out = p * appliedGain (p, 6.0);
+            if (out > kT + 1.0e-12)
+            {
+                std::printf ("FAIL 6 dB knee ceiling: p=%.17g out=%.17g\n", p, out);
+                ok = false;
+                break;
+            }
+        }
         if (ok)
-            std::printf ("[PASS] extreme inputs and huge knee stay finite\n");
+            std::printf ("[PASS] extreme inputs and knee widths above 6 dB stay finite and bounded\n");
         return ok;
     }
     bool checkOutputCeiling()

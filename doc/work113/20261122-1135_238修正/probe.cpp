@@ -1,5 +1,11 @@
 // Knee curve probe for #238. Compiled twice: before (old header, kneeLinear)
 // and after (new header, kneeDb). Not part of the product.
+//
+// The sampled peaks are the SAME in both builds (they are derived from a
+// fixed 1 dB reference knee), so the two tables compare the same inputs. The
+// point names are dB positions, not either implementation's knee bounds: the
+// old knee spans threshold-0.054374 .. threshold, the new one is centred on
+// the threshold. Each build prints its own bounds.
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +16,7 @@
 namespace
 {
     constexpr double T = 0.8413951287507587;
+    constexpr double kRefKneeDb = 1.0;
 
     double gainAt (double peak, double kneeParam)
     {
@@ -34,32 +41,37 @@ int main (int argc, char** argv)
 #if defined(OLD_API)
     const double knee = 0.108748;
     const char* api = "old-linear";
+    const double boundA = T - knee * 0.5;
+    const double boundB = T;
 #else
     const double knee = 1.0;
     const char* api = "new-db";
+    const double boundA = T * std::pow (10.0, -knee / 40.0);
+    const double boundB = T * std::pow (10.0, knee / 40.0);
 #endif
 
     std::FILE* f = std::fopen (path, "w");
     if (f == nullptr) { std::perror ("fopen"); return 2; }
 
-    const double a = T * std::pow (10.0, -knee / 40.0);
-    const double b = T * std::pow (10.0, knee / 40.0);
+    const double refA = T * std::pow (10.0, -kRefKneeDb / 40.0);
+    const double refB = T * std::pow (10.0, kRefKneeDb / 40.0);
+    const double refW = refB - refA;
 
     if (std::strcmp (mode, "table") == 0)
     {
         std::fprintf (f, "point,peak,gain,output\n");
         struct Point { const char* name; double p; };
         const Point points[] = {
-            { "knee_start_minus_eps", a * (1.0 - 1.0e-4) },
-            { "knee_start",           a },
-            { "knee_25",              a + 0.25 * (b - a) },
-            { "knee_50",              a + 0.50 * (b - a) },
-            { "knee_75",              a + 0.75 * (b - a) },
-            { "knee_end",             b },
-            { "knee_end_plus_eps",    b * (1.0 + 1.0e-4) },
-            { "threshold",            T },
-            { "strong_1_4",           1.4 },
-            { "strong_2_0",           2.0 },
+            { "m2.00_eps",  refA * (1.0 - 1.0e-4) },
+            { "m2.00",      refA },
+            { "m1.75",      refA + 0.25 * refW },
+            { "m1.50",      refA + 0.50 * refW },
+            { "m1.25",      refA + 0.75 * refW },
+            { "m1.00",      refB },
+            { "m1.00_eps",  refB * (1.0 + 1.0e-4) },
+            { "threshold",  T },
+            { "p2.90",      1.4 },
+            { "p6.02",      2.0 },
         };
         for (const auto& pt : points)
         {
@@ -81,6 +93,7 @@ int main (int argc, char** argv)
     }
 
     std::fclose (f);
-    std::printf ("%s: wrote %s (knee=%g, a=%.9f, b=%.9f)\n", api, path, knee, a, b);
+    std::printf ("%s: wrote %s (param=%g, own knee %.9f .. %.9f)\n",
+                 api, path, knee, boundA, boundB);
     return 0;
 }

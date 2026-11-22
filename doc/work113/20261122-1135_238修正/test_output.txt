@@ -7,5 +7,5 @@
 [PASS] stereo uses the louder channel and scales both (0.88567908289553554)
 [PASS] right=nullptr uses the left peak
 [PASS] invalid threshold passes through without NaN
-[PASS] extreme inputs and huge knee stay finite
+[PASS] extreme inputs and knee widths above 6 dB stay finite and bounded
 SimplePeakLimiterKneeTests: PASS

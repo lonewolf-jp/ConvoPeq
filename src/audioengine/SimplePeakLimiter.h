@@ -56,6 +56,12 @@ public:
         const double knee = (kneeDb > 0.0 && std::isfinite(kneeDb)) ? kneeDb : 0.0;
         bool softKnee = limitEnabled && knee > 0.0;
 
+        // この補間で出力上限 T を保てるのは 6 dB まで（境界は約 6.12 dB）。
+        // それを超える幅は意味を持たないためハードニーへ落とす。
+        constexpr double kMaxKneeDb = 6.0;
+        if (knee > kMaxKneeDb)
+            softKnee = false;
+
         // ニー境界と終端点のゲイン・傾き。指数は 1 ブロックに 2 回だけ評価する。
         // 終端点は threshold * 10^(knee/40)（= -1.0 dBFS at the call sites）。
         double kneeStart = thresholdLinear;
