@@ -228,7 +228,7 @@ git -C C:\VSC_Project\rehearsal status --porcelain -uall
 
 | 種別 | 場所 | サイズ |
 | --- | --- | --- |
-| 再保全一式 | `%TEMP%\opencode\refl20261124\` | manifest 51,396 B / patch 759,420 B / zip 20,931,229 B |
+| 再保全一式 | `%TEMP%\opencode\refl20261124\` | manifest 51,396 B / patch 759,420 B / 未追跡 zip 20,931,229 B / 追跡 43 ファイル zip 2,100,508 B |
 | Dropbox | `/ConvoPeq-reflection-plan-20261124/` | 同上 |
 | 対応表（機械可読） | `doc/work113/20261124-0030_反映計画/mapping.tsv` | 61 行（見出し 1 + 追跡 43 + 未追跡 16 + doc 1） |
 

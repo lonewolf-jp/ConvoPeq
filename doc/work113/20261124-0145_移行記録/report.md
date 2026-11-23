@@ -50,3 +50,17 @@
 - `doc/work113/20261124-0220_265修正/report.md`
 - `doc/work113/20261124-0240_266修正/report.md`
 - `doc/work113/20261124-0200_B11一覧/report.md`
+
+## 6. 復元訓練（2026-11-24）
+
+保全アーティファクトから保護ツリーの状態を戻せることを、使い捨てのクローンで確かめた。
+
+1. `git clone --shared -n` で複製し、`4d476d5c` をチェックアウトする。
+2. `tracked_changes.patch` を `git apply` する（43 ファイルすべてクリーンに適用）。
+3. `untracked_files.zip` を展開する（355 ファイル）。
+4. 結果は **398 エントリ・シグネチャ `8f226d032b644f25`** で、保護ツリーと一致した。
+5. ファイル単位では 394 件が完全一致し、4 件（`ConvoPeq.md`、`MainWindow.cpp`、`LoadPipeline.cpp`、`StateAndUI.cpp`）だけ改行が CRLF → LF に正規化されていた。`.gitattributes` の `text` 正規化によるもので、内容は同一である。
+
+改行まで含めて戻せるように、追跡 43 ファイルの作業ツリー版を `tracked_modified_files.zip` として追加した。これを展開すると **398 ファイルすべての SHA-256 が manifest と一致**する（確認済み）。
+
+限界として、`git apply` だけでは追跡ファイルの改行バイトが揃わないため、厳密な復元には `tracked_modified_files.zip` を併用する。
