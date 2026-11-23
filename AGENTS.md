@@ -251,7 +251,7 @@ and an effect or setup function. (cause: SchemaError(Missing key at ["default"])
 - **必須**: `export default { id, setup(ctx) {...} }`（または `{ id, effect }`）。
 - **不可**: opencode.ai 公式ドキュメントにある名前付きエクスポート形式 `export const X: Plugin = async (ctx) => ({...})`。これは 100% 失敗する。
 - したがって **`.opencode/plugins/rtk-wsl/index.ts` の `export default { id: "rtk-wsl", async setup(ctx) {...} }` は正しい契約**であり、V1 の遺物ではない（2026-09-26 訂正）。
-- **Vendor 製 context-mode プラグイン（v1.0.169）もこのビルドではロードできない**（同じエラー）。`context-mode upgrade` が `"plugin": ["context-mode"]` を書いても無意味なので削除済み。したがって **context-mode の自動ルーティング（Read/Shell の誘導）は本環境では機能しない** — `ctx_*` ツールは MCP サーバーとして手動で使うこと。
+- **Vendor 製 context-mode プラグインは 1.0.169 ではロードできなかったが、2.x は本ビルドで動く**（2026-11-23 実測、2.2.2）。サーバログに `loading plugin id=context-mode@2.2.2` が出て、`ctx_doctor` の D5（hooks run inside the host process）と D6（in-process plugin）が PASS する。`ctx_*` ツールはこの in-process プラグインが提供し、同名の MCP サーバ（グローバル設定の `mcp.context-mode`）も同時に接続している。版数は 3 か所（npm グローバル / `~/.config/opencode/node_modules` / `~/.config/opencode/opencode.json` の `plugins` 固定値）にあり、**実際に読まれるのは 3 番目**なので、更新時はここを上げる（末尾「ツール更新 2026-11-23」）。
 - **rtk プラグインは導入しない**。自動 rewrite にはシェルコマンドごとに子プロセス（`wsl bash -lc`）の起動が必要で、**これがコンソールを毎回点滅させる**（2026-09-26 に一旦実装して撤去）。rtk はコマンドに `rtk <cmd>` と明示的に prefix を付ける運用で足りる。
 
 ### MCP サーバー構成（15）
@@ -291,7 +291,7 @@ and an effect or setup function. (cause: SchemaError(Missing key at ["default"])
 - **cppcheck 2.22 に `--output-format=json` は無い**（`text`/`sarif`/`xml`/`xmlv2`/`xmlv3` のみ）。また `unknownMacro` ID も無い — JUCE の `#error` ノイズの正しい抑制は `preprocessorErrorDirective`。
 - **cppcheck は JUCE ヘッダを compile database 無しで解析できない**（MSVC マクロを `-D` で上書きできないため）。`--project=` 必須。
 - **Maxima に `--eval` は無い**（SBCL 層が消費して `Warning: argument eval not recognized`）。使えるのは `--quiet -batch "C:/forward/slash/path.mac"`（**バックスラッシュは消える**）または stdin パイプ（`;` 終端必須）。
-- **headroom CLI に `compress`/`retrieve` サブコマンドは無い**（v0.44.0 で 30 サブコマンドを実測。2026-11-11）。これらは MCP ツール限定。CLI は `savings` / `inspect` / `memory` を使う。
+- **headroom CLI に `compress`/`retrieve` サブコマンドは無い**（v0.45.0 で再確認。2026-11-23）。これらは MCP ツール限定。CLI は `savings` / `inspect` / `memory` を使う。
 - **pwsh → WSL のクォートが最大の実害**。`wsl bash -lc "... 2>&1 ..."` は pwsh が `2>&1` を `C:\dev\null` というファイル名に書き換える。`<<'EOS'` へリドクも pwsh のパーサが拒否。**スクリプトをファイルに書いて `wsl bash /mnt/c/.../s.sh` で実行する**。WSL 内では POSIX パス（`/mnt/c/...`）を使い `C:\...` は使わない。
 - **Get-ChildItem -Recurse を `.opencode/plugins/` にかけてはいけない**（node_modules が数万ファイル吐く）。`-Directory` か非 recursive の `-File` を使う。
 - **`bufsize=0` の Popen は FileIO を返す**ので `read1()` は無い。`os.read(fd, n)` を使う。
@@ -489,7 +489,7 @@ MCP server process exited with code 1: 'C:\Python314\pythonw.exe' は内部ま�
    （`C:\Users\user\AppData\Roaming\uv\tools\headroom-ai\Scripts\headroom.exe`）。
    **v0.43.0 以降は `mcp` extra が必須**（`uv tool install "headroom-ai[mcp]==<ver>" --force`。
    無ければ `headroom mcp serve` が `ImportError: MCP SDK not installed` で落ちる）。
-   `C:\Users\user\.local\bin\headroom.exe` は **uv tool の exe とバイト同一**（SHA-256 一致・47,104 B・`--version` = 0.44.0、2026-11-11 実測）。
+   `C:\Users\user\.local\bin\headroom.exe` は uv tool 側と同じもの（2026-11-11 に SHA-256 一致を確認）。現在の uv tool は 0.45.0 で、`--version` は 0.45.0 を返す（2026-11-23 実測）。
    以前の「破損したランチャー」記録は現在は誤り。ただし `C:\Python314` を参照する古い project `.venv` 内の exe は別物なので使わない。
 5. `box-mcp` の venv は **3.15 で作り直す**。cp315 ホイール保有版への更新が必要:
    `pywin32` 311→312 / `rpds-py` 0.28.0→2026.9.1 /
@@ -830,3 +830,23 @@ OpenCode V2 + OpenChamber 環境での実測。バックエンドは `opencode.e
 - 言語を増やすときは workflow の matrix を直す（default setup の自動追従は無くなった）。アクションは `github/codeql-action/*@v4` 固定で、メジャー更新は手で行う。
 - 戻し方: workflow を削除し、`PATCH /repos/{owner}/{repo}/code-scanning/default-setup` に `{"state":"configured"}` を送る。カテゴリ（`/language:<lang>`）を切替前と揃えてあるので、アラートの追跡は切れない。
 - 必須チェックは `Windows MSVC / Release` の 1 本のまま。CodeQL は必須にしていない（`CodeQL` という安定した名前があるので、必要になれば指定できる）。
+
+## ツール更新 2026-11-23（headroom 0.45.0 / context-mode 2.2.2 / graphify 0.9.115 確認）
+
+OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツールを最新版へ上げ、動作を実測した。詳細は `doc/work113/20261123-1657_ツール更新/report.md`。
+
+| ツール | 更新 | コマンド | 実測 |
+| --- | --- | --- | --- |
+| headroom-ai | 0.44.0 → **0.45.0** | `uv tool install "headroom-ai[mcp]==0.45.0" --force` | MCP 3 ツール。17,607 → 46 トークン（99.7%）に圧縮し、hash で 61,355 B を復元 |
+| context-mode | CLI 2.2.0 → **2.2.2** / プラグイン 2.2.1 → **2.2.2** | `npm install -g context-mode@2.2.2` ＋ `~/.config/opencode/opencode.json` の `plugins` を `context-mode@2.2.2` へ | `ctx_doctor` 全 11 項目 PASS、索引 4,090 ソース・103,655 チャンク |
+| graphify | 0.9.115（最新のまま） | `uv tool install "graphifyy[mcp]==0.9.115" --force`（今回は不要）＋ `graphify install --platform <名前>` を 4 つ（opencode / claude / codex / copilot） | MCP 11 ツール。71,126 ノード・90,063 エッジ・`matches HEAD` |
+
+### 更新で分かった運用上の注意
+
+- **context-mode の版数は 3 か所にある**。npm グローバル、`~/.config/opencode/node_modules`、`~/.config/opencode/opencode.json` の `plugins` 固定値である。**実際に読み込まれるのは 3 番目**で、ここを上げないと `ctx_doctor` の D1 が「更新あり」の WARN のまま残る（2.2.1 のまま動き続けた）。
+- **OpenCode 2.3.2 は `~/.config/opencode/opencode.json` を読む**。`plugins` の固定値を 2.2.2 に変えてプラグインファイルを触ると、その場で `loading plugin id=context-mode@2.2.2` に切り替わった（アプリ再起動は不要）。
+- **headroom の MCP は、exe ロックを外すためにプロセスを止めると自動では戻らない**。同じ手順で止めた context-mode は OpenCode が自動再生成したが、プロジェクト設定で動く headroom は再生成されず、プロジェクト設定の書き直しもグローバル設定の再読込も効かなかった。**OpenChamber（または opencode サーバ）の再起動で戻る**。
+- **headroom 0.45.0 の MCP stdio 経路に変更は無い**。0.45.0 の `mcp` 修正は Streamable HTTP の Host / Origin 検査で、stdio は対象外である。破壊的変更の記載も無い。
+- **context-mode の MCP エントリには `enabled: true` が残っている**。2.0.16 ではこのキーでエントリが破棄されたが、2.3.2 では `mcp connected server=context-mode tools=9` が記録されており接続している。互換のため触っていない。
+- **`context-mode doctor` は他エージェントの行で FAIL する**（claude-code は 1.x の古いエントリ、codex / gemini / qwen / vscode は未設定）。opencode の行は PASS なので、終了コード 1 は本環境の不具合ではない。
+- **Graphify Cloud の無料プランは 1 リポジトリ 25,000 ノードまで**（CLI ソースの `_CLOUD_CTA_LARGE_GRAPH_NODES = 25_000` と一致）。本リポジトリは 71,126 ノードで無料枠に収まらない。Cloud は `https://app.graphify.com` のホスト型で MCP 接続、CLI の `--backend` には無い。このリポジトリでは既に Graphify Labs の GitHub App が PR チェック（`Graphify` / `Graphify Formal Verification`）を出しており、Cloud 側の機能はそこで使えている。ホスト型グラフ MCP を足すにはアカウント作成が必要。
