@@ -1008,3 +1008,11 @@ OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツー�
 - **0.9.111 は Python 3.11 以上が必須**（`requires_python <3.15`）。uv tool venv は 3.14.7 で、`mcp 2.3.0` はツール venv 内に隔離されるため、共有 site の `mcp<2` 制約とは競合しない。
 - **C++ に関係する修正**: 0.9.107 で折り畳みメンバ宣言の `definition_file` を root 相対に統一、0.9.109 で `Foo` と `~Foo`・`name_` の twin id を分離、0.9.110 で入れ子型を owner 修飾 id にし（`Left.Builder` と `Right.Builder` の衝突解消）、`Outer::Inner::m()` の修飾呼び出しを解決する。
 - **0.9.108 の serve 改善**: グラフ再読込が全 MCP 要求を止めない（新しいグラフを横で作って原子的に差し替える）。
+
+## 作業ベース（2026-11-24 決定）
+
+- 日常の作業は `C:\VSC_Project\integ\ConvoPeq`（main）で行う。ビルド・テスト・コミットもこのツリー。
+- `C:\VSC_Project\ConvoPeq` は凍結した保護ツリー（HEAD `4d476d5c`・未コミット 398 エントリ）。読み取り専用で参照し、反映・reset・checkout をしない。
+- 保護ツリーの WIP の復元は、保全ブランチ `wip/preserve-20261123`（`adfb16f6` で凍結）、`%TEMP%\opencode\refl20261124\` の `tracked_changes.patch` / `untracked_files.zip`、Dropbox `/ConvoPeq-reflection-plan-20261124/` から行う。
+- 保護ツリーにだけある設定: `opencode.json` の graphify `protocol` 行。環境依存のため main には入れない。
+- 経緯: `doc/work113/20261124-0030_反映計画/report.md`、`doc/work113/20261124-0145_移行記録/report.md`
