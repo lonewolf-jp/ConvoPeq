@@ -89,11 +89,13 @@
 3. **context-mode の MCP エントリに `enabled: true` がある。** 以前のビルド（2.0.16）ではこのキーでエントリ全体が破棄されたが、現行 2.3.2 では `mcp connected server=context-mode tools=9` が記録されており、接続している。互換のため触っていない。将来 MCP が繋がらない症状が出たら、まずこのキーを疑う。
 4. **`context-mode doctor` は他のエージェントの行で FAIL する**（claude-code は 1.x の古いエントリ、codex / gemini / qwen / vscode は未設定）。これは本環境（OpenChamber）の不具合ではなく、単に他ツールへ未展開なだけである。opencode の行は PASS なので、終了コード 1 は無視してよい。
 5. Graphify Cloud の無料枠は本リポジトリの規模を超える（§6）。
+6. **作業中に `graphify.js` を 0 バイトにしてしまい、GUI のプラグイン一覧にエラーが出た。** プラグインの再読込を促すために「同じ内容で書き戻す」処理を書いたが、`open(p, "wb").write(open(p, "rb").read())` は書き込み用に開いた時点で切り詰めるため、中身が空になった。サーバログには `PluginModule.LoadError: Plugin must export a default definition with an id and an effect or setup function. (cause: SchemaError(Missing key at ["default"]))` が残っていた。`graphify install --platform opencode` で 3,085 バイトのプラグインを再生成し、`/api/plugin` が `graphify-86620b3e` を `active` と返すこと、再読込後のログにエラーが無いことを確認した。**mtime だけ変えたいときは `os.utime` を使う。**
 
 ## 8. 未実施・制約
 
 - headroom MCP の**セッション内再接続**は、サーバを止めて起動し直す手順で復帰を確認した（§7.1）。アプリの再起動だけでは戻らない点に注意する。
 - context-mode の他エージェント（Claude Code / Codex / Gemini / Qwen / VS Code）への展開は未実施。
+- プラグインの再読込は `os.utime` で行う。開いて書き戻すと 0 バイトになり、GUI のプラグイン一覧にロードエラーが出る（§7 の 6）。
 - Graphify Cloud のホスト型 MCP はアカウント作成が必要なため未接続。無料枠の 25,000 ノード上限も未検証（数値は CLI のソースとドキュメント記載）。
 - 0.9.115 の AST スキーマ更新に伴う再抽出は、グラフが既に 0.9.115 で作られていたため発生していない。
 
