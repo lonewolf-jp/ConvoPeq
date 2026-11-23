@@ -41,7 +41,8 @@ permissions:
 
 - `AudioEngineHarness` ターゲット: 129 ステップ、エラー 0。
 - 実走: `AudioEngineHarness.exe --buzz-probe=delta` が終了コード 0。タップダンプは従来と同じ書式で出力された（`firstTaps:` 16 個 + `nearPeak:` 11 個）。
-- CodeQL のアラートが閉じることは、マージ後の CodeQL 実行で確認する（ローカルでは再現できない）。
+- CodeQL（`6722b4e3` の解析）: success。オープンなアラートは **35 → 32**、残りは `JUCE/**` の 32 件だけになった（#54 / #55 / #52 はクローズ）。
+- マージコミット `807ddf27` の Sanitizer CI（RelWithDebInfo ASan）: success。
 
 ## 4. 参考
 
