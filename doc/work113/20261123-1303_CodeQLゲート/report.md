@@ -108,7 +108,16 @@ workflow 全体は 19 秒で完了した（06:24:17 → 06:24:36 UTC）。切替
 
 ### 5.4 main への push
 
-`8421fda1`（workflow のマージ）の push では、コード変更として 4 言語の解析が走ることを確認した。TBD_MAINPUSH
+`8421fda1`（workflow のマージ）の push は、コード変更として 4 言語の解析が走った。c-cpp は 76 分（06:23:34 → 07:39:28）で、結果は切替前と同じだった。
+
+| カテゴリ | `8421fda1`（切替後） | `48c452de`（切替前） |
+| --- | ---: | ---: |
+| `/language:c-cpp` | 40 | 40 |
+| `/language:actions` | 1 | 1 |
+| `/language:csharp` | 0 | 0 |
+| `/language:javascript-typescript` | 0 | 0 |
+
+続いて、本報告を main へマージした `b3fbb1e1`（Markdown のみ）の push では、`Detect changed files` が success、`Analyze` が skipped、`CodeQL gate` が success となり、解析は走らなかった。この実行は前のコード解析が終わるまでキューで待ち、実行時間そのものは約 20 秒だった。`concurrency` は ref 単位で、`cancel-in-progress` は PR だけにしている。main の push をキャンセルすると、コード変更の解析結果が欠けるためである。
 
 ## 6. 制約
 
