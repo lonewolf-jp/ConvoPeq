@@ -91,7 +91,7 @@ upstream に同等のテストがある場合は重複を避けた。たとえ�
 
 ### 4.2 テスト
 
-- **Release `ctest`: 68/68 合格（170.82 秒）。**（修正前の初回は 194.04 秒）
+- **Release `ctest`: 68/68 合格（175.74 秒）。**（修正前の初回は 194.04 秒）
 - 新規・変更分の個別結果:
   - `CacheManagerHeaderValidationTests` 27/27
   - `InputInspectionTests` 13/13（X-1〜X-7、R-1〜R-4）
@@ -103,14 +103,15 @@ upstream に同等のテストがある場合は重複を避けた。たとえ�
 
 Debug の既知失敗 2 件のうち、`D8_2_B_2_Tests`（スタック不足）と `TailLayerIntegrityTests`（CPU 予算）は**どちらも今回は合格した**。前者は 0.49 秒、後者は 14.55 秒。upstream が CPU 判定を `TailLayerPerfTests` へ移したことと、実行環境のスタック設定による。
 
-### 4.3 CI ゲートで見つかった 2 件
+### 4.3 CI ゲートで見つかった 3 件
 
-ローカルの `ctest` が通っても、リポジトリの静的ゲートは別に見ている。PR の初回 CI で 2 件落ち、どちらも統合側の問題だった。
+ローカルの `ctest` が通っても、リポジトリの静的ゲートは別に見ている。PR の CI で 3 件落ち、いずれも統合側の問題だった。
 
 1. **`lint-audioengine`（LINT-AE-011）**: `AudioEngine.Reader.cpp` の `thread_local` 2 本が違反。規則は `src/**` の `thread_local` を無条件に禁じており、除外注記も無い。計測専用の追加なので、当該ファイルを upstream のままに戻した（§2.2）。
 2. **`isr-verify`（`isr-verify-c1-c15-minimal.ps1` の C13）**: `src/convolver` 配下で旧型名 `PreparedIRState` を書いてはならない。WIP の B-01 が入れた `std::unique_ptr<PreparedIRState> cachedLow;` が該当した。型名を書かずに同じ意味になる `decltype(cacheManager->loadPreparedState(...))` に変え、例外処理（`bad_alloc` をキャッシュミスとして扱う）はそのまま残した。
+3. **`RelWithDebInfo ASan`**: `TailLayerIntegrityTests` の RES-M（ヒープ増分 ≤ 32 MB）が 39.84 MB で落ちた。WIP がこのテストを ASan 対象に加えており（main の CMakeLists にはその指定が無い）、ASan の隔離（quarantine）がヒープ増分を膨らませる。CMake から `CONVOPEQ_ASAN_BUILD=1` を渡し、ASan 構成のときだけ RES-M を skip する（値は表示する）。メモリ安全性の検査自体は ASan が担うので、対象からは外していない。ローカルの ASan 構成で終了コード 0、Release では RES-M を従来どおり判定することを確認した。
 
-修正後、両スクリプトをローカルで実行して合格を確認している（`AudioEngine lint passed`、c1-c15 は 15/15）。
+修正後、3 つのゲートをローカルで実行して合格を確認している（`AudioEngine lint passed`、c1-c15 は 15/15、ASan 構成の `TailLayerIntegrityTests` は 0 終了）。
 
 ## 5. ConvoPeq.md の再生成
 

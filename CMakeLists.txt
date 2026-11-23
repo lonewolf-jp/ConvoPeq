@@ -2522,6 +2522,9 @@ if(ENABLE_ASAN)
                 target_compile_options(${_asanTarget} PRIVATE
                     $<$<CONFIG:Debug>:/RTC1-> /fsanitize=address)
                 target_link_options(${_asanTarget} PRIVATE /fsanitize=address)
+                # テスト側が「ASan 構成である」ことを判定できるようにする。
+                #   ASan は割当を隔離するため、ヒープ増分を予算として読めない。
+                target_compile_definitions(${_asanTarget} PRIVATE CONVOPEQ_ASAN_BUILD=1)
                 set_property(TARGET ${_asanTarget} PROPERTY MSVC_RUNTIME_LIBRARY
                     "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
             endif()
