@@ -96,15 +96,22 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # 1) 解析: default setup と同じ 4 言語を同じクエリ suite で回す
-  #    コンパイル言語は autobuild（default setup と同じ挙動）
+  # 1) 解析: default setup と同じ 4 言語・同じクエリ suite・同じ build mode
+  #
+  #    build-mode は none（buildless）にする。default setup も none で走っており
+  #    （実行ログに "C/C++ was extracted with build-mode set to 'none'" と残る）、
+  #    autobuild はこの環境では成立しない。c-cpp の autobuild は MKL のヘッダ
+  #    （mkl.h）と MSVC のフラグを要求して失敗し、csharp はビルド可能な
+  #    .NET プロジェクトが無いため "Could not auto-detect a suitable build
+  #    method" で失敗する。buildless は作業ツリー全体を走査するため、既定の
+  #    setup と同じ検出結果になる。
   # ---------------------------------------------------------------------------
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       security-events: write
       packages: read
@@ -113,15 +120,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: actions
-            build-mode: none
-          - language: c-cpp
-            build-mode: autobuild
-          - language: csharp
-            build-mode: autobuild
-          - language: javascript-typescript
-            build-mode: none
+        language: [actions, c-cpp, csharp, javascript-typescript]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -130,7 +129,7 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
+          build-mode: none
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
