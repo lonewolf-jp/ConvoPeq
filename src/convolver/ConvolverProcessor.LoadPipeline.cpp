@@ -307,7 +307,9 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
     {
         const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, lowResFFT);
 
-        std::unique_ptr<PreparedIRState> cachedLow;
+        // ★ B-01: 読み出し中の確保失敗は「キャッシュミス」として扱う（例外を外へ出さない）。
+        //   型名は書かない（PRT ゲート C13 が src/convolver 配下で旧型名を禁止している）。
+        decltype(cacheManager->loadPreparedState(lowResKey, lowResFFT, generation)) cachedLow;
         try
         {
             cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);

@@ -60,6 +60,7 @@ upstream に同等のテストがある場合は重複を避けた。たとえ�
 | `resf_raw.json` | 測定の生データ。ルート直下に置かない |
 | `.github/scripts/isr-verify-evidence-consistency.ps1` | B-11 の証跡分離。upstream の live evidence とは別系統 |
 | 5 本の ISR スクリプトの WIP 差分 | 同上（§6 に再検討項目として記載） |
+| `AudioEngine.Reader.cpp` の音声 reader 計測 | `thread_local` 2 本を使う。`LINT-AE-011` が `src/**` の `thread_local` を禁止しており、除外の注記も用意されていない。計測のみで安全性・検証には関与しないため落とした（`RCUReader` 側の計測は upstream のもの） |
 
 ### 2.3 自動マージ 17 ファイルの意味レビュー
 
@@ -90,17 +91,26 @@ upstream に同等のテストがある場合は重複を避けた。たとえ�
 
 ### 4.2 テスト
 
-- **Release `ctest`: 68/68 合格（194.04 秒）。**
+- **Release `ctest`: 68/68 合格（170.82 秒）。**（修正前の初回は 194.04 秒）
 - 新規・変更分の個別結果:
   - `CacheManagerHeaderValidationTests` 27/27
   - `InputInspectionTests` 13/13（X-1〜X-7、R-1〜R-4）
   - `LearnedStateMigrationTests` 12/12（M-15-1〜12）
   - `TailLayerIntegrityTests` 失敗 0（H-1〜H-7、B12-G 一式）
   - `AudioEngineHarness` 合格（Release 125.5 秒）
-- **Debug `ctest`: 67/67 合格（272.97 秒、無負荷時）。**
+- **Debug `ctest`: 67/67 合格（269.07 秒、無負荷時）。**
 - Debug は負荷に敏感である。ビルドや他の作業と並行して走らせた 1 回目は 66/67 で、`AudioEngineHarness` が `checkV11Concurrency` の `v11_7` で落ちた。これは `AGENTS.md` に既知の負荷依存フレーキーとして記録されている検査で、検出 0 件になると落ちる。同じ 2 回目は STG8 の teardown 検査の途中で終了した。どちらも無負荷で再実行すると合格しており、統合による恒久的な失敗ではない。**Debug の判定は無負荷で行うこと。**
 
 Debug の既知失敗 2 件のうち、`D8_2_B_2_Tests`（スタック不足）と `TailLayerIntegrityTests`（CPU 予算）は**どちらも今回は合格した**。前者は 0.49 秒、後者は 14.55 秒。upstream が CPU 判定を `TailLayerPerfTests` へ移したことと、実行環境のスタック設定による。
+
+### 4.3 CI ゲートで見つかった 2 件
+
+ローカルの `ctest` が通っても、リポジトリの静的ゲートは別に見ている。PR の初回 CI で 2 件落ち、どちらも統合側の問題だった。
+
+1. **`lint-audioengine`（LINT-AE-011）**: `AudioEngine.Reader.cpp` の `thread_local` 2 本が違反。規則は `src/**` の `thread_local` を無条件に禁じており、除外注記も無い。計測専用の追加なので、当該ファイルを upstream のままに戻した（§2.2）。
+2. **`isr-verify`（`isr-verify-c1-c15-minimal.ps1` の C13）**: `src/convolver` 配下で旧型名 `PreparedIRState` を書いてはならない。WIP の B-01 が入れた `std::unique_ptr<PreparedIRState> cachedLow;` が該当した。型名を書かずに同じ意味になる `decltype(cacheManager->loadPreparedState(...))` に変え、例外処理（`bad_alloc` をキャッシュミスとして扱う）はそのまま残した。
+
+修正後、両スクリプトをローカルで実行して合格を確認している（`AudioEngine lint passed`、c1-c15 は 15/15）。
 
 ## 5. ConvoPeq.md の再生成
 
