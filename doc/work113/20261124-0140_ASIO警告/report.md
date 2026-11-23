@@ -45,7 +45,25 @@ A-3 と A-4 は、実在しないディレクトリと「ファイルを親に�
 - `AsioBlacklistSetupTests`: 24/24 PASS（`[SUMMARY] failures=0`）。
 - `ctest -C Release`: 69/69 PASS（189.73 秒）。新規テストは 0.06 秒。
 
-## 5. 未実施
+## 5. 実 GUI / CLI での確認（2026-11-24 追記）
 
-- 実際の GUI でダイアログを目視していない。GUI を起動して両方の場所を書込不能にする必要があり、この環境では自動化できない。判断関数（A-5、A-6）とコード経路の確認までを検証範囲とした。
-- CI（Release / ASan / CodeQL）の結果はマージ前の PR で確認する。
+マージ後に、実際のバイナリで条件を確かめた。2 か所のブラックリストパスを「同名のディレクトリ」に置き換えて作成失敗を再現している（元のファイルは退避し、確認後に復元した）。
+
+| 起動 | 結果 |
+| --- | --- |
+| GUI（引数なし） | タイトル `ASIO blacklist` のウィンドウが表示された |
+| CLI（`--cli-run --cli-exit-ms 2000`） | ダイアログは 0 件。終了コード 0 |
+
+どちらの起動でもログは同じ 3 行だった。
+
+```
+[ASIO] blacklist file could not be created: ...\asio_blacklist.txt
+[MainWindow] ASIO blacklist unavailable in both locations
+[MainWindow] ASIO blacklist could not be created or read: ...\asio_blacklist.txt
+```
+
+復元後、実行ファイル隣接の `asio_blacklist.txt` は既定内容に戻り、ユーザー領域にはファイルが無い状態（確認前と同じ）に戻した。
+
+## 6. CI
+
+PR #275 の CI は 19 項目中 17 項目 success、2 項目 skip（Release / RelWithDebInfo ASan / Debug TSan / CodeQL / lint / ISR 系）。マージ後の main でも `Windows MSVC Build` と静的ゲートは success。
