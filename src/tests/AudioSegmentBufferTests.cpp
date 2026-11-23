@@ -16,11 +16,13 @@
 //   3. 2 本目の確保で例外 → 1 本目が解放される（B-1 の本命）
 //   4. 反復しても PrivateUsage が増えない
 //   5. 検出器の感度確認（意図的な 1 本リークを検出できること）
+//   6. 学習器の確保境界（std::bad_alloc を nullptr に落とす。例外を外へ出さない）
 //
 // ビルド: カスタム main() + bool testXxx() パターン
 
 #include <JuceHeader.h>
 #include "AudioSegmentBuffer.h"
+#include "learner/SegmentBufferAllocation.h"   // ★ #265: 例外を外へ出さない境界
 
 #include <windows.h>
 #include <psapi.h>
@@ -272,6 +274,54 @@ struct ThrowingAllocator
     return true;
 }
 
+// B-17 / #265: 学習器のセグメント確保境界。
+//   NoiseShaperLearner のコンストラクタは「確保に失敗したら Status::Error へ落ちる」
+//   設計だが、create() は std::bad_alloc を送出するため nullptr 判定はデッドコードだった。
+//   境界で受けて nullptr に変える契約（createSegmentBufferNoThrow）を固定する。
+bool testSegmentAllocationNoThrow()
+{
+    const SIZE_T base = privateBytes();
+
+    // 成功経路: 本番の create() を通す（約 58.6 MiB、スコープ終了で解放）
+    bool created = false;
+    {
+        auto buf = convo::learner::createSegmentBufferNoThrow();
+        created = (buf != nullptr);
+    }
+
+    // 失敗経路: 注入した確保関数が std::bad_alloc を投げる。
+    //   noexcept なので、外へ漏れれば terminate してテストごと落ちる。
+    bool escaped = false;
+    bool nulled = false;
+    try
+    {
+        auto buf = convo::learner::createSegmentBufferNoThrow (
+            []() -> std::unique_ptr<AudioSegmentBuffer>
+            {
+                throw std::bad_alloc();
+            });
+        nulled = (buf == nullptr);
+    }
+    catch (...)
+    {
+        escaped = true;
+    }
+
+    const SIZE_T after = privateBytes();
+    const SIZE_T growth = (after > base) ? (after - base) : 0;
+    const bool ok = created && nulled && ! escaped && growth < kLeakThresholdBytes;
+
+    std::printf("[%s] testSegmentAllocationNoThrow created=%d nulled=%d escaped=%d growth=%llu bytes\n",
+                ok ? "PASS" : "FAIL", created ? 1 : 0, nulled ? 1 : 0, escaped ? 1 : 0,
+                static_cast<unsigned long long>(growth));
+    if (! ok)
+    {
+        ++gFailures;
+        return false;
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -286,6 +336,7 @@ int main()
     allPassed &= testAllocatorFailureReleasesMemory(1, "B-1-first-alloc");
     allPassed &= testAllocatorFailureReleasesMemory(2, "B-1-second-alloc");
     allPassed &= testNullptrAllocatorFailsClosed();
+    allPassed &= testSegmentAllocationNoThrow();
 
     if (allPassed && gFailures == 0)
     {
