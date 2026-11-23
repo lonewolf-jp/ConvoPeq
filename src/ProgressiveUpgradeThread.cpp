@@ -7,10 +7,12 @@
 #include "core/ThreadAffinityManager.h"
 
 #include <cmath>
+#include <new>
 #include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
 #include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
 
 #include "audioengine/AtomicAccess.h"
+#include "convolver/ConvolverStopProbe.h"   // ★ gate measurement: 停止レイテンシ計測（既定 OFF・診断専用）
 
 ProgressiveUpgradeThread::ProgressiveUpgradeThread(ConvolverProcessor& p,
                                                    const juce::File& file,
@@ -52,14 +54,18 @@ ProgressiveUpgradeThread::~ProgressiveUpgradeThread()
 
 void ProgressiveUpgradeThread::cancel()
 {
+    convo::probe::noteStopRequest (this, "upgrade");   // ★ gate measurement（既定 OFF）
     convo::publishAtomic(cancelled, true, std::memory_order_release);
     signalThreadShouldExit();
 }
 
 bool ProgressiveUpgradeThread::isGenerationValid() const
 {
-    return !convo::consumeAtomic(cancelled, std::memory_order_acquire)
+    const bool valid = !convo::consumeAtomic(cancelled, std::memory_order_acquire)
         && processor.isConvolverGenerationCurrent(taskGeneration);
+    if (! valid)
+        convo::probe::noteFirstExitCheck (this);   // ★ gate measurement（既定 OFF）
+    return valid;
 }
 
 bool ProgressiveUpgradeThread::checkAndCancel()
@@ -74,6 +80,13 @@ bool ProgressiveUpgradeThread::checkAndCancel()
 
 void ProgressiveUpgradeThread::run()
 {
+    // ★ gate measurement（既定 OFF）: 全 return 経路で run 終了を記録する。
+    struct ProbeExitMark
+    {
+        const void* w;
+        ~ProbeExitMark() { convo::probe::noteRunExit (w, "upgrade"); }
+    } probeExitMark { this };
+    convo::probe::noteRunStart (this, "upgrade");
     // ★ Bug#4: FTZ/DAZ 有効化（専用スレッド: 設定のみ、RAII 保存＋復元は不要）
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -108,7 +121,11 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
                                                       phaseMode,
                                                       nextFFTSize);
 
-    auto prepared = cacheManager.loadPreparedState(stepKey, nextFFTSize, taskGeneration);
+    auto prepared = [&]()
+    {
+        convo::probe::Span probeCacheLoad ("cache_load", 0, nextFFTSize, phaseMode);
+        return cacheManager.loadPreparedState(stepKey, nextFFTSize, taskGeneration);
+    }();
     if (!prepared)
     {
         juce::WeakReference<ConvolverProcessor> weakOwner(&processor);
@@ -119,29 +136,43 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
         std::atomic<bool>& cancelledRef = cancelled;
         const uint64_t expectedGeneration = taskGeneration;
 
-        prepared = converter.convertToHighRes(irFile,
-                                              sampleRate,
-                                              nextFFTSize,
-                                              taskGeneration,
-                                              stepKey,
-                                              [weakOwner, &cancelledRef, expectedGeneration]()
-                                              {
-                                                  auto* owner = weakOwner.get();
-                                                  if (owner == nullptr)
-                                                      return true;
+        {
+            convo::probe::Span probeConvert ("convertToHighRes", 0, nextFFTSize, phaseMode);
+            prepared = converter.convertToHighRes(irFile,
+                                                  sampleRate,
+                                                  nextFFTSize,
+                                                  taskGeneration,
+                                                  stepKey,
+                                                  [weakOwner, &cancelledRef, expectedGeneration]()
+                                                  {
+                                                      auto* owner = weakOwner.get();
+                                                      if (owner == nullptr)
+                                                          return true;
 
-                                                  return juce::Thread::currentThreadShouldExit()
-                                                      || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
-                                                      || !owner->isConvolverGenerationCurrent(expectedGeneration);
-                                              });
+                                                      return juce::Thread::currentThreadShouldExit()
+                                                          || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
+                                                          || !owner->isConvolverGenerationCurrent(expectedGeneration);
+                                                  });
+        }
         if (!prepared)
             return false;
 
         if (!isGenerationValid())
             return false;
 
-        cacheManager.save(stepKey, nextFFTSize, *prepared);
-        cacheManager.evictLRU(processor.getMaxCacheEntries());
+        // ★ B-01: キャッシュ保存の確保失敗は当該ステップの失敗として扱う。
+        //   例外を juce::Thread::run の外へ出さない（未捕捉例外はプロセス終了になる）。
+        try
+        {
+            convo::probe::Span probeCacheSave ("cache_save_evict", 0, nextFFTSize, phaseMode);
+            cacheManager.save(stepKey, nextFFTSize, *prepared);
+            cacheManager.evictLRU(processor.getMaxCacheEntries());
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] progressive upgrade: cache save failed (bad_alloc)");
+            return false;
+        }
     }
 
     if (prepared)

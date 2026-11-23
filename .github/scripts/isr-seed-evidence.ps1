@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $root = Join-Path $PSScriptRoot "..\..\evidence"
 $root = [System.IO.Path]::GetFullPath($root)
@@ -7,7 +7,8 @@ New-Item -Path $root -ItemType Directory -Force | Out-Null
 $runId = [guid]::NewGuid().ToString("N")
 $generatedAtNs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000000
 
-Get-ChildItem -Path $root -File -Filter "*.json" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+# ★ B-11: evidence/ を無条件に削除しない（他経路の実測証跡を消さない）。
+#   本スクリプトが書く artifact は上書きされるため、古い同名言い値は残らない。
 
 $artifacts = @{
   "closure_graph.json"         = @{

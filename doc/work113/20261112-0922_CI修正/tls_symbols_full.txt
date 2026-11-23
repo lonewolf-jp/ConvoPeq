@@ -1,0 +1,47 @@
+Microsoft (R) COFF/PE Dumper Version 14.52.37029.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file tls_probe.obj
+
+File Type: COFF OBJECT
+
+COFF SYMBOL TABLE
+000 010590A5 ABS    notype       Static       | @comp.id
+001 80010190 ABS    notype       Static       | @feat.00
+002 00000000 SECT1  notype       Static       | .drectve
+    Section length   C1, #relocs    0, #linenums    0, checksum        0
+004 00000000 SECT2  notype       Static       | .debug$S
+    Section length   8C, #relocs    0, #linenums    0, checksum        0
+006 00000000 SECT3  notype       Static       | .bss
+    Section length    4, #relocs    0, #linenums    0, checksum        0
+008 00000000 SECT3  notype       External     | ?g_nextRange@convo@@3U?$atomic@I@std@@A (struct std::atomic<unsigned int> convo::g_nextRange)
+009 00000000 SECT4  notype       Static       | .text$mn
+    Section length    4, #relocs    0, #linenums    0, checksum 634CF1B6, selection    2 (pick any)
+00B 00000000 SECT5  notype       Static       | .text$mn
+    Section length    7, #relocs    0, #linenums    0, checksum BF39AB3A, selection    2 (pick any)
+00D 00000000 SECT6  notype       Static       | .text$mn
+    Section length    3, #relocs    0, #linenums    0, checksum 922B422E, selection    2 (pick any)
+00F 00000000 SECT7  notype       Static       | .text$mn
+    Section length   37, #relocs    3, #linenums    0, checksum D699748F, selection    1 (pick no duplicates)
+011 00000000 SECT6  notype ()    External     | _Check_memory_order
+012 00000000 SECT5  notype ()    External     | ?fetch_add@?$_Atomic_integral@I$03@std@@QEAAIIW4memory_order@2@@Z (public: unsigned int __cdecl std::_Atomic_integral<unsigned int,4>::fetch_add(unsigned int,enum std::memory_order))
+013 00000000 SECT7  notype ()    External     | probe_thread_local_range
+014 00000000 SECT4  notype ()    External     | ??$_Atomic_address_as@JU?$_Atomic_padded@I@std@@@std@@YAPECJAEAU?$_Atomic_padded@I@0@@Z (long volatile * __cdecl std::_Atomic_address_as<long,struct std::_Atomic_padded<unsigned int> >(struct std::_Atomic_padded<unsigned int> &))
+015 00000000 SECT8  notype       Static       | .tls$
+    Section length    4, #relocs    0, #linenums    0, checksum DEBB20E3, selection    2 (pick any)
+017 00000000 SECT8  notype       Static       | ?assigned@?1??probe_thread_local_range@@9@4IA (unsigned int `probe_thread_local_range'::`2'::assigned)
+018 00000000 UNDEF  notype       External     | _tls_index
+019 00000000 SECT9  notype       Static       | .chks64
+    Section length   48, #relocs    0, #linenums    0, checksum        0
+
+String Table Size = 0x12C bytes
+
+  Summary
+
+           4 .bss
+          48 .chks64
+          8C .debug$S
+          C1 .drectve
+          45 .text$mn
+           4 .tls$

@@ -1,0 +1,40 @@
+diff --git a/src/eqprocessor/EQProcessor.Processing.cpp b/src/eqprocessor/EQProcessor.Processing.cpp
+index d5478c29..969e4ea9 100644
+--- a/src/eqprocessor/EQProcessor.Processing.cpp
++++ b/src/eqprocessor/EQProcessor.Processing.cpp
+@@ -486,7 +486,17 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
+ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
+ {
+     convo::RCUReaderGuard guard(rcuReader);
+-    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState 縺ｮ release/acq_rel 縺ｨ HB
++    // 笘・Gate 1 (2026-11-11, Owner 謇ｿ隱・: RCU 蜈･蝣ｴ縺ｫ螟ｱ謨励＠縺溷ｴ蜷医・ epoch 菫晁ｭｷ縺檎┌縺・◆繧√・+    //   騾蠖ｹ蟇ｾ雎｡・・urrentStateBits 縺ｮ謖・☆ EQState・峨ｒ荳蛻・盾辣ｧ縺励↑縺・・+    //   譌｢蟄倥さ繝ｼ繝峨・ stateSnapshot == nullptr 繧偵檎憾諷区悴蜈ｬ髢九阪→縺励※謇ｱ縺医ｋ縺溘ａ縲・+    //   繝九Η繝ｼ繝医Λ繝ｫ險ｭ螳壹・繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ繧呈眠險ｭ縺帙★縲∝酔縺・nullptr 邨瑚ｷｯ縺ｫ蛟偵☆縲・+    const bool protectedRead = guard.rootEnterSucceeded();
++    if (! protectedRead)
++        unprotectedReadCount_.fetch_add (1u, std::memory_order_relaxed);
++
++    const auto* stateSnapshot = protectedRead
++        ? loadCurrentState(std::memory_order_acquire)
++        : nullptr;
+     // Audio Thread 蜈･蜿｣縺ｧ MXCSR 縺ｮ FTZ/DAZ 繧帝未謨ｰ繧ｹ繧ｳ繝ｼ繝励〒菫晁ｨｼ縺吶ｋ縲・     // 蜻ｼ縺ｳ蜃ｺ縺怜・險ｭ螳壹↓萓晏ｭ倥○縺壹・Q 蜊倅ｽ薙〒繧ゅョ繝弱・繝槭Ν襍ｷ蝗縺ｮ雋闕ｷ蠅怜､ｧ繧帝亟縺舌・     juce::ScopedNoDenormals noDenormals;
+@@ -655,13 +665,19 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
+ 
+     // Note: bandNodeBits[] stores non-owning handles. We assume resolved nodes are valid during this block.
+     // because deletion is deferred by EBR (reader epoch mechanism).
+-    for (int i = 0; i < NUM_BANDS; ++i)
++    // 笘・Gate 1 (2026-11-11): 蜈･蝣ｴ縺ｫ螟ｱ謨励＠縺溷ｴ蜷医・ EBR 菫晁ｭｷ縺檎┌縺・・andNode 繧る蠖ｹ蟇ｾ雎｡
++    //   ・・etter 豈弱↓ retireBandNodeDeferred 縺ｧ驕・ｻｶ隗｣謾ｾ縺輔ｌ繧具ｼ峨↑縺ｮ縺ｧ縲√・繧､繝ｳ繧ｿ繧貞叙蠕励＠縺ｪ縺・・+    //   蜿門ｾ励＠縺ｪ縺代ｌ縺ｰ deref・・ode->active / node->coeffs / node->mode・峨ｂ襍ｷ縺薙ｉ縺ｪ縺・・+    if (protectedRead)
+     {
+-        auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode 縺ｮ release/acq_rel 縺ｨ HB
+-        if (node && node->active)
++        for (int i = 0; i < NUM_BANDS; ++i)
+         {
+-            activeBands[numActiveBands] = { node, i };
+-            numActiveBands++;
++            auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode 縺ｮ release/acq_rel 縺ｨ HB
++            if (node && node->active)
++            {
++                activeBands[numActiveBands] = { node, i };
++                numActiveBands++;
++            }
+         }
+     }
+ 

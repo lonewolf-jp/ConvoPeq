@@ -1,0 +1,96 @@
+--- a/src/core/EpochDomain.h
++++ b/src/core/EpochDomain.h
+@@ -3,6 +3,7 @@
+ #include <array>
+ #include <cassert>
+ #include <atomic>
++#include <cstdio>
+ #include <chrono>
+ #include <cstdint>
+ #include <cstring>
+@@ -41,6 +42,12 @@
+         return registerReaderThread("unnamed");
+     }
+ 
++    // ★ 計測: 登録元タグ（文字列版へ委譲するだけで挙動は変えない）
++    int registerReaderThreadWithTag(const char* tag) noexcept override
++    {
++        return registerReaderThread(tag);
++    }
++
+     // ★ C-3: タグ名付き Reader 登録
+     // ★ work88 (X3 §6.3 / INV-X3-4): reader registration permanently closed — shutdown 後は
+     //   新規登録を拒否する（registrationClosed_）。登録済み slot の enter/exit は継続可能
+@@ -205,6 +212,28 @@
+         const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth,
+                                                               static_cast<uint32_t>(1),
+                                                               std::memory_order_acq_rel);
++        // ★ 計測: 区画の保持時間（1ms 以上のときだけ最長値を更新）
++        if (previousDepth == 1 && readerIndex >= 0 && readerIndex < kMaxReaders)
++        {
++            const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
++            const uint64_t nowUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now().time_since_epoch()).count());
++            if (startUs != 0 && nowUs > startUs && (nowUs - startUs) >= 1000ull)
++            {
++                auto& w = holdWitness_[static_cast<size_t>(readerIndex)];
++                w.count.fetch_add(1u, std::memory_order_relaxed);
++                w.slot.store(static_cast<uint32_t>(readerIndex), std::memory_order_relaxed);
++                w.domainKey.store(reinterpret_cast<uint64_t>(this), std::memory_order_relaxed);
++                std::strncpy(w.tag, slot.ownerTag, sizeof(w.tag) - 1);
++                uint64_t expected = w.maxHoldUs.load(std::memory_order_relaxed);
++                while (nowUs - startUs > expected
++                       && ! w.maxHoldUs.compare_exchange_weak(expected, nowUs - startUs,
++                                                              std::memory_order_relaxed,
++                                                              std::memory_order_relaxed))
++                {
++                }
++            }
++        }
+         if (previousDepth == 0)
+         {
+             convo::publishAtomic(slot.depth, static_cast<uint32_t>(0), std::memory_order_release);
+@@ -641,6 +670,43 @@
+     std::array<ReaderSlot, kMaxReaders> readers;
+     DeferredDeletionQueue deferredDeletionQueue;
+ 
++public:
++    // ★ 計測 (2026-11-10): reader 区画の最長保持時間の証跡。
++    //   スロット単位の固定容量で、ポインタを辿らない（破棄後も安全に読める）。
++    struct HoldWitness
++    {
++        std::atomic<uint64_t> maxHoldUs{0};
++        std::atomic<uint32_t> count{0};
++        std::atomic<uint32_t> slot{0xFFFFFFFFu};
++        char tag[32]{};
++        std::atomic<uint64_t> domainKey{0};
++    };
++    static inline HoldWitness holdWitness_[kMaxReaders]{};
++
++    // ★ 計測: 保持時間の証跡を JSON として書き出す（NonRT から呼ぶこと）。
++    static void dumpHoldWitness(std::FILE* f) noexcept
++    {
++        if (f == nullptr)
++            return;
++        std::fprintf(f, "{\n  \"schema\": \"retire_reader_holds_v1\",\n");
++        std::fprintf(f, "  \"note\": \"1ms 以上の reader 区画の最長保持時間（スロット単位・固定容量）\",\n");
++        std::fprintf(f, "  \"slots\": [");
++        bool first = true;
++        for (int i = 0; i < kMaxReaders; ++i)
++        {
++            const auto& w = holdWitness_[static_cast<size_t>(i)];
++            const uint64_t h = w.maxHoldUs.load(std::memory_order_relaxed);
++            if (h == 0)
++                continue;
++            std::fprintf(f, "%s\n    {\"slot\": %d, \"tag\": \"%s\", \"maxHoldUs\": %llu, \"count\": %u}",
++                         first ? "" : ",", i, w.tag,
++                         (unsigned long long) h,
++                         w.count.load(std::memory_order_relaxed));
++            first = false;
++        }
++        std::fprintf(f, "%s]\n}\n", first ? "" : "\n  ");
++    }
++
+     // ★ A-2: EBR Queue Visibility 統計カウンタ
+     std::atomic<uint64_t> reclaimAttemptCount_{0};
+     std::atomic<uint64_t> reclaimSuccessCount_{0};

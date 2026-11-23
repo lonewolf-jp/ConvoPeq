@@ -1,0 +1,90 @@
+--- a/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
++++ b/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+@@ -695,9 +695,11 @@
+     {
+         return eq.loadCurrentState(std::memory_order_acquire);
+     }
+-    static void flushPendingEpochAdvance(EQProcessor& eq) noexcept
++    // ★ 段階① v2: 理由は引数で明示（デフォルトなし）
++    static void flushPendingEpochAdvance(EQProcessor& eq,
++                                         EQProcessor::PublishReason reason) noexcept
+     {
+-        eq.flushPendingEpochAdvance();
++        eq.flushPendingEpochAdvance(reason);
+     }
+     static void closeReaderRegistration(EQProcessor& eq) noexcept
+     {
+@@ -877,7 +879,7 @@
+         }
+ 
+         eq->setBandGain(0, 6.0f);                                    // 交換 → 直前の状態を退役
+-        EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);    // publish + reclaim
++        EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);    // publish + reclaim
+ 
+         if (eq->eqOwnedPendingRetire() != 0)
+         {
+@@ -945,7 +947,7 @@
+         for (int i = 0; i < 5; ++i)
+         {
+             eq->setBandGain(0, 3.0f + static_cast<float>(i));
+-            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);
++            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);
+             std::vector<double> lx, rx;
+             if (!gate1Render(*eq, lx, rx))
+             {
+@@ -977,7 +979,7 @@
+             for (int i = 0; i < 300 && !stop.load(std::memory_order_acquire); ++i)
+             {
+                 eq->setBandGain(0, 3.0f + static_cast<float>(i % 7));
+-                EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);   // publish + reclaim
++                EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);   // publish + reclaim
+                 swaps.fetch_add(1, std::memory_order_relaxed);
+             }
+             stop.store(true, std::memory_order_release);
+@@ -1117,13 +1119,13 @@
+             const auto after = eq->retireDriverStats();
+             if (after.publishRelease != before.publishRelease + 1) fail("5: release publish not counted");
+         }
+-        {   // タグ無しの直接 flush = other
++        {   // 明示的な直接 flush = Explicit
+             eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+             const auto before = eq->retireDriverStats();
+             eq->setBandGain(1, -5.0f);
+-            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);
++            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);
+             const auto after = eq->retireDriverStats();
+-            if (after.publishOther != before.publishOther + 1) fail("5: untagged publish not counted as other");
++            if (after.publishExplicit != before.publishExplicit + 1) fail("5: explicit publish not counted");
+         }
+         {   // タイマー経由
+             const auto before = eq->retireDriverStats();
+@@ -1132,6 +1134,18 @@
+             const auto after = eq->retireDriverStats();
+             if (after.publishTimerPending != before.publishTimerPending + 1) fail("5: timer publish not counted");
+         }
++        {   // ★ 段階① v2: TimerPending の二重計数がないこと
++            //   ドライバは flush を呼ばないため、ドライバ 1 回で増えるのは
++            //   publishTimerPending だけである（Explicit は増えない）。
++            const auto before = eq->retireDriverStats();
++            eq->setBandGain(0, 4.0f);
++            eq->driveRetireReclaimNonRt();
++            const auto after = eq->retireDriverStats();
++            if (after.publishTimerPending != before.publishTimerPending + 1) fail("5b: timer publish not counted once");
++            if (after.publishExplicit != before.publishExplicit) fail("5b: timer path must not count as explicit");
++            if (after.publishPrepare != before.publishPrepare) fail("5b: timer path must not count as prepare");
++            if (after.publishRelease != before.publishRelease) fail("5b: timer path must not count as release");
++        }
+     }
+ 
+     // ---- 6) 競合・寿命: driver（Message Thread）と setter/prepare/release（他スレッド）----
+@@ -1191,8 +1205,8 @@
+         if (! gate1Render(*eq, l, r)) fail("final: non-finite output");
+         if (gate1MaxAbs(l) < 1.0e-9) fail("final: silent output");
+         const auto s = eq->retireDriverStats();
+-        std::printf("  DRV: timer=%u prepare=%u release=%u other=%u reclaimOnly=%u idle=%u offThread=%u\n",
+-                    s.publishTimerPending, s.publishPrepare, s.publishRelease, s.publishOther,
++        std::printf("  DRV: timer=%u prepare=%u release=%u explicit=%u reclaimOnly=%u idle=%u offThread=%u\n",
++                    s.publishTimerPending, s.publishPrepare, s.publishRelease, s.publishExplicit,
+                     s.reclaimOnlyRuns, s.idleTicks, s.offThreadRejects);
+     }
+ 

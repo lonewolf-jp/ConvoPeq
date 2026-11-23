@@ -1,0 +1,116 @@
+--- a/src/audioengine/ISRRetireLatency.h
++++ b/src/audioengine/ISRRetireLatency.h
+@@ -311,6 +311,10 @@
+     // 解放完了を記録する。対応する要求が無ければ unmatched として数える。
+     void recordComplete (const void* object, Path path) noexcept
+     {
++        // ★ W-2: shutdown 相以降の完了を要求拒否数とは別に数える
++        if (shutdownPhase_.load (std::memory_order_acquire))
++            addCount (postShutdownCompletions_);
++
+         std::size_t index = 0;
+ 
+         if (! claim (object, index))
+@@ -382,6 +386,7 @@
+         std::uint64_t idExhausted = 0;
+         std::uint64_t cancelled = 0;
+         std::uint64_t postShutdownRequests = 0;   // drainAll 以降の要求
++        std::uint64_t postShutdownCompletions = 0; // ★ W-2: shutdown 相以降の完了
+         std::uint64_t recordMisses = 0;           // ★ C5: 記録できなかった要求
+         std::uint64_t ebrCount = 0;
+         std::uint64_t ebrSumNs = 0;
+@@ -406,6 +411,7 @@
+         std::uint64_t overflow = 0;
+         std::uint64_t idExhausted = 0;
+         std::uint64_t postShutdownRequests = 0;
++        std::uint64_t postShutdownCompletions = 0; // ★ W-2
+         std::uint64_t recordMisses = 0;   // ★ C5: 記録できなかった要求
+         std::uint64_t pending = 0;
+         std::uint64_t ebrCount = 0;
+@@ -429,6 +435,7 @@
+         s.overflow = overflow_.load (std::memory_order_acquire);
+         s.idExhausted = idExhausted_.load (std::memory_order_acquire);
+         s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
++        s.postShutdownCompletions = postShutdownCompletions_.load (std::memory_order_acquire);
+         s.recordMisses = recordMisses_.load (std::memory_order_acquire);
+         s.ebrCount = ebrCount_.load (std::memory_order_acquire);
+         s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
+@@ -454,9 +461,44 @@
+         runtimeStageSlot_.store (static_cast<std::size_t> (slot + 1u), std::memory_order_release);
+     }
+ 
+-    StageStats runtimeStage() const noexcept
++    // ★ W-2 (2026-11-10): 違反レポート生成時点（final 段）の累積値を保持する。
++    //   postTeardown との差分を取るために使う。判定には使わない。
++    void captureFinalStage() noexcept
++    {
++        const Snapshot s = snapshot();
++        StageStats st;
++        st.valid = true;
++        st.requests = s.requests;
++        st.completions = s.completions;
++        st.unmatchedCompletions = s.unmatchedCompletions;
++        st.overflow = s.overflow;
++        st.idExhausted = s.idExhausted;
++        st.postShutdownRequests = s.postShutdownRequests;
++        st.postShutdownCompletions = s.postShutdownCompletions;
++        st.recordMisses = s.recordMisses;
++        st.pending = (s.requests > s.completions) ? (s.requests - s.completions) : 0;
++        st.ebrCount = s.ebrCount;
++        st.ebrSumNs = s.ebrSumNs;
++        st.ebrMaxNs = s.ebrMaxNs;
++        st.execCount = s.execCount;
++        st.execSumNs = s.execSumNs;
++        st.execMaxNs = s.execMaxNs;
++        st.unobservedSafe = s.unobservedSafe;
++        st.rtRequests = s.rtRequests;
++        for (std::size_t p = 0; p < kPathCount; ++p)
++            st.paths[p] = s.paths[p];
++
++        finalStage_ = st;
++        finalStageValid_.store (true, std::memory_order_release);
++    }
++
++    StageStats finalStage() const noexcept
+     {
+-        const std::size_t marker = runtimeStageSlot_.load (std::memory_order_acquire);
++        return finalStage_;
++    }
++
++    StageStats runtimeStage() const noexcept
++    {        const std::size_t marker = runtimeStageSlot_.load (std::memory_order_acquire);
+ 
+         if (marker == 0u)
+             return StageStats{};
+@@ -474,6 +516,7 @@
+         s.idExhausted = idExhausted_.load (std::memory_order_acquire);
+         s.cancelled = cancelled_.load (std::memory_order_acquire);
+         s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
++        s.postShutdownCompletions = postShutdownCompletions_.load (std::memory_order_acquire);
+         s.recordMisses = recordMisses_.load (std::memory_order_acquire);
+         s.ebrCount = ebrCount_.load (std::memory_order_acquire);
+         s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
+@@ -535,6 +578,7 @@
+         runtimeStage_[1] = StageStats{};
+         runtimeStageSlot_.store (0, std::memory_order_release);
+         postShutdown_.store (0, std::memory_order_release);
++        postShutdownCompletions_.store (0, std::memory_order_release);
+         recordMisses_.store (0, std::memory_order_release);
+         for (std::size_t i = 0; i < kSlots; ++i)
+         {
+@@ -708,11 +752,15 @@
+     std::atomic<std::uint64_t> idExhausted_{0};
+     std::atomic<std::uint64_t> cancelled_{0};
+     std::atomic<std::uint64_t> postShutdown_{0};
++    std::atomic<std::uint64_t> postShutdownCompletions_{0};   // ★ W-2
+     // ★ C5 (2026-11-10): 記録できなかった要求の総数（overflow・ID 枯渇・shutdown 相）
+     std::atomic<std::uint64_t> recordMisses_{0};
+     std::atomic<bool> shutdownPhase_{false};
+     StageStats runtimeStage_[2]{};
+     std::atomic<std::size_t> runtimeStageSlot_{0};
++    // ★ W-2: final 段（違反レポート生成時点）
++    StageStats finalStage_{};
++    std::atomic<bool> finalStageValid_{false};
+     std::atomic<std::uint64_t> observationCount_{0};
+     std::atomic<std::uint64_t> ebrCount_{0};
+     std::atomic<std::uint64_t> ebrSumNs_{0};

@@ -73,4 +73,14 @@ foreach ($scenario in $data.scenarioResults) {
     if ($scenario.result -eq "fail") {
         throw "HB reorder simulation failed for scenario '$($scenario.name)'"
     }
+    # ★ A(D1): 観測不足（insufficient）を pass と読み替えない。
+    if ($scenario.PSObject.Properties.Name -contains 'reason' -and
+        [string]$scenario.reason -eq 'insufficient_observations') {
+        throw "HB scenario '$($scenario.name)' is insufficient (observations were not established)"
+    }
+    if (($scenario.PSObject.Properties.Name -contains 'observations') -and
+        ($scenario.PSObject.Properties.Name -contains 'required') -and
+        ([int64]$scenario.observations -lt [int64]$scenario.required)) {
+        throw "HB scenario '$($scenario.name)' has insufficient observations. observations=$($scenario.observations) required=$($scenario.required)"
+    }
 }

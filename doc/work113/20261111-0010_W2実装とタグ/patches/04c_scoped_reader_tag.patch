@@ -1,0 +1,36 @@
+--- a/src/core/ScopedEpochReader.h
++++ b/src/core/ScopedEpochReader.h
+@@ -44,9 +44,12 @@
+ class ScopedEpochReader
+ {
+ public:
+-    explicit ScopedEpochReader (IReaderEpochProvider& provider) noexcept
++    // ★ 計測 (2026-11-10 Owner 承認): 生成箇所を識別するタグ。
++    //   既定は nullptr（従来どおり無タグで登録する）。
++    explicit ScopedEpochReader (IReaderEpochProvider& provider,
++                                const char* tag = nullptr) noexcept
+         : provider_ (&provider),
+-          slot_ (acquireSlot (provider))
++          slot_ (acquireSlot (provider, tag))
+     {
+         if (slot_ >= 0)
+             provider_->enterReader (slot_);
+@@ -121,7 +124,7 @@
+         return nullptr;
+     }
+ 
+-    static int acquireSlot (IReaderEpochProvider& provider) noexcept
++    static int acquireSlot (IReaderEpochProvider& provider, const char* tag = nullptr) noexcept
+     {
+         if (auto* entry = find (provider))
+         {
+@@ -144,7 +147,8 @@
+             entry->depth = 0;
+         }
+ 
+-        const int slot = provider.registerReaderThread();
++        const int slot = (tag != nullptr) ? provider.registerReaderThreadWithTag (tag)
++                                     : provider.registerReaderThread();
+ 
+         if (slot < 0)
+             return -1;   // fail-closed: registration closed or slots exhausted

@@ -1,0 +1,64 @@
+--- a/src/eqprocessor/EQProcessor.h
++++ b/src/eqprocessor/EQProcessor.h
+@@ -242,6 +242,16 @@
+     //   - 滞留判定は lock-free API（pendingRetireCount / residentCountAtomic）のみ。
+     //   - 新規 timer / thread / authority は追加しない。既存 flush の挙動は変えない。
+     //----------------------------------------------------------
++    // ★ 段階① v2 (2026-11-11, Owner 承認「案 2」): publish 理由は**引数で明示**する。
++    //   デフォルト引数は設けない（指定漏れをコンパイルで検出する）。タグ共有は廃止。
++    enum class PublishReason : std::uint8_t
++    {
++        Prepare      = 0,   // prepareToPlay による呼出し
++        Release      = 1,   // releaseResources による呼出し（終了処理を意味しない）
++        TimerPending = 2,   // タイマードライバが pending を消費（flush は呼ばない）
++        Explicit     = 3    // 上記以外の明示的な直接呼出し
++    };
++
+     void driveRetireReclaimNonRt() noexcept;
+ 
+     // ドライバの診断スナップショット（読み取り専用・Message Thread 専用）。
+@@ -250,7 +260,7 @@
+         std::uint32_t publishTimerPending = 0;   // publish 理由: タイマー経由の pending 消費
+         std::uint32_t publishPrepare      = 0;   // publish 理由: prepareToPlay 経由
+         std::uint32_t publishRelease      = 0;   // publish 理由: releaseResources 経由
+-        std::uint32_t publishOther        = 0;   // publish 理由: 未分類（タグ無し flush）
++        std::uint32_t publishExplicit     = 0;   // publish 理由: 明示的な直接呼出し
+         std::uint32_t reclaimOnlyRuns     = 0;   // pending なし・滞留ありで reclaim のみ実行
+         std::uint32_t idleTicks           = 0;   // pending なし・滞留なし（何もしない）
+         std::uint32_t offThreadRejects    = 0;   // Message Thread 以外から呼ばれて拒否した回数
+@@ -624,8 +634,7 @@
+     std::atomic<std::uint32_t> m_publishTimerPendingCount { 0 };
+     std::atomic<std::uint32_t> m_publishPrepareCount { 0 };
+     std::atomic<std::uint32_t> m_publishReleaseCount { 0 };
+-    std::atomic<std::uint32_t> m_publishReasonTag { 0 };
+-    std::atomic<std::uint32_t> m_publishOtherCount { 0 };
++    std::atomic<std::uint32_t> m_publishExplicitCount { 0 };
+     std::atomic<std::uint32_t> m_reclaimOnlyRuns { 0 };
+     std::atomic<std::uint32_t> m_driverIdleTicks { 0 };
+     std::atomic<std::uint32_t> m_driverOffThreadRejects { 0 };
+@@ -655,23 +664,8 @@
+     // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放（Runtime 停止完了後のみ）
+     void retireImmediateDuringShutdown(EQState* state) noexcept;
+     void retireImmediateDuringShutdown(BandNode* node) noexcept;
+-    // [P1-14] 保留中の advanceEpoch を一括実行
+-    void flushPendingEpochAdvance() noexcept;
+-
+-    // ★ 段階①: publish 理由タグ（次の flush が pending を消費したときの分類）。
+-    //   Message Thread からのみ書く。flush は常にタグを消費して Other に戻す。
+-    enum class PublishReason : std::uint32_t
+-    {
+-        Other       = 0,
+-        TimerPending = 1,
+-        Prepare     = 2,
+-        Release     = 3
+-    };
+-    void setPublishReasonForNextFlush(PublishReason reason) noexcept
+-    {
+-        convo::publishAtomic(m_publishReasonTag, static_cast<std::uint32_t>(reason),
+-                             std::memory_order_release);
+-    }
++    // [P1-14] 保留中の advanceEpoch を一括実行（理由必須・デフォルト引数なし）
++    void flushPendingEpochAdvance(PublishReason reason) noexcept;
+ 
+     void countPublishReason(PublishReason reason) noexcept;
+ 

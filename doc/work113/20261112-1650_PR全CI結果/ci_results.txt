@@ -1,0 +1,32 @@
+=== PR #207 final CI results ===
+2026-11-12 16:46:59
+
+{"baseRefName":"main","baseRefOid":"173e69957b046290f7077797782f031ed8633fd0","headRefName":"ci-fix/173e6995","headRefOid":"b237f233f5ddaab9ef471bf2afe3e036ceb089b5","isDraft":false,"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE","number":207,"state":"OPEN","url":"https://github.com/lonewolf-jp/ConvoPeq/pull/207"}
+
+=== runs ===
+runs: 6
+  audioengine-lint                 success    43167657499  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657499
+  ISR Authority Compliance v6.4    success    43167657336  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657336
+  list-compliance                  success    43167657385  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657385
+  ISR Verification                 success    43167657403  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657403
+  Windows MSVC Build               success    43167657517  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657517
+  Sanitizer CI                     success    43167657749  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657749
+
+=== gh pr checks ===
+Analyze (actions)	pass	1m1s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167654504/job/131013198266	
+Analyze (c-cpp)	pass	48m50s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167654504/job/131013198559	
+Analyze (csharp)	pass	1m59s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167654504/job/131013198588	
+Analyze (javascript-typescript)	pass	1m2s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167654504/job/131013198577	
+CodeQL	pass	3s	https://github.com/lonewolf-jp/ConvoPeq/runs/131013521586	
+CodeRabbit	pass	11m16s	https://app.coderabbit.ai/change-stack/lonewolf-jp/ConvoPeq/pull/207?scope=ghh_OusAJGA4HG8ljoOV0wJvVx8NmnZIjc2DdjmxOu0xZWA	
+Debug TSan (Clang, best-effort)	pass	31s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657749/job/131013202330	
+Detect changed files	pass	11s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657517/job/131013201303	
+RelWithDebInfo ASan (MSVC, /MD)	pass	1h24m24s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657749/job/131013202500	
+Windows MSVC / Release	pass	23m31s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657517/job/131013285402	
+audit-report-verification	pass	17s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657336/job/131013200987	
+authority-runtime-tests	pass	19s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657336/job/131013359277	
+authority-static-checks	pass	23s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657336/job/131013201231	
+compliance-list-md	pass	49s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657385/job/131013200775	
+isr-verify	pass	2m20s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657403/job/131013201827	
+lint-audioengine	pass	36s	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657499/job/131013201277	
+Windows MSVC / probe (intentional failure, dispatch only)	skipping	0	https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43167657517/job/131013202889	

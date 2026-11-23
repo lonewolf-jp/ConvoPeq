@@ -1,0 +1,18 @@
+--- a/src/audioengine/ISRHB.cpp
++++ b/src/audioengine/ISRHB.cpp
+@@ -238,6 +238,7 @@
+     latencyFinal.overflow = latencySnapshot.overflow;
+     latencyFinal.idExhausted = latencySnapshot.idExhausted;
+     latencyFinal.postShutdownRequests = latencySnapshot.postShutdownRequests;
++    latencyFinal.recordMisses = latencySnapshot.recordMisses;   // ★ C5
+     latencyFinal.pending = (latencySnapshot.requests > latencySnapshot.completions)
+                              ? (latencySnapshot.requests - latencySnapshot.completions) : 0;
+ 
+@@ -258,6 +259,7 @@
+         file << "      \"overflow\": " << stage.overflow << ",\n";
+         file << "      \"idExhausted\": " << stage.idExhausted << ",\n";
+         file << "      \"postShutdownRequests\": " << stage.postShutdownRequests << ",\n";
++    file << "      \"recordMisses\": " << stage.recordMisses << ",\n";
+         file << "      \"paths\": [";
+ 
+         bool firstPathInStage = true;

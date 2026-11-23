@@ -1,0 +1,26 @@
+--- a/src/audioengine/AudioEngine.h
++++ b/src/audioengine/AudioEngine.h
+@@ -121,7 +121,8 @@
+ // ISRRetireRouter forward-declared below (reduce include chain for C1060)
+ #include "ISREvidenceExporter.h"
+ #include "ISRWorldRetirementTelemetry.h"   // ★ T1: World retirement observation telemetry（観測値のみ・D86）
+-#include "ISRWorldRetirementReference.h"   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
++#include "ISRWorldRetirementReference.h"
++#include "RetireLatencyTeardownReporter.h"   // ★ W-2: postTeardown 段の捕捉   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
+ #include "RuntimeHealthMonitor.h"
+ #include "RuntimePublicationValidator.h"
+ #include "WorldLifecycleAudit.h"
+@@ -605,6 +606,13 @@
+                                      private juce::AsyncUpdater
+ {
+ public:
++    // ★ W-2 (2026-11-10, Owner 限定承認): このクラスの**最初の非 static データメンバ**。
++    //   C++ のメンバ破棄は宣言の逆順であるため、このデストラクタが最後に走る
++    //   （= 他のメンバがすべて破棄された後の postTeardown 段を記録できる）。
++    //   基底クラス 6 つは退役を発生させないことを監査済み
++    //   （doc/work113/20261110-2330_C2実装と計測/w2_post_teardown_design_v2.md §2）。
++    convo::isr::RetireLatencyTeardownReporter m_teardownReporter;
++
+     friend class convo::RuntimeBuilder;
+     using SampleType = double; // 内部DSP精度 (JUCE推奨)
+ 

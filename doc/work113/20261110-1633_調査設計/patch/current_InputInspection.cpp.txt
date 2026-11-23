@@ -1,0 +1,270 @@
+#include "InputInspection.h"
+
+#include <cstring>
+
+namespace convo::safeinput
+{
+namespace
+{
+
+// String 内のタグ構造を走査して最大の入れ子深さを返す。
+// 解釈できない構造（未終端のコメント/タグ等）は -1 を返す。
+// 引用符内の '>' はタグ終端として扱わない。
+int computeMaxElementDepth (const juce::String& text)
+{
+    const int n = text.length();
+    int depth = 0;
+    int maxDepth = 0;
+    int i = 0;
+
+    while (i < n)
+    {
+        if (text[i] != '<')
+        {
+            ++i;
+            continue;
+        }
+
+        // コメント
+        if (i + 3 < n && text[i + 1] == '!' && text[i + 2] == '-' && text[i + 3] == '-')
+        {
+            const int end = text.indexOf (i + 4, "-->");
+
+            if (end < 0)
+                return -1;
+
+            i = end + 3;
+            continue;
+        }
+
+        // CDATA
+        if (i + 8 < n && text.substring (i, i + 9).equalsIgnoreCase ("<![CDATA["))
+        {
+            const int end = text.indexOf (i + 9, "]]>");
+
+            if (end < 0)
+                return -1;
+
+            i = end + 3;
+            continue;
+        }
+
+        // DOCTYPE / その他の宣言 / 処理命令
+        if (i + 1 < n && (text[i + 1] == '!' || text[i + 1] == '?'))
+        {
+            const int end = text.indexOfChar (i + 1, '>');
+
+            if (end < 0)
+                return -1;
+
+            i = end + 1;
+            continue;
+        }
+
+        const bool isClosing = (i + 1 < n && text[i + 1] == '/');
+
+        // タグ終端を引用符を考慮して探す
+        juce::juce_wchar quote = 0;
+        int tagEnd = -1;
+
+        for (int j = i + 1; j < n; ++j)
+        {
+            const juce::juce_wchar c = text[j];
+
+            if (quote != 0)
+            {
+                if (c == quote)
+                    quote = 0;
+
+                continue;
+            }
+
+            if (c == '"' || c == '\'')
+            {
+                quote = c;
+                continue;
+            }
+
+            if (c == '>')
+            {
+                tagEnd = j;
+                break;
+            }
+        }
+
+        if (tagEnd < 0)
+            return -1;
+
+        bool selfClosing = false;
+
+        if (! isClosing)
+        {
+            int k = tagEnd - 1;
+
+            while (k > i && (text[k] == ' ' || text[k] == '\t'
+                             || text[k] == '\n' || text[k] == '\r'))
+                --k;
+
+            selfClosing = (text[k] == '/');
+        }
+
+        if (isClosing)
+        {
+            if (depth > 0)
+                --depth;
+        }
+        else if (! selfClosing)
+        {
+            ++depth;
+
+            if (depth > maxDepth)
+                maxDepth = depth;
+        }
+
+        i = tagEnd + 1;
+    }
+
+    return maxDepth;
+}
+
+juce::String describe (const juce::File& file)
+{
+    return file.getFileName();
+}
+
+} // namespace
+
+bool inspectRiffChunkBounds (const juce::File& file, juce::String* reason)
+{
+    const auto fail = [reason, &file] (const juce::String& why)
+    {
+        if (reason != nullptr)
+            *reason = why + " (" + describe (file) + ")";
+
+        return false;
+    };
+
+    if (! file.existsAsFile())
+        return fail ("IR file not found");
+
+    const juce::int64 fileSize = file.getSize();
+
+    if (fileSize < 12)
+        return true; // RIFF ではない（他フォーマットの可能性）
+
+    juce::FileInputStream in (file);
+
+    if (! in.openedOk())
+        return fail ("cannot open file for inspection");
+
+    char header[12] = {};
+
+    if (in.read (header, 12) != 12)
+        return true;
+
+    const bool isRiff = std::memcmp (header, "RIFF", 4) == 0
+                     || std::memcmp (header, "RF64", 4) == 0;
+
+    if (! isRiff || std::memcmp (header + 8, "WAVE", 4) != 0)
+        return true; // RIFF/WAVE 以外は対象外
+
+    constexpr int kMaxChunks = 4096;
+    juce::int64 pos = 12;
+
+    for (int chunk = 0; chunk < kMaxChunks && pos + 8 <= fileSize; ++chunk)
+    {
+        if (! in.setPosition (pos))
+            return true;
+
+        juce::uint8 header8[8] = {};
+
+        if (in.read (header8, 8) != 8)
+            return true;
+
+        const juce::uint32 declared = static_cast<juce::uint32> (header8[4])
+                                    | (static_cast<juce::uint32> (header8[5]) << 8)
+                                    | (static_cast<juce::uint32> (header8[6]) << 16)
+                                    | (static_cast<juce::uint32> (header8[7]) << 24);
+
+        const juce::int64 payloadStart = pos + 8;
+
+        if (declared == 0xFFFFFFFFu)
+        {
+            // RF64: 実サイズは ds64 チャンク側。ここでは境界を断定しない。
+            pos = payloadStart;
+            continue;
+        }
+
+        const juce::int64 remaining = fileSize - payloadStart;
+
+        if (static_cast<juce::int64> (declared) > remaining)
+            return fail ("declared chunk size exceeds the file size");
+
+        pos = payloadStart + static_cast<juce::int64> (declared)
+            + ((declared & 1u) != 0u ? 1 : 0);
+    }
+
+    return true;
+}
+
+bool inspectXmlFile (const juce::File& file, juce::String* reason, const XmlLimits& limits)
+{
+    const auto fail = [reason, &file] (const juce::String& why)
+    {
+        if (reason != nullptr)
+            *reason = why + " (" + describe (file) + ")";
+
+        return false;
+    };
+
+    if (! file.existsAsFile())
+        return fail ("XML file not found");
+
+    const juce::int64 size = file.getSize();
+
+    if (size <= 0)
+        return fail ("XML file is empty");
+
+    if (size > limits.maxBytes)
+        return fail ("XML file is too large (" + juce::String (size)
+                     + " bytes; limit is " + juce::String (limits.maxBytes) + " bytes)");
+
+    const juce::String text = file.loadFileAsString();
+
+    if (limits.rejectDoctype)
+    {
+        if (text.containsIgnoreCase ("<!DOCTYPE"))
+            return fail ("XML with DOCTYPE is not accepted");
+
+        if (text.containsIgnoreCase ("<!ENTITY"))
+            return fail ("XML with ENTITY declarations is not accepted");
+    }
+
+    const int maxDepth = computeMaxElementDepth (text);
+
+    if (maxDepth < 0)
+        return fail ("XML structure could not be inspected");
+
+    if (maxDepth > limits.maxDepth)
+        return fail ("XML nesting is too deep (depth " + juce::String (maxDepth)
+                     + "; limit is " + juce::String (limits.maxDepth) + ")");
+
+    return true;
+}
+
+std::unique_ptr<juce::XmlElement> parseXmlFile (const juce::File& file,
+                                                juce::String* reason,
+                                                const XmlLimits& limits)
+{
+    if (! inspectXmlFile (file, reason, limits))
+        return nullptr;
+
+    auto xml = juce::XmlDocument::parse (file);
+
+    if (xml == nullptr && reason != nullptr && reason->isEmpty())
+        *reason = "XML could not be parsed (" + describe (file) + ")";
+
+    return xml;
+}
+
+} // namespace convo::safeinput

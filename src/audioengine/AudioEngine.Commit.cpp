@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "ISRDebugRuntime.h"
 #include "DiagnosticsConfig.h"
 #include "RuntimePublicationOrchestrator.h"
 
@@ -455,6 +456,11 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     {
 #if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
         debugRuntime_.emitCIArtifacts();
+#else
+        // ★ B-11: 実測証跡モード（--verify-runtime-evidence-live）では Release でも
+        //   HB 違反レポートを実イベントから生成する。既定の Release では発行しない。
+        if (convo::isr::isForceEvidenceEmission())
+            debugRuntime_.emitCIArtifacts();
 #endif
         debugRuntime_.emitHBTrace();
     }

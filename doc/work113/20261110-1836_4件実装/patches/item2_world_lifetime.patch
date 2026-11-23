@@ -1,0 +1,46 @@
+--- a/src/audioengine/AudioEngine.h
++++ b/src/audioengine/AudioEngine.h
+@@ -38,6 +38,7 @@
+ };
+ 
+ #include "RetrySchedulerTypes.h"
++#include "WorldLifetimeRecorder.h"   // 笘・Item2: RuntimeWorld 蟇ｿ蜻ｽ縺ｮ險倬鹸
+ #include <JuceHeader.h>
+ #include <atomic>
+ #include <cstdint>
+@@ -3970,6 +3971,7 @@
+             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
+             {
+                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
++                convo::isr::WorldLifetimeRecorder::instance().recordDestroy(ptr);   // 笘・Item2: 迚ｩ逅・ｴ譽・                 ptr->unseal();
+                 ptr->~RuntimePublishWorld();
+                 convo::aligned_free(ptr);
+@@ -3983,9 +3985,16 @@
+             if (world == nullptr)
+                 return;
+ 
++            // 笘・Item2: 諡貞凄縺輔ｌ縺・world 縺ｯ commit 縺ｫ蛻ｰ驕斐＠縺ｪ縺・◆繧√∵拠蜷ｦ譎らせ繧定ｵｷ轤ｹ縺ｨ縺励※險倬鹸縺吶ｋ縲・+            convo::isr::WorldLifetimeRecorder::instance().recordCommit(
++                world,
++                static_cast<std::uint64_t>(world->worldId),
++                convo::isr::WorldLifetimeRecorder::Path::Rejected);
++
+             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
+             {
+                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
++                convo::isr::WorldLifetimeRecorder::instance().recordDestroy(ptr);   // 笘・Item2: 迚ｩ逅・ｴ譽・                 ptr->unseal();
+                 ptr->~RuntimePublishWorld();
+                 convo::aligned_free(ptr);
+@@ -5172,6 +5181,14 @@
+             worldAuthority_.registry().unregister(seqId);
+             return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
+         }
++
++        // 笘・Item2: commit・域園譛芽・ｧｻ隴ｲ縺ｮ螳御ｺ・ｼ峨ｒ險倬鹸縺吶ｋ縲・1 縺ｨ縺ｯ蛻･邉ｻ邨ｱ縲・+        convo::isr::WorldLifetimeRecorder::instance().recordCommit(
++            newWorld,
++            static_cast<std::uint64_t>(newWorld->worldId),
++            shutdownRuntime_.isShutdownInProgress()
++                ? convo::isr::WorldLifetimeRecorder::Path::Shutdown
++                : convo::isr::WorldLifetimeRecorder::Path::Publish);
+     }
+ 
+     // 3. ISR 蜈ｱ騾・Intent Queue 縺ｸ enqueue・・roducer = enqueue, Consumer = CoordinatorLoop・・

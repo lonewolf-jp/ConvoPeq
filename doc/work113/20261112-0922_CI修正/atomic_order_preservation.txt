@@ -1,0 +1,11 @@
+Operation + memory-order multiset comparison (git HEAD vs working tree)
+
+src/audioengine/ISRRetireLatency.h            ops_before=253 ops_after=253 identical_multiset=True
+src/audioengine/WorldLifetimeRecorder.h       ops_before= 41 ops_after= 41 identical_multiset=True
+src/core/ReaderMeasureRegistry.h              ops_before= 37 ops_after= 37 identical_multiset=True
+src/core/ScopedEpochReader.h                  ops_before= 28 ops_after= 28 identical_multiset=True
+src/audioengine/ISRDebugRuntime.cpp           ops_before=  2 ops_after=  2 identical_multiset=True
+src/core/EpochDomain.h                        ops_before= 70 ops_after= 70 identical_multiset=True
+src/core/SnapshotCoordinator.h                ops_before=  4 ops_after=  4 identical_multiset=True
+
+ALL_ATOMIC_OPERATIONS_AND_ORDERS_PRESERVED: True

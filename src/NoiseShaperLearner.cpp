@@ -1,5 +1,7 @@
 #include "NoiseShaperLearner.h"
 #include "AudioEngine.h"
+#include "InputInspection.h"   // ★ B-05: XML のサイズ・深さ検査
+#include "DspNumericPolicy.h"  // ★ B-09: 非有限値の拒否
 #include "core/ThreadAffinityManager.h"
 #include <JuceHeader.h>
 
@@ -120,19 +122,28 @@ void NoiseShaperLearner::startLearning(bool resume)
     convo::publishAtomic(stopRequested, false, std::memory_order_release);
     convo::publishAtomic(errorMessage, nullptr, std::memory_order_release);
 
-    WorkerState expectedState = WorkerState::Idle;
-    // Transition:
-    // Idle -> Starting
-    if (!convo::compareExchangeAtomic(workerState,
-                                      expectedState,
-                                      WorkerState::Starting,
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_acquire))
+    // ★ B-07: 復旧要求の投入（setState）と Idle -> Starting の遷移を同じロックで
+    //   直列化する。worker は世代境界で短時間このロックを取るだけなので、
+    //   join を待つ間ロックを保持しない限りデッドロックしない。
+    bool started = false;
+    stateAuthority_.withExclusive([&]()
     {
-        return;
-    }
+        WorkerState expectedState = WorkerState::Idle;
+        // Transition:
+        // Idle -> Starting
+        if (convo::compareExchangeAtomic(workerState,
+                                         expectedState,
+                                         WorkerState::Starting,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+        {
+            convo::publishAtomic(pendingResume, resume, std::memory_order_release);
+            started = true;
+        }
+    });
 
-    convo::publishAtomic(pendingResume, resume, std::memory_order_release);
+    if (!started)
+        return;
 
     convo::publishAtomic(progress.status, Status::WaitingForAudio, std::memory_order_release);
     convo::publishAtomic(progress.iteration, 0, std::memory_order_release);
@@ -151,7 +162,7 @@ void NoiseShaperLearner::startLearning(bool resume)
         historyHead = 0;
     }
 
-    activeMode = pendingMode;
+    activeMode = static_cast<LearningMode>(convo::consumeAtomic(pendingModeRaw, std::memory_order_acquire));
     convo::publishAtomic(progress.learningMode, static_cast<int>(activeMode), std::memory_order_release);
     lastGenerationStart = std::chrono::steady_clock::time_point{};
     applyPhaseParams(activeMode, currentPhase);
@@ -214,7 +225,7 @@ void NoiseShaperLearner::shutdownWorkerThread() noexcept
 
 void NoiseShaperLearner::setLearningMode(LearningMode mode) noexcept
 {
-    pendingMode = mode;
+    convo::publishAtomic(pendingModeRaw, static_cast<int>(mode), std::memory_order_release);
     convo::publishAtomic(modeSwitchRequested, true, std::memory_order_release);
 
     if (!isRunning())
@@ -323,13 +334,13 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
 
     // Save current state to AudioEngine
     State currentState;
-    getState(currentState);
+    captureState(currentState);
     const double sr = engine.getSampleRate();
     const int bd = engine.getDitherBitDepth();
     int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, activeMode);
     engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
 
-    activeMode = pendingMode;
+    activeMode = static_cast<LearningMode>(convo::consumeAtomic(pendingModeRaw, std::memory_order_acquire));
     convo::publishAtomic(progress.learningMode, static_cast<int>(activeMode), std::memory_order_release);
 
     // Load new state from AudioEngine
@@ -348,6 +359,8 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
 
         for (int i = 0; i < kOrder; ++i)
             convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], initialCoefficients[i], std::memory_order_release);
+
+        publishCurrentSnapshot();
 
         accumulatedPlaybackSeconds = 0.0;
         convo::publishAtomic(progress.iteration, 0, std::memory_order_release);
@@ -378,6 +391,23 @@ const NoiseShaperLearner::Progress& NoiseShaperLearner::getProgress() const noex
 
 void NoiseShaperLearner::getState(State& outState) const noexcept
 {
+    // ★ B-07: UI・メッセージスレッドは optimizer を直接読まない。
+    //   学習スレッドが公開したスナップショットだけを返す。
+    if (stateAuthority_.readSnapshot(outState))
+        return;
+
+    // スナップショット未生成（起動直後）。停止中に限り optimizer を直接読む。
+    if (!isWorkerActive())
+    {
+        captureState(outState);
+        return;
+    }
+
+    outState = State{};
+}
+
+void NoiseShaperLearner::captureState(State& outState) const noexcept
+{
     optimizer.serializeTo(outState.mean, outState.covarianceUpperTriangle, outState.sigma);
     for (int i = 0; i < kOrder; ++i)
         outState.bestCoefficients[i] = convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire);
@@ -389,7 +419,19 @@ void NoiseShaperLearner::getState(State& outState) const noexcept
     outState.totalGenerations = convo::consumeAtomic(progress.totalGenerations, std::memory_order_acquire);
 }
 
-void NoiseShaperLearner::setState(const State& inState) noexcept
+void NoiseShaperLearner::publishCurrentSnapshot() noexcept
+{
+    State snapshot;
+    captureState(snapshot);
+    stateAuthority_.publishSnapshot(snapshot);
+}
+
+bool NoiseShaperLearner::isWorkerActive() const noexcept
+{
+    return convo::consumeAtomic(workerState, std::memory_order_acquire) != WorkerState::Idle;
+}
+
+void NoiseShaperLearner::applyRestore(const State& inState) noexcept
 {
     optimizer.deserializeFrom(inState.mean, inState.covarianceUpperTriangle, inState.sigma);
     for (int i = 0; i < kOrder; ++i)
@@ -402,6 +444,37 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
     convo::publishAtomic(progress.currentPhase, currentPhase, std::memory_order_release);
     convo::publishAtomic(progress.processCount, inState.processCount, std::memory_order_release);
     convo::publishAtomic(progress.totalGenerations, inState.totalGenerations, std::memory_order_release);
+}
+
+void NoiseShaperLearner::setState(const State& inState) noexcept
+{
+    // ★ B-07: 学習スレッド自身からの巻き戻し（multi-start の復元）は即時適用する。
+    //   学習スレッドが optimizer を所有しているため、ここは競合しない。
+    if (std::this_thread::get_id() == workerThread.get_id())
+    {
+        applyRestore(inState);
+        stateAuthority_.publishSnapshot(inState);
+        return;
+    }
+
+    bool appliedNow = false;
+    stateAuthority_.withExclusive([&]()
+    {
+        // 停止中なら呼出スレッドが直接適用する。Idle -> Starting の遷移は
+        // startLearning() が同じロックで行うため、この判定との間に窓は無い。
+        if (!isWorkerActive())
+        {
+            applyRestore(inState);
+            appliedNow = true;
+            return;
+        }
+
+        // 学習中は最新の 1 件だけを保持し、世代境界で学習スレッドが適用する。
+        stateAuthority_.enqueueRestoreLocked(inState);
+    });
+
+    if (appliedNow)
+        stateAuthority_.publishSnapshot(inState);
 }
 
 int NoiseShaperLearner::copyBestScoreHistory(double* destination, int maxPoints) noexcept
@@ -790,7 +863,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                     double bestRestartScore = std::numeric_limits<double>::max();
                     State bestRestartState;
                     State initialState;
-                    getState(bestRestartState);
+                    captureState(bestRestartState);
                     initialState = bestRestartState;   // 初期状態を保存
 
                     const int evaluationBitDepth = engine.getDitherBitDepth() > 0 ? engine.getDitherBitDepth() : 24;
@@ -824,7 +897,7 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                             if (currentBestScore < bestRestartScore)
                             {
                                 bestRestartScore = currentBestScore;
-                                getState(bestRestartState);
+                                captureState(bestRestartState);
                             }
                         }
                     }
@@ -941,6 +1014,19 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             }
 
             convo::publishAtomic(progress.status, Status::Running, std::memory_order_release);
+
+            // ★ B-07: 復旧要求は世代境界で学習スレッドが適用する。
+            //   直前の評価と状態が食い違わないよう、sample の直前に置く。
+            {
+                State restoredState;
+                if (stateAuthority_.takePendingRestore(restoredState))
+                {
+                    applyRestore(restoredState);
+                    stateAuthority_.publishSnapshot(restoredState);
+                    juce::Logger::writeToLog("[NoiseShaperLearner] pending restore applied at generation boundary");
+                }
+            }
+
             optimizer.sample(candidatePopulationMatrix());
 
             int bestCandidateIndex = 0;
@@ -1124,6 +1210,9 @@ void NoiseShaperLearner::resetLearningSession(const SessionSignature& session, b
                 convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], initialCoefficients[i], std::memory_order_release);
         }
     }
+
+    // ★ B-07: セッション初期化直後の状態を公開する（UI はこれを読む）。
+    publishCurrentSnapshot();
 }
 
 NoiseShaperLearner::DrainStats NoiseShaperLearner::drainCaptureQueue(const SessionSignature& session) noexcept
@@ -1397,33 +1486,64 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
     }
 }
 
-bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
+bool NoiseShaperLearner::saveLearnedState(const juce::File& file, const State& snapshot) const
 {
     juce::XmlElement xml("ConvoPeqLearnedState");
-    xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore, std::memory_order_acquire));
+    // ★ B-15: 形式の世代を明示する。version 無しは legacyUnknown として扱われる。
+    xml.setAttribute(convo::learnedstate::kVersionAttribute, convo::learnedstate::kCurrentVersion);
+    xml.setAttribute(convo::learnedstate::kConversionAttribute, convo::learnedstate::kConversionParcor);
+    xml.setAttribute("bestScore", snapshot.bestScore);
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
-    xml.setAttribute("phase", convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire));
-    xml.setAttribute("elapsedPlaybackSeconds", convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire));
+    xml.setAttribute("phase", snapshot.currentPhase);
+    xml.setAttribute("elapsedPlaybackSeconds", snapshot.elapsedPlaybackSeconds);
 
     auto* coeffsXml = xml.createNewChildElement("BestCoefficients");
     for (int i = 0; i < kOrder; ++i)
-        coeffsXml->setAttribute("c" + juce::String(i), convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire));
+        coeffsXml->setAttribute("c" + juce::String(i), snapshot.bestCoefficients[i]);
 
     auto* cmaXml = xml.createNewChildElement("CmaMean");
-    State state;
-    getState(state);
     for (int i = 0; i < kOrder; ++i)
-        cmaXml->setAttribute("m" + juce::String(i), state.mean[i]);
+        cmaXml->setAttribute("m" + juce::String(i), snapshot.mean[i]);
 
     return xml.writeTo(file);
 }
 
 bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
 {
-    auto xml = juce::XmlDocument::parse(file);
+    auto xml = convo::safeinput::parseXmlFile(file);
     if (xml == nullptr || !xml->hasTagName("ConvoPeqLearnedState"))
         return false;
+
+    // ★ B-07: optimizer は学習スレッドが所有する。本関数は起動時（学習開始前）に
+    //   のみ呼ばれる契約であり、学習中に呼ばれた場合は状態を壊さず拒否する。
+    if (isWorkerActive())
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] loadLearnedState ignored: learner is running");
+        return false;
+    }
+
+    // ★ B-15: 形式の世代を確認する。
+    //   - version 無し: 旧形式（二重 tanh）か新形式かを値から決められないため
+    //     legacyUnknown として扱い、値を変更しない（自動変換は行わない）。
+    //   - version 1: 旧形式。これも自動変換しない。
+    //   - version 2: 現行形式。
+    //   - version 3 以上: 未知。状態を壊さないよう読み込みを拒否する。
+    const auto versionInfo = convo::learnedstate::readVersion(*xml);
+    if (versionInfo.version > convo::learnedstate::kCurrentVersion)
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] loadLearnedState refused: unknown version "
+                                 + juce::String(versionInfo.version));
+        return false;
+    }
+
+    const bool legacyUnknown = versionInfo.legacyUnknown || versionInfo.legacyV1;
+    convo::publishAtomic(learnedStateLegacyUnknown_, legacyUnknown, std::memory_order_release);
+    if (legacyUnknown)
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] learned_state.xml has no version or version 1; "
+                                 "loaded as-is (legacyUnknown). Run --migrate-learned-state to convert explicitly.");
+    }
 
     const double savedSampleRate = xml->getDoubleAttribute("sampleRate");
     const int savedBitDepth = xml->getIntAttribute("bitDepth");
@@ -1438,15 +1558,24 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
 
     if (auto* coeffsXml = xml->getChildByName("BestCoefficients"))
     {
+        // ★ B-09: 破損値（NaN/Inf）は中立値 0.0 に落とす（clampCoeff と同じ扱い）。
         for (int i = 0; i < kOrder; ++i)
-            convo::publishAtomic(bestCoefficients[i], coeffsXml->getDoubleAttribute("c" + juce::String(i)), std::memory_order_release);
+        {
+            const double raw = coeffsXml->getDoubleAttribute("c" + juce::String(i));
+            const double coeff = convo::numeric_policy::isFinite(raw) ? raw : 0.0;
+            convo::publishAtomic(bestCoefficients[i], coeff, std::memory_order_release);
+        }
     }
 
     if (auto* cmaXml = xml->getChildByName("CmaMean"))
     {
         double mean[kOrder] = {};
+
         for (int i = 0; i < kOrder; ++i)
-            mean[i] = cmaXml->getDoubleAttribute("m" + juce::String(i));
+        {
+            const double raw = cmaXml->getDoubleAttribute("m" + juce::String(i));
+            mean[i] = convo::numeric_policy::isFinite(raw) ? raw : 0.0;
+        }
 
         // We only restore the mean, keeping other CMA state as literature defaults or engine state
         // unless we want full CMA state persistence. For now, mean + bestCoeffs is a good warm start.
@@ -1456,18 +1585,26 @@ bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
     return true;
 }
 
-void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept
+void NoiseShaperLearner::publishGenerationResult(const double* parcor, double score, int evaluatedCandidates) noexcept
 {
-    // coeffs are in unconstrained space, map to reflection coefficients for the engine
-    std::array<double, kOrder> mappedCoeffs;
+    // ★ B-15: 呼出元（toParcor）が tanh 済みの反射係数を渡す。ここで再度 tanh を
+    //   掛けると公開値と評価値がずれる（二重変換）。非有限値だけは中立の 0.0 に落とす。
+    std::array<double, kOrder> publishedParcor;
     for (int i = 0; i < kOrder; ++i)
     {
-        const double k = std::tanh(coeffs[i]);
-        mappedCoeffs[static_cast<size_t>(i)] = k;
+        const double k = convo::numeric_policy::isFinite(parcor[i]) ? parcor[i] : 0.0;
+        publishedParcor[static_cast<size_t>(i)] = k;
         convo::publishAtomic(bestCoefficients[static_cast<size_t>(i)], k, std::memory_order_release);
     }
 
     convo::publishAtomic(progress.bestScore, score, std::memory_order_release);
+
+    // ★ B-07: スナップショットは学習スレッド上で 1 回だけ取り、保存ジョブと UI 通知へ
+    //   値渡しする。従来はジョブ側が saveLearnedState 内で再読しており、保存される
+    //   mean が別世代と混ざり得た。
+    State snapshot;
+    captureState(snapshot);
+    stateAuthority_.publishSnapshot(snapshot);
 
     // 非同期保存（間隔制限付き）
     const auto now = std::chrono::steady_clock::now();
@@ -1485,23 +1622,14 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
         const auto stateFile = appDataDir.getChildFile("learned_state.xml");
         const auto filePath = stateFile.getFullPathName();
 
-        // スナップショットを取得
-        State snapshot;
-        getState(snapshot);
-
         juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-        g_saveThreadPool.addJob([weakSelf, filePath]()
+        g_saveThreadPool.addJob([weakSelf, filePath, snapshot]()
         {
             if (auto* self = weakSelf.get())
-                if (!self->saveLearnedState(juce::File(filePath)))
+                if (!self->saveLearnedState(juce::File(filePath), snapshot))
                     convo::publishAtomic(self->errorMessage, "Failed to save learned state", std::memory_order_release);
         });
     }
-
-    // Capture state on worker thread
-    // 注: 以下の currentState はスナップショットとは別に取得（非同期保存用のスナップショットは上で取得済み）
-    State currentState;
-    getState(currentState);
 
     // Capture bank info
     const double sr = engine.getSampleRate();
@@ -1510,7 +1638,7 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
     const int bankIndex = AudioEngine::getAdaptiveCoeffBankIndex(sr, bd, currentMode);
 
     juce::WeakReference<NoiseShaperLearner> weakSelf(this);
-    juce::MessageManager::callAsync([weakSelf, mappedCoeffs, currentState, bankIndex]()
+    juce::MessageManager::callAsync([weakSelf, publishedParcor, snapshot, bankIndex]()
     {
         if (auto* self = weakSelf.get())
         {
@@ -1524,8 +1652,8 @@ void NoiseShaperLearner::publishGenerationResult(const double* coeffs, double sc
             //                                  AudioEngine::RebuildTelemetryReason::EnqueueSnapshotCommand,
             //                                  AudioEngine::RebuildTelemetryClass::Snapshot,
             //                                  AudioEngine::RebuildTelemetryPolicy::Replaceable);
-            self->engine.storeLearnedCoeffs(mappedCoeffs.data());
-            self->engine.setAdaptiveNoiseShaperState(bankIndex, currentState);
+            self->engine.storeLearnedCoeffs(publishedParcor.data());
+            self->engine.setAdaptiveNoiseShaperState(bankIndex, snapshot);
             self->engine.requestAdaptiveAutosave();
         }
     });

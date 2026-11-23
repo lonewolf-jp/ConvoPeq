@@ -1,0 +1,24 @@
+--- a/src/audioengine/AudioEngine.h
++++ b/src/audioengine/AudioEngine.h
+@@ -4683,7 +4683,21 @@
+         //   shutdown 中は Audio Thread 停止済みのため epoch は安全 → 即時破棄される。
+         //   invariant: 「caller → authority への ownership transfer が成立してから return」
+         const uint64_t epoch = markRetireEpoch();
++
++        // ★ D1-shutdown (2026-11-10): この分岐は enqueueRetire を通らないため、要求記録が
++        //   欠落していた（完了だけが terminalReclaim の完了フックで記録され unmatched になる）。
++        //   移送の直前に要求を記録し、完了フックと同じ recorder・同じ object で対応させる。
++        //   移送が失敗した場合に限り、この分岐が作成した記録だけを取り消す（既存記録は触らない）。
++        bool requestCreated = false;
++        const std::uint64_t requestId =
++            convo::isr::RetireLatencyRecorder::instance().recordRequest (
++                ptr, epoch, 0u, 0xFFFFFFFFu, &requestCreated);
++
+         const bool transferred = m_retireRouter->shutdownReclaim(ptr, deleter, epoch, type);
++
++        if (! transferred && requestCreated && requestId != 0u)
++            convo::isr::RetireLatencyRecorder::instance().cancelRequestById (ptr, requestId);
++
+         return transferred ? convo::isr::RetireEnqueueResult::Success
+                            : convo::isr::RetireEnqueueResult::Shutdown;
+     }

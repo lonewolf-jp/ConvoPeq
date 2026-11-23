@@ -1,0 +1,266 @@
+--- a/src/tests/D8_2_B_2_Tests.cpp
++++ b/src/tests/D8_2_B_2_Tests.cpp
+@@ -21,6 +21,7 @@
+ #include "audioengine/ISRRetireRouter.h"
+ 
+ #include "core/IEpochProvider.h"
++#include "core/EpochDomain.h"          // ★ T11: 実 provider（実 DeferredDeletionQueue）で C3 を駆動する
+ #include "core/SnapshotCoordinator.h"
+ #include "core/SnapshotFactory.h"
+ #include "core/SnapshotParams.h"
+@@ -948,9 +949,236 @@
+ }
+ 
+ //============================================================================
+-// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
++// T11 — completeFade (C3) の要求・完了 1 対 1（2026-11-10 Owner 承認・テスト限定）
++//
++//   C3 は製品経路で到達しないため、既存テストで回帰を担保する。
++//   実 SnapshotCoordinator・実 EpochDomain（実 DeferredDeletionQueue）・実 recorder を使う。
++//   quarantine 経由でも記録が重複しないことを併せて確認する。
+ //============================================================================
+ 
++namespace {
++
++// enqueueRetire を常に拒否する provider（quarantine 移送の検査用）
++class FullQueueEpochProvider final : public convo::EpochDomain
++{
++public:
++    bool enqueueRetire(void*, void (*)(void*), uint64_t) noexcept override { return false; }
++    bool enqueueRetireTyped(void*, void (*)(void*), uint64_t, DeletionEntryType) noexcept override { return false; }
++};
++
++// D/Q/E/T を epoch-gated に drain する
++void drainRetireQueues(convo::EpochDomain& dom, convo::isr::ISRRetireRouter& router) noexcept
++{
++    for (int i = 0; i < 4; ++i)
++    {
++        dom.publishEpoch();
++        router.tryReclaim();
++    }
++}
++
++} // namespace
++
++static bool test_T11_CompleteFadeRecords()
++{
++    std::printf("[T11] completeFade (C3) request/completion 1:1 (real queue)...\n");
++
++    auto& rec = convo::isr::RetireLatencyRecorder::instance();
++    bool pass = true;
++
++    // --- (1) 正常系: D キューが受領する ---
++    {
++        rec.reset();
++        convo::EpochDomain dom;
++        convo::isr::ISRRetireRouter router(dom);
++        convo::SnapshotCoordinator coord(dom);
++        coord.setRetireSink(&router);
++
++        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
++        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
++        if (a == nullptr || b == nullptr)
++        {
++            std::printf("  FAIL: SnapshotFactory::create returned null\n");
++            return false;
++        }
++
++        coord.startFade(a, /*fadeSamples=*/100);   // current = a
++        coord.startFade(b, /*fadeSamples=*/100);   // target  = b
++        const auto before = rec.snapshot();
++
++        coord.advanceFade(1000);
++        const bool completed = coord.tryCompleteFade();   // 旧 current (a) を退役 = C3
++        const auto after = rec.snapshot();
++
++        if (! completed)
++        {
++            std::printf("  FAIL: tryCompleteFade did not complete\n");
++            pass = false;
++        }
++        if (after.requests != before.requests + 1)
++        {
++            std::printf("  FAIL: requests=%llu, expected %llu\n",
++                        (unsigned long long) after.requests,
++                        (unsigned long long) (before.requests + 1));
++            pass = false;
++        }
++
++        drainRetireQueues(dom, router);
++        const auto drained = rec.snapshot();
++        if (drained.completions != drained.requests || drained.unmatchedCompletions != 0)
++        {
++            std::printf("  FAIL: req=%llu comp=%llu unmatched=%llu\n",
++                        (unsigned long long) drained.requests,
++                        (unsigned long long) drained.completions,
++                        (unsigned long long) drained.unmatchedCompletions);
++            pass = false;
++        }
++        if (drained.cancelled != 0)
++        {
++            std::printf("  FAIL: cancelled=%llu, expected 0\n",
++                        (unsigned long long) drained.cancelled);
++            pass = false;
++        }
++
++        // 後始末は C5 経路（finalizeShutdown → retireCurrentAndTarget）で行う
++        coord.finalizeShutdown(/*timedOut=*/false);
++        drainRetireQueues(dom, router);
++        const auto fin = rec.snapshot();
++        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
++        {
++            std::printf("  FAIL (finalize): req=%llu comp=%llu unmatched=%llu\n",
++                        (unsigned long long) fin.requests,
++                        (unsigned long long) fin.completions,
++                        (unsigned long long) fin.unmatchedCompletions);
++            pass = false;
++        }
++        if (fin.recordMisses != 0)
++        {
++            std::printf("  FAIL: recordMisses=%llu, expected 0\n",
++                        (unsigned long long) fin.recordMisses);
++            pass = false;
++        }
++    }
++
++    // --- (2) queue 失敗 → quarantine 移送: 記録が重複しない ---
++    {
++        rec.reset();
++        FullQueueEpochProvider fdom;
++        convo::isr::ISRRetireRouter frouter(fdom);
++        convo::SnapshotCoordinator fcoord(fdom);
++        fcoord.setRetireSink(&frouter);
++
++        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
++        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
++        if (a == nullptr || b == nullptr)
++        {
++            std::printf("  FAIL: SnapshotFactory::create returned null (Q case)\n");
++            return false;
++        }
++
++        fcoord.startFade(a, 100);
++        fcoord.startFade(b, 100);
++        const auto before = rec.snapshot();
++        fcoord.advanceFade(1000);
++        const bool completed = fcoord.tryCompleteFade();   // C3 → enqueue 失敗 → Q 移送
++        const auto after = rec.snapshot();
++
++        if (! completed)
++        {
++            std::printf("  FAIL: tryCompleteFade (Q) did not complete\n");
++            pass = false;
++        }
++        if (after.requests != before.requests + 1)
++        {
++            std::printf("  FAIL (Q): requests=%llu, expected %llu (duplicate record?)\n",
++                        (unsigned long long) after.requests,
++                        (unsigned long long) (before.requests + 1));
++            pass = false;
++        }
++
++        drainRetireQueues(fdom, frouter);
++        const auto drained = rec.snapshot();
++        if (drained.completions != drained.requests || drained.unmatchedCompletions != 0)
++        {
++            std::printf("  FAIL (Q): req=%llu comp=%llu unmatched=%llu\n",
++                        (unsigned long long) drained.requests,
++                        (unsigned long long) drained.completions,
++                        (unsigned long long) drained.unmatchedCompletions);
++            pass = false;
++        }
++    }
++
++    if (pass)
++        std::printf("  PASS: C3 request/completion 1:1, no duplicate record on quarantine\n");
++    return pass;
++}
++
++//============================================================================
++// T12 — finalizeShutdown が current と target の両方を記録する（C5 の 2 か所）
++//
++//   fade 完了前に finalizeShutdown を呼ぶと、current と target の両方が
++//   retireCurrentAndTarget() で退役する。要求 2 件・完了 2 件を確認する。
++//============================================================================
++static bool test_T12_FinalizeRetiresTargetAndCurrent()
++{
++    std::printf("[T12] finalizeShutdown retires current + target (C5 both sites)...\n");
++
++    auto& rec = convo::isr::RetireLatencyRecorder::instance();
++    bool pass = true;
++
++    rec.reset();
++    convo::EpochDomain dom;
++    convo::isr::ISRRetireRouter router(dom);
++    convo::SnapshotCoordinator coord(dom);
++    coord.setRetireSink(&router);
++
++    auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
++    auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
++    if (a == nullptr || b == nullptr)
++    {
++        std::printf("  FAIL: SnapshotFactory::create returned null\n");
++        return false;
++    }
++
++    coord.startFade(a, /*fadeSamples=*/100);   // current = a
++    coord.startFade(b, /*fadeSamples=*/100);   // target  = b（fade は完了させない）
++    const auto before = rec.snapshot();
++
++    coord.finalizeShutdown(/*timedOut=*/false);   // current=a と target=b を退役
++    const auto after = rec.snapshot();
++
++    if (after.requests != before.requests + 2)
++    {
++        std::printf("  FAIL: requests=%llu, expected %llu (current+target)\n",
++                    (unsigned long long) after.requests,
++                    (unsigned long long) (before.requests + 2));
++        pass = false;
++    }
++
++    drainRetireQueues(dom, router);
++    const auto fin = rec.snapshot();
++    if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
++    {
++        std::printf("  FAIL: req=%llu comp=%llu unmatched=%llu\n",
++                    (unsigned long long) fin.requests,
++                    (unsigned long long) fin.completions,
++                    (unsigned long long) fin.unmatchedCompletions);
++        pass = false;
++    }
++    if (fin.recordMisses != 0)
++    {
++        std::printf("  FAIL: recordMisses=%llu, expected 0\n",
++                    (unsigned long long) fin.recordMisses);
++        pass = false;
++    }
++
++    if (pass)
++        std::printf("  PASS: current + target retired, request/completion 2:2, unmatched 0\n");
++    return pass;
++}
++
++//============================================================================
++// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
++//============================================================================
+ int main()
+ {
+     bool ok = true;
+@@ -962,6 +1190,8 @@
+     ok &= test_T7_SnapshotOwnershipConservation();
+     ok &= test_T8_RouterOwnershipConservation();
+     ok &= test_T10_ResetFadeStateAndRetireTarget();
++    ok &= test_T11_CompleteFadeRecords();
++    ok &= test_T12_FinalizeRetiresTargetAndCurrent();
+ 
+     if (ok)
+     {
+@@ -977,6 +1207,8 @@
+         std::printf("  T6  DEFERRED (no production Shutdown path)\n");
+         std::printf("  T9  DEFERRED (source audit only)\n");
+         std::printf("  T10 resetFadeStateAndRetireTarget  PASS (direct call, T10-c unobservable)\n");
++        std::printf("  T11 completeFade (C3) record 1:1  PASS (real queue + quarantine)\n");
++        std::printf("  T12 finalizeShutdown current+target  PASS (C5 both sites)\n");
+         std::printf("========================================\n");
+         return 0;
+     }

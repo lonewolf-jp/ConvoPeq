@@ -1,0 +1,1 @@
+{"baseRefName":"main","baseRefOid":"173e69957b046290f7077797782f031ed8633fd0","createdAt":"2026-11-12T06:22:10Z","headRefName":"ci-fix/173e6995","headRefOid":"b237f233f5ddaab9ef471bf2afe3e036ceb089b5","isDraft":false,"number":207,"state":"OPEN","title":"fix(isr): restore the lint, atomic-access and proof-scope gates","url":"https://github.com/lonewolf-jp/ConvoPeq/pull/207"}

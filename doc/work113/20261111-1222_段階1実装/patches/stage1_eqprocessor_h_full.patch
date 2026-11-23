@@ -1,0 +1,120 @@
+diff --git a/src/eqprocessor/EQProcessor.h b/src/eqprocessor/EQProcessor.h
+index c65778f1..c961a93d 100644
+--- a/src/eqprocessor/EQProcessor.h
++++ b/src/eqprocessor/EQProcessor.h
+@@ -217,6 +217,12 @@ public:
+         //----------------------------------------------------------
+     void prepareToPlay(double sampleRate, int newMaxInternalBlockSize);
+ 
++    // ★ Gate 1: RCU 入場に失敗して状態参照をスキップした回数（診断用）
++    [[nodiscard]] std::uint32_t unprotectedReadCount() const noexcept
++    {
++        return unprotectedReadCount_.load(std::memory_order_relaxed);
++    }
++
+     //----------------------------------------------------------
+     // process: オーディオスレッドから呼ばれる
+     // ロック・new・I/O・待機（IR再ロード等）禁止
+@@ -227,6 +233,33 @@ public:
+                  const EQCoeffCache* coeffCache);
+     void releaseResources();
+ 
++    //----------------------------------------------------------
++    // ★ 段階① (2026-11-11, Owner 承認): EQ ドメイン reclaim ドライバ
++    //   - 呼出し元は AudioEngine::timerCallback（100 ms 周期）のみ。
++    //   - **Message Thread 専用**。Audio Thread から呼ばない（呼ばれたら何もせず拒否する）。
++    //   - `m_epochAdvancePending` が true のときだけ epoch を前進させる。
++    //   - pending が false でも、D/Q/E/T に滞留があれば reclaim のみ実行する。
++    //   - 滞留判定は lock-free API（pendingRetireCount / residentCountAtomic）のみ。
++    //   - 新規 timer / thread / authority は追加しない。既存 flush の挙動は変えない。
++    //----------------------------------------------------------
++    void driveRetireReclaimNonRt() noexcept;
++
++    // ドライバの診断スナップショット（読み取り専用・Message Thread 専用）。
++    struct RetireDriverStats
++    {
++        std::uint32_t publishTimerPending = 0;   // publish 理由: タイマー経由の pending 消費
++        std::uint32_t publishPrepare      = 0;   // publish 理由: prepareToPlay 経由
++        std::uint32_t publishRelease      = 0;   // publish 理由: releaseResources 経由
++        std::uint32_t publishOther        = 0;   // publish 理由: 未分類（タグ無し flush）
++        std::uint32_t reclaimOnlyRuns     = 0;   // pending なし・滞留ありで reclaim のみ実行
++        std::uint32_t idleTicks           = 0;   // pending なし・滞留なし（何もしない）
++        std::uint32_t offThreadRejects    = 0;   // Message Thread 以外から呼ばれて拒否した回数
++        std::uint64_t currentEpoch        = 0;   // 現在の EQ ドメイン epoch
++        std::uint32_t pendingRetire       = 0;   // D キュー滞留（lock-free）
++        std::uint32_t resident            = 0;   // Q+E+T 滞留（lock-free）
++    };
++    [[nodiscard]] RetireDriverStats retireDriverStats() const noexcept;
++
+     // [WORK113-17 Phase 2-1] NonRT: World 投影の totalGainDb を既存 publish 機構へ反映する。
+     //   （INV-EQ-GAIN-001/002/004/005。dB→linear 変換は本関数内＝NonRT のみ。
+     //    RT は従来どおり totalGainTarget linear 値の参照のみ。）
+@@ -459,12 +492,12 @@ public:
+     //   guard が slot を保持している間は retireEpoch < minReaderEpoch が成立
+     //   しないため、当該オブジェクトは解放されない。
+     //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
+-    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
++    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard(const char* tag = nullptr) const noexcept
+     {
+         // The epoch domain is a synchronization primitive: entering a reader slot does not
+         // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
+         // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
+-        return convo::ScopedEpochReader (*m_epochDomain);
++        return convo::ScopedEpochReader (*m_epochDomain, tag);
+     }
+     bool getAndClearPendingAGCChange() noexcept
+     {
+@@ -586,12 +619,30 @@ private:
+     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
+     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
+     std::atomic<bool> m_epochAdvancePending { false };
++    // ★ 段階① (2026-11-11, Owner 承認): publish 理由と理由別カウンタ（診断・Message Thread 専用）。
++    //   Audio Thread は触らない。カウンタは uint32 atomic（lock-free は static_assert 済み）。
++    std::atomic<std::uint32_t> m_publishReasonTag { 0 };
++    std::atomic<std::uint32_t> m_publishTimerPendingCount { 0 };
++    std::atomic<std::uint32_t> m_publishPrepareCount { 0 };
++    std::atomic<std::uint32_t> m_publishReleaseCount { 0 };
++    std::atomic<std::uint32_t> m_publishOtherCount { 0 };
++    std::atomic<std::uint32_t> m_reclaimOnlyRuns { 0 };
++    std::atomic<std::uint32_t> m_driverIdleTicks { 0 };
++    std::atomic<std::uint32_t> m_driverOffThreadRejects { 0 };
+     convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
+     // [work21] ISRRetireRouter: unified retire API (Phase-C)
+     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
+     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
+     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
++    // ★ Gate 1 (2026-11-11, Owner 承認): テスト専用アクセス（製品 API は追加しない）
++    friend struct EQProcessorGate1TestAccess;
++
+     convo::RCUReader rcuReader { *m_epochDomain };
++    std::atomic<std::uint32_t> unprotectedReadCount_ { 0 };   // ★ Gate 1 診断
++    // ★ Gate 1: RT（Audio Thread）から fetch_add するため、lock-free であることを
++    //   実行時ではなくコンパイル時に保証する（「atomic だから lock-free」とはみなさない）。
++    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
++                  "Gate1: unprotectedReadCount_ must be lock-free for RT use");
+     // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
+     std::atomic<uint64_t> m_retireDropCount{0};
+ 
+@@ -607,6 +658,22 @@ private:
+     // [P1-14] 保留中の advanceEpoch を一括実行
+     void flushPendingEpochAdvance() noexcept;
+ 
++    // ★ 段階①: publish 理由タグ（次の flush が pending を消費したときの分類）。
++    //   Message Thread からのみ書く。flush は常にタグを消費して Other に戻す。
++    enum class PublishReason : std::uint32_t
++    {
++        Other       = 0,
++        TimerPending = 1,
++        Prepare     = 2,
++        Release     = 3
++    };
++    void setPublishReasonForNextFlush(PublishReason reason) noexcept
++    {
++        convo::publishAtomic(m_publishReasonTag, static_cast<std::uint32_t>(reason),
++                             std::memory_order_release);
++    }
++    void countPublishReason(PublishReason reason) noexcept;
++
+     // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
+     // high 32-bit: serial, low 32-bit: mask
+     // [work89 R-3c・DOCUMENTED LIMITATION] serial は順序比較ではなく変更世代識別であり、

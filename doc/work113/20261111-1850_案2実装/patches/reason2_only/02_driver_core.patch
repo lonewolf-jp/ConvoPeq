@@ -1,0 +1,65 @@
+--- a/src/eqprocessor/EQProcessor.Core.cpp
++++ b/src/eqprocessor/EQProcessor.Core.cpp
+@@ -80,14 +80,8 @@
+ }
+ // [P1-14] 保留中の advanceEpoch を一括実行.
+ // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
+-void EQProcessor::flushPendingEpochAdvance() noexcept
++void EQProcessor::flushPendingEpochAdvance(PublishReason reason) noexcept
+ {
+-    // ★ 段階①: 理由タグは「消費する」— どの入口から来ても 1 回で Other に戻す。
+-    const auto reason = static_cast<PublishReason>(
+-        convo::exchangeAtomic(m_publishReasonTag,
+-                              static_cast<std::uint32_t>(PublishReason::Other),
+-                              std::memory_order_acq_rel));
+-
+ 
+     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
+     {
+@@ -159,10 +153,10 @@
+         case PublishReason::Release:
+             convo::fetchAddAtomic(m_publishReleaseCount, std::uint32_t{1}, std::memory_order_relaxed);
+             break;
+-        case PublishReason::Other:
++        case PublishReason::Explicit:
+         default:
+-            // ★ 未分類は暗黙に既存区分へ加算しない（Owner 条件）
+-            convo::fetchAddAtomic(m_publishOtherCount, std::uint32_t{1}, std::memory_order_relaxed);
++            // ★ 明示的な直接呼出し（上記以外）。既存区分へ暗黙に加算しない。
++            convo::fetchAddAtomic(m_publishExplicitCount, std::uint32_t{1}, std::memory_order_relaxed);
+             break;
+     }
+ }
+@@ -173,7 +167,7 @@
+     s.publishTimerPending = convo::consumeAtomic(m_publishTimerPendingCount, std::memory_order_acquire);
+     s.publishPrepare      = convo::consumeAtomic(m_publishPrepareCount, std::memory_order_acquire);
+     s.publishRelease      = convo::consumeAtomic(m_publishReleaseCount, std::memory_order_acquire);
+-    s.publishOther        = convo::consumeAtomic(m_publishOtherCount, std::memory_order_acquire);
++    s.publishExplicit     = convo::consumeAtomic(m_publishExplicitCount, std::memory_order_acquire);
+     s.reclaimOnlyRuns     = convo::consumeAtomic(m_reclaimOnlyRuns, std::memory_order_acquire);
+     s.idleTicks           = convo::consumeAtomic(m_driverIdleTicks, std::memory_order_acquire);
+     s.offThreadRejects    = convo::consumeAtomic(m_driverOffThreadRejects, std::memory_order_acquire);
+@@ -318,9 +312,8 @@
+     parallelBufferCapacity = 0;
+     structureXfadeBufferCapacity = 0;
+     // [P1-14] 保留中の advanceEpoch を一括実行
+-    // ★ 段階①: publish 理由（releaseResources 経由）
+-    setPublishReasonForNextFlush(PublishReason::Release);
+-    flushPendingEpochAdvance();
++    // ★ 段階① v2: publish 理由を引数で明示（releaseResources 経由）
++    flushPendingEpochAdvance(PublishReason::Release);
+     juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: end");
+ }
+ 
+@@ -879,9 +872,8 @@
+     }
+ 
+     // [P1-14] 保留中の advanceEpoch を一括実行
+-    // ★ 段階①: publish 理由（prepareToPlay 経由）
+-    setPublishReasonForNextFlush(PublishReason::Prepare);
+-    flushPendingEpochAdvance();
++    // ★ 段階① v2: publish 理由を引数で明示（prepareToPlay 経由）
++    flushPendingEpochAdvance(PublishReason::Prepare);
+ 
+     sendChangeMessage();
+ }

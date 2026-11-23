@@ -1,0 +1,13 @@
+ .github/scripts/isr-verify-proof-scope.ps1         | 407 ++++++++++-
+ .../scripts/test-isr-verify-proof-scope-lexer.ps1  | 207 ++++++
+ .github/scripts/test-isr-verify-proof-scope.ps1    | 790 +++++++++++++++++++++
+ src/audioengine/AtomicAccess.h                     |  24 +-
+ src/audioengine/ISRDebugRuntime.cpp                |   5 +-
+ src/audioengine/ISRDebugRuntime.h                  |   4 +-
+ src/audioengine/ISRRetireLatency.h                 | 458 ++++++------
+ src/audioengine/WorldLifetimeRecorder.h            |  74 +-
+ src/core/EpochDomain.h                             |   2 +-
+ src/core/ReaderMeasureRegistry.h                   |  32 +-
+ src/core/ScopedEpochReader.h                       |  23 +-
+ src/core/SnapshotCoordinator.h                     |   3 +-
+ 12 files changed, 1705 insertions(+), 324 deletions(-)

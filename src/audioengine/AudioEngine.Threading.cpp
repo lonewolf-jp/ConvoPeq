@@ -10,6 +10,7 @@
 #include "DSPLifetimeManager.h"            // ★ FUTURE-9: runCoordinatorPhase
 #include "ISRCoordinatorLoop.h"            // ★ FUTURE-9: coordinatorLoop_ complete type
 #include "RtMeasureRing.h"                 // R-06 / U2: 1 秒ごとの非 RT 集計
+#include "../convolver/ConvolverStopProbe.h"   // ★ gate measurement: 停止レイテンシ計測（既定 OFF）
 
 //==============================================================================
 // [P0-15] AudioEngine.Threading.cpp — 3PR分割済み.
@@ -410,8 +411,11 @@ void AudioEngine::shutdownCoordinatorLoop() noexcept
 {
     if (coordinatorLoop_)
     {
+        convo::probe::Span probeCoordStop ("coord_stop", 0, 0, 0);   // ★ gate measurement（既定 OFF）
         // ★ Q2: join の成否を観測可能にする（Q2 は join 成功のみを producer 不在とみなす）。
         const bool joined = coordinatorLoop_->stopLoop();
+        probeCoordStop.setCancelled (! joined);
+        convo::probe::noteMark ("coord_stop_result", joined ? 1 : 0, 0);
         coordinatorLoop_.reset();
         convo::publishAtomic(coordinatorLoopStopped, joined, std::memory_order_release);
     }

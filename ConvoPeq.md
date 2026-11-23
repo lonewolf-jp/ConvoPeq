@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-08 10:08:09
+> Generated: 2026-11-14 15:27:23
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -88,6 +88,7 @@
         │   ├── ISRRetire.cpp
         │   ├── ISRRetire.h
         │   ├── ISRRetireLane.h
+        │   ├── ISRRetireLatency.h
         │   ├── ISRRetireOverflowRing.h
         │   ├── ISRRetireRouter.cpp
         │   ├── ISRRetireRouter.h
@@ -112,6 +113,7 @@
         │   ├── PublicationAdmission.h
         │   ├── PublicationExecutor.cpp
         │   ├── PublicationExecutor.h
+        │   ├── RetireLatencyTeardownReporter.h
         │   ├── RetireQuarantineStore.h
         │   ├── RetryScheduler.cpp
         │   ├── RetryScheduler.h
@@ -141,7 +143,8 @@
         │   ├── TelemetryRecorder.cpp
         │   ├── TelemetryRecorder.h
         │   ├── WorldLifecycleAudit.cpp
-        │   └── WorldLifecycleAudit.h
+        │   ├── WorldLifecycleAudit.h
+        │   └── WorldLifetimeRecorder.h
         ├── AudioSegmentBuffer.h
         ├── CacheManager.cpp
         ├── CacheManager.h
@@ -189,8 +192,10 @@
         │   ├── ObserveChannel.h
         │   ├── ObservedRuntime.h
         │   ├── RCUReader.h
+        │   ├── ReaderMeasureRegistry.h
         │   ├── RebuildTypes.h
         │   ├── RetireBoundaryTelemetry.h
+        │   ├── RetireDomain.h
         │   ├── RuntimePublicationCoordinator.h
         │   ├── RuntimeReaderContext.h
         │   ├── RuntimeStore.h
@@ -353,6 +358,7 @@
         │   ├── D8_1_WrapperCacheTests.cpp
         │   ├── D8_2_B_2_Tests.cpp
         │   ├── DeferredDeletionQueueReclaimTests.cpp
+        │   ├── DomainTagTests.cpp
         │   ├── DSPHandleTableTests.cpp
         │   ├── EQAnalysisUnitTests.cpp
         │   ├── EQBoundExcessBenchmark.cpp
@@ -364,6 +370,7 @@
         │   ├── ISRRuntimeIdentityGeneratorsTests.cpp
         │   ├── ISRSemanticValidationTests.cpp
         │   ├── ISRSoakTests.cpp
+        │   ├── LoaderCurrencyContractTests.cpp
         │   ├── MpscBoundedRingTests.cpp
         │   ├── MT-NUPC-Measurement.cpp
         │   ├── NormalRetireDSPHandleCompareTests.cpp
@@ -397,6 +404,7 @@
         │   ├── STG10ReaderQuarantineTests.cpp
         │   ├── STG11D2SnapshotRetireTests.cpp
         │   ├── StuckReaderFallbackDrainTests.cpp
+        │   ├── TailLayerIntegrityTests.cpp
         │   └── TerminalTelemetryContractTests.cpp
         ├── tools/
         │   └── build_identity_gate.py
@@ -419,7 +427,10 @@ REM ============================================================================
 REM build.bat - build script for Windows terminal (UTF-8)
 REM
 REM Usage:
-REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [-DVAR]
+REM   build.bat [Debug|Release] [clean] [nopause] [pgo-gen | pgo-use] [icx|icpx] [app] [-DVAR]
+REM
+REM   app : ConvoPeq.exe だけをビルドする（テストターゲットはビルドしない）
+REM          例: build.bat Release icx app
 REM
 REM   -DVAR[=VALUE] : CMake definition (SHIFT解析方式対応、引用符不要).
 REM           Examples:
@@ -443,6 +454,7 @@ set "PGO_MODE=normal"
 set "DO_CLEAN=0"
 set "NO_PAUSE=0"
 set "COMPILER_MODE=msvc"
+set "TARGET_MODE=all"
 set "CMAKE_EXTRA_FLAGS="
 
 :argloop
@@ -460,6 +472,7 @@ if /I "%arg:~0,2%"=="-D" (
     if /i "%arg%"=="pgo-use" set "PGO_MODE=pgo-use"
     if /i "%arg%"=="icx"   set "COMPILER_MODE=icx"
     if /i "%arg%"=="icpx"  set "COMPILER_MODE=icpx"
+    if /i "%arg%"=="app"   set "TARGET_MODE=app"
 )
 shift
 goto :argloop
@@ -484,6 +497,7 @@ echo [INFO] Final PGO_FLAGS: %CMAKE_PGO_FLAGS%
 echo [INFO] BUILD_CONFIG: %BUILD_CONFIG%
 echo [INFO] PGO_MODE: %PGO_MODE%
 echo [INFO] COMPILER_MODE: !COMPILER_MODE!
+echo [INFO] TARGET_MODE: !TARGET_MODE!
 echo [INFO] Extra CMake flags: !CMAKE_EXTRA_FLAGS!
 REM icx PGO exclusion: icx/icpx does not support PGO
 if not "!COMPILER_MODE!"=="msvc" if not "!PGO_MODE!"=="normal" (
@@ -658,7 +672,12 @@ set "NINJA_FLAGS="
 REM icx/icpx は /Qipo リンク等でメモリを大量消費するため並列度を -j 2 に抑える（LLVM out of memory 回避）
 if /i "!COMPILER_MODE!"=="icx" set "NINJA_FLAGS=-- -j 2"
 if /i "!COMPILER_MODE!"=="icpx" set "NINJA_FLAGS=-- -j 2"
-cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
+if /i "!TARGET_MODE!"=="app" (
+    echo [INFO] Building the ConvoPeq target only - test targets are skipped...
+    cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target ConvoPeq %NINJA_FLAGS%
+) else (
+    cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% %NINJA_FLAGS%
+)
 if not errorlevel 1 goto build_ok
 
 REM icx 初回ビルドで RC1109 発生時は一度だけリトライ
@@ -678,7 +697,7 @@ exit /b 1
 
 :build_ok
 
-if /i "!COMPILER_MODE!"=="icx" (
+if /i "!COMPILER_MODE!"=="icx" if /i not "!TARGET_MODE!"=="app" (
     echo [INFO] Building Phase 8 test targets...
     cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target GainStagingContractTests --target EQProcessorMaxGainTests %NINJA_FLAGS% >nul 2>&1
 )
@@ -764,7 +783,7 @@ exit /b 0
 
 ```
 #============================================================================
-# CMakeLists.txt  ── v0.6.11 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
+# CMakeLists.txt  ── v0.6.12 (JUCE 8.0.12 / VS Code + MSVC + icx + Windows 11)
 #
 # ビルド環境:
 #   - JUCE: 8.0.12
@@ -892,11 +911,16 @@ endif()
 #------------------------------------------------------------
 option(CONVOPEQ_ENABLE_ISR_TESTS "Enable minimal ISR runtime regression tests" ON)
 option(CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS "Enable runtime diagnostic logging (XRUN/MEM/VERIFY/WORLD/etc.)" OFF)
+# IR ロード経路の診断出力（stderr）。既定 OFF。
+# stderr が未ドレインのパイプの場合、LoaderThread の書き込みが止まり IR ロードが失敗するため、
+# 通常ビルドでは出力しない。調査時のみ ON にする（既定ビルドで stderr 出力ゼロを保証する）。
+option(CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS "Enable IR load-chain diagnostics on stderr (investigation builds only)" OFF)
 option(CONVOPEQ_ENABLE_TEST_HOOKS "Compile the audio-block test hook (verification builds only; default OFF)" OFF)
 
-# work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 OFF。
-# ON は characterization 用の明示指定のみ（default ON 化は別判断・HOLD）。
-option(CONVOPEQ_CORRECT_POLYPHASE_GAIN "Correct polyphase gain convention (B-1)" OFF)
+# work113 P1-1（B-1 / 案E）: polyphase gain convention の補正。既定 ON（Part 8 E）。
+# 旧挙動（2×/4×/8× で 0.75 / 0.5625 / 0.421875 = −2.50 / −5.00 / −7.50 dB）は
+# -DCONVOPEQ_CORRECT_POLYPHASE_GAIN=OFF で再現できる。
+option(CONVOPEQ_CORRECT_POLYPHASE_GAIN "Correct polyphase gain convention (B-1)" ON)
 
 if(CONVOPEQ_ENABLE_ISR_TESTS)
     enable_testing()
@@ -1509,6 +1533,22 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME DeferredDeletionQueueReclaimTests
         COMMAND DeferredDeletionQueueReclaimTests)
 
+    # ★ domain tag (v2.9): §7.2 のレコーダ／型の契約を固定する単体テスト（JUCE 非依存）。
+    #   #15-a/b/c、#6/#8/#13、#9/#10 を実行する。15-c-2 は --assert-probe を
+    #   デバッガ接続で起動して確認する（通常の ctest では 15-c-1 相当＝ブレークしない）。
+    add_executable(DomainTagTests
+        src/tests/DomainTagTests.cpp
+    )
+    target_compile_features(DomainTagTests PRIVATE cxx_std_20)
+    target_include_directories(DomainTagTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    )
+    add_test(NAME DomainTagTests
+        COMMAND DomainTagTests)
+
     # ★ work88 (FUTURE-10 前提 0): MpscBoundedRing 単体テスト（Vyukov bounded MPSC）
     #   1/N producers・queue full・FIFO・producer hole・cross-type FIFO を検証
     add_executable(MpscBoundedRingTests
@@ -1813,6 +1853,19 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     add_test(NAME RuntimePublicationCoordinatorRejects COMMAND RuntimePublicationCoordinatorTests)
     add_test(NAME ISRSemanticValidationRejects COMMAND ISRSemanticValidationTests)
     add_test(NAME InvariantINV3INV5 COMMAND invariant_INV3_INV5Tests)
+    # ★ 2026-11-08: ローダー世代契約（stale 拒否）の固定。ConvolverProcessor の
+    #   loaderGeneration_ 削除に伴い、実効機構である GenerationManager のセマンティクスを
+    #   engine 非依存のテストで固定する。
+    add_executable(LoaderCurrencyContractTests src/tests/LoaderCurrencyContractTests.cpp)
+    target_include_directories(LoaderCurrencyContractTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_features(LoaderCurrencyContractTests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(LoaderCurrencyContractTests PRIVATE /EHsc /utf-8)
+    endif()
+    add_test(NAME LoaderCurrencyContract COMMAND LoaderCurrencyContractTests)
     add_test(NAME AdmissionPackedState COMMAND AdmissionPackedStateTests)
     add_test(NAME RetireGraceSemantics COMMAND RetireGraceSemanticsTests)
     add_test(NAME ShutdownRetireIntentDrain COMMAND ShutdownRetireIntentDrainTests)
@@ -2112,6 +2165,62 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
     # ★ IPP include (リンクは IPP 設定セクションで追加)
     if(DEFINED ENV{IPPROOT})
         target_include_directories(MTNUPCMeasurement SYSTEM PRIVATE "$ENV{IPPROOT}/include")
+    endif()
+
+    #------------------------------------------------------------
+    # ★ Part 8 F/H/I: テール層の完全再構成・テール保持・先頭パーティション欠落の回帰
+    #   受入 ID: F-1〜F-5 / H-1〜H-4 / I-1〜I-2（実装準備仕様 §3.2）
+    #------------------------------------------------------------
+    juce_add_console_app(TailLayerIntegrityTests)
+    target_sources(TailLayerIntegrityTests PRIVATE
+        src/tests/TailLayerIntegrityTests.cpp
+        src/MKLNonUniformConvolver.cpp
+        src/FFTBackend.cpp
+        src/FFTExecutionContext.cpp
+    )
+    target_include_directories(TailLayerIntegrityTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/audioengine
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/eqprocessor
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(TailLayerIntegrityTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/r8brain-free-src
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(TailLayerIntegrityTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TailLayerIntegrityTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(TailLayerIntegrityTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(TailLayerIntegrityTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    if(TARGET IPP::ippcore)
+        target_link_libraries(TailLayerIntegrityTests PRIVATE IPP::ippcore IPP::ipps)
+    endif()
+    target_link_libraries(TailLayerIntegrityTests PRIVATE r8brain Psapi)
+    add_test(NAME TailLayerIntegrityTests COMMAND TailLayerIntegrityTests)
+    juce_generate_juce_header(TailLayerIntegrityTests)
+    target_link_libraries(TailLayerIntegrityTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+    if(DEFINED ENV{IPPROOT})
+        target_include_directories(TailLayerIntegrityTests SYSTEM PRIVATE "$ENV{IPPROOT}/include")
     endif()
 endif()
 
@@ -2426,6 +2535,7 @@ target_compile_definitions(ConvoPeq PRIVATE
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
     CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
     $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS}>:CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS=1>
     $<$<BOOL:${CONVOPEQ_ENABLE_TEST_HOOKS}>:CONVOPEQ_ENABLE_TEST_HOOKS=1>
     $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
     # CONVOPEQ_DIAG_SAMPLE_MASK は DiagnosticsConfig.h で自動設定 (Release:0xFF, Debug:0x3F)。
@@ -3090,6 +3200,13 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         CONVOPEQ_UNIT_TESTS=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
+        # ★ 2026-11-08: 本ターゲットは ConvoPeq と同じエンジン TU をビルドする。
+        #   定義が無いと TUs の間で JUCE_DSP_USE_INTEL_MKL の defined 状態が変わり、
+        #   DiagnosticsConfig.h の allocator 選択（mkl vs system）が TU ごとに食い違って
+        #   ODR 違反 → aligned_free で AV になる（FrozenRuntimeWorld の破棄経路で実測）。
+        #   MKL が無い構成ではリンクできないため、検出時のみ定義する（未定義でも
+        #   DiagnosticsConfig.h 側の値判定により全 TU が system allocator で一貫する）。
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LIFECYCLE=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_REBUILD=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD=1
@@ -3099,6 +3216,7 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_RUNTIME=1
         CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI=1
         $<$<BOOL:${CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS}>:CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS=1>
+    $<$<BOOL:${CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS}>:CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS=1>
     $<$<BOOL:${CONVOPEQ_ENABLE_TEST_HOOKS}>:CONVOPEQ_ENABLE_TEST_HOOKS=1>
         $<$<BOOL:${CONVOPEQ_CORRECT_POLYPHASE_GAIN}>:CONVOPEQ_CORRECT_POLYPHASE_GAIN=1>
         JUCE_DONT_DEFINE_MIN_MAX_MACROS=1
@@ -4590,16 +4708,17 @@ inline T exchangeAtomic(std::atomic<T>& dst,
     return std::atomic_exchange_explicit(&dst, static_cast<T>(std::forward<U>(value)), order);
 }
 
-template <typename T>
+template <typename T, typename U,
+          typename = std::enable_if_t<std::is_convertible_v<U, T>>>
 inline bool compareExchangeAtomic(std::atomic<T>& dst,
                                   T& expected,
-                                  T desired,
+                                  U&& desired,
                                   std::memory_order success = std::memory_order_acq_rel, // default success acq_rel: CAS成立時の双方向同期
                                   std::memory_order failure = std::memory_order_acquire) noexcept // default failure acquire: 競合更新の可視化
 {
     return std::atomic_compare_exchange_strong_explicit(&dst,
                                                         &expected,
-                                                        desired,
+                                                        static_cast<T>(std::forward<U>(desired)),
                                                         success,
                                                         failure);
 }
@@ -4638,6 +4757,23 @@ inline T fetchAndAtomic(std::atomic<T>& dst,
                         std::memory_order order = std::memory_order_acq_rel) noexcept // default acq_rel: ビット消去の公開と観測を両立
 {
     return std::atomic_fetch_and_explicit(&dst, static_cast<T>(value), order);
+}
+
+// Weak form: retains spurious-failure semantics. The failure order must not be
+// stronger than the success order and must not be release/acq_rel (C++ [atomics.order]).
+template <typename T, typename U,
+          typename = std::enable_if_t<std::is_convertible_v<U, T>>>
+inline bool compareExchangeWeakAtomic(std::atomic<T>& dst,
+                                      T& expected,
+                                      U&& desired,
+                                      std::memory_order success = std::memory_order_acq_rel,
+                                      std::memory_order failure = std::memory_order_acquire) noexcept
+{
+    return std::atomic_compare_exchange_weak_explicit(&dst,
+                                                      &expected,
+                                                      static_cast<T>(std::forward<U>(desired)),
+                                                      success,
+                                                      failure);
 }
 
 // Pointer-specialized aliases for readability in publication boundaries.
@@ -6020,6 +6156,8 @@ void AudioEngine::enqueuePublicationIntentForRuntimeCommit(DSPCore* newDSP,
 #include "NoiseShaperLearner.h"
 #include "ISRRetireRouter.h"
 #include "DSPLifetimeManager.h"
+#include "ISRRetireLatency.h"
+#include "WorldLifetimeRecorder.h"   // ★ A(D1): 退役遅延の測定
 
 namespace {
 void diagLog(const juce::String& message)
@@ -6059,6 +6197,10 @@ AudioEngine::AudioEngine()
     , worldAuthority_(runtimePublicationBridge_)
     , shutdownRuntime_(runtimePublicationBridge_)  // ★ dash2 §2.2 (Step 14 — Authority Singularization 完了): constructor 固定注入（setReclaimAuthority 廃止 — immutable association）
 {
+    // ★ A(D1): 測定器はエンジン 1 個につき 1 回リセットする（前インスタンスの観測を持ち越さない）
+    convo::isr::RetireLatencyRecorder::instance().reset();
+    convo::isr::WorldLifetimeRecorder::instance().reset();   // ★ Item2: World 寿命の記録
+
     // ★ engineInstanceId 初期化 (全局一意)
     engineInstanceId_ = s_nextEngineInstanceId_.fetch_add(1, std::memory_order_relaxed) + 1; // NOLINT(atomic-dot-call): relaxed counter
 
@@ -6348,6 +6490,9 @@ AudioEngine::~AudioEngine()
         m_retireRouter->drainAllQuarantineStore();  // Q + E + T force-drain (epoch-agnostic, Audio Thread stopped)
     }
 
+    // ★ A(D1): 最終 drain 後の状態を違反レポートへ反映する（runtime 段階は保持される）
+    debugRuntime_.emitFinalViolationReport();
+
     // ★ F1'-b (2026-10-25) 監査対応（欠陥 C）: 延期リストの最終 drain。
     //   EBR store を全部 drain した後でも、pin 残留で延期された DSPCore は
     //   エンジン再試行リストに残っている。ここで 1 度試行し、
@@ -6556,7 +6701,7 @@ void AudioEngine::calcEQResponseCurve(float* outMagnitudesL,
     // 状態スナップショットを取得して一貫性を確保
     // A-closure (reader safety): the EBR reader slot is held for the whole dereference
     // window below; if protection is unavailable we fail closed (flat response).
-    auto eqReadGuard = uiEqEditor.acquireReadGuard();
+    auto eqReadGuard = uiEqEditor.acquireReadGuard("EQResponse");   // ★ 計測タグ
     auto eqState = eqReadGuard.active() ? uiEqEditor.getEQState() : nullptr;
 
     if (eqState == nullptr)
@@ -6808,6 +6953,7 @@ struct CoeffSet {
 };
 
 #include "RetrySchedulerTypes.h"
+#include "WorldLifetimeRecorder.h"   // ★ Item2: RuntimeWorld 寿命の記録
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstdint>
@@ -6890,7 +7036,8 @@ class RetryScheduler; // ★ D101-24 Step 1: forward-declared (unique_ptr owners
 // ISRRetireRouter forward-declared below (reduce include chain for C1060)
 #include "ISREvidenceExporter.h"
 #include "ISRWorldRetirementTelemetry.h"   // ★ T1: World retirement observation telemetry（観測値のみ・D86）
-#include "ISRWorldRetirementReference.h"   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
+#include "ISRWorldRetirementReference.h"
+#include "RetireLatencyTeardownReporter.h"   // ★ W-2: postTeardown 段の捕捉   // ★ T1: reference observer（event-driven・measurement only・D94/D98）
 #include "RuntimeHealthMonitor.h"
 #include "RuntimePublicationValidator.h"
 #include "WorldLifecycleAudit.h"
@@ -7374,6 +7521,13 @@ class AudioEngine : public juce::AudioSource,
                                      private juce::AsyncUpdater
 {
 public:
+    // ★ W-2 (2026-11-10, Owner 限定承認): このクラスの**最初の非 static データメンバ**。
+    //   C++ のメンバ破棄は宣言の逆順であるため、このデストラクタが最後に走る
+    //   （= 他のメンバがすべて破棄された後の postTeardown 段を記録できる）。
+    //   基底クラス 6 つは退役を発生させないことを監査済み
+    //   （doc/work113/20261110-2330_C2実装と計測/w2_post_teardown_design_v2.md §2）。
+    convo::isr::RetireLatencyTeardownReporter m_teardownReporter;
+
     friend class convo::RuntimeBuilder;
     using SampleType = double; // 内部DSP精度 (JUCE推奨)
 
@@ -8409,6 +8563,15 @@ public:
 
     // ★ A-2.5: シャットダウン完了条件の監査構造体を収集
     [[nodiscard]] convo::isr::RuntimeDrainAudit collectDrainAudit() noexcept;
+
+    // ★ DRAIN_DIAG (2026-11-13): 診断専用 — pending reclaim の件数。
+    //   isFullyDrained() の条件2（pendingReclaimHandles_.empty()）と同じ mutex で保護して読む。
+    //   値の取得のみで状態は変えない（ロックなしの size() 読み取りは禁止）。
+    [[nodiscard]] std::size_t pendingReclaimHandleCount() const noexcept
+    {
+        const std::lock_guard<std::mutex> lock (pendingReclaimHandlesMutex_);
+        return pendingReclaimHandles_.size();
+    }
 
     // ★ A-1.6: 3系統の隔離を1トランザクションとして実行
     bool quarantineSlot(uint32_t slot, uint64_t generation,
@@ -10740,6 +10903,7 @@ public:
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                convo::isr::WorldLifetimeRecorder::instance().recordDestroy(ptr);   // ★ Item2: 物理破棄
                 ptr->unseal();
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
@@ -10753,9 +10917,16 @@ public:
             if (world == nullptr)
                 return;
 
+            // ★ Item2: 拒否された world は commit に到達しないため、拒否時点を起点として記録する。
+            convo::isr::WorldLifetimeRecorder::instance().recordCommit(
+                world,
+                static_cast<std::uint64_t>(world->worldId),
+                convo::isr::WorldLifetimeRecorder::Path::Rejected);
+
             engine_->enqueueDeferredDeleteNonRt(world, [](void* p)
             {
                 auto* ptr = static_cast<RuntimePublishWorld*>(p);
+                convo::isr::WorldLifetimeRecorder::instance().recordDestroy(ptr);   // ★ Item2: 物理破棄
                 ptr->unseal();
                 ptr->~RuntimePublishWorld();
                 convo::aligned_free(ptr);
@@ -11444,7 +11615,21 @@ inline convo::isr::RetireEnqueueResult enqueueDeferredDeleteNonRtWithResult(void
         //   shutdown 中は Audio Thread 停止済みのため epoch は安全 → 即時破棄される。
         //   invariant: 「caller → authority への ownership transfer が成立してから return」
         const uint64_t epoch = markRetireEpoch();
+
+        // ★ D1-shutdown (2026-11-10): この分岐は enqueueRetire を通らないため、要求記録が
+        //   欠落していた（完了だけが terminalReclaim の完了フックで記録され unmatched になる）。
+        //   移送の直前に要求を記録し、完了フックと同じ recorder・同じ object で対応させる。
+        //   移送が失敗した場合に限り、この分岐が作成した記録だけを取り消す（既存記録は触らない）。
+        bool requestCreated = false;
+        const std::uint64_t requestId =
+            convo::isr::RetireLatencyRecorder::instance().recordRequest (
+                ptr, epoch, 0u, 0xFFFFFFFFu, &requestCreated);
+
         const bool transferred = m_retireRouter->shutdownReclaim(ptr, deleter, epoch, type);
+
+        if (! transferred && requestCreated && requestId != 0u)
+            convo::isr::RetireLatencyRecorder::instance().cancelRequestById (ptr, requestId);
+
         return transferred ? convo::isr::RetireEnqueueResult::Success
                            : convo::isr::RetireEnqueueResult::Shutdown;
     }
@@ -11652,6 +11837,28 @@ inline void requestReclaimHandle(convo::isr::DSPHandle handle) noexcept
     }
 }
 
+// ★ Q5 (2026-11-08): EpochQuiescenceEvidence の観測点。
+//   epoch / reader registration / active reader を同一の非 RT 点で取得する。
+//   shutdown 経路では producer は join 済み・reader 登録は閉鎖済みのため、
+//   この観測後に新規 reader は増えない（activeReaders は単調減少）。
+//   m_retireRouter が無い場合は captured=false のまま返し、Q5 を成立させない
+//   （観測できない状態を quiescence とみなさない — Q4 の null 既定より厳しくする）。
+[[nodiscard]] convo::isr::EpochQuiescenceEvidence
+captureEpochQuiescenceEvidence() const noexcept
+{
+    convo::isr::EpochQuiescenceEvidence evidence;
+    evidence.epoch = m_epochDomain.currentEpoch();
+    evidence.epochGeneration = m_epochDomain.epochGeneration();
+    evidence.readerRegistrationGeneration = m_epochDomain.readerRegistrationGeneration();
+    evidence.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();
+    if (m_retireRouter != nullptr)
+    {
+        evidence.activeReaders = m_retireRouter->activeReaderCount();
+        evidence.minReaderEpoch = m_retireRouter->minReaderEpoch();
+        evidence.captured = true;
+    }
+    return evidence;
+}
 // ★ dash2 §2.2 (Phase A2 — Step 12): Shutdown 時の Proof → Permit → reclaim 供給ヘルパー。
 //   CacheMap / ReleaseResources は「caller-side shutdown 判断」を自身から撤去し（AC-2）、
 //   本ヘルパーに handle を渡すだけで、ShutdownRuntime が Proof 生成 → Permit 発行 →
@@ -11671,15 +11878,23 @@ inline bool tryShutdownQuiescentReclaim(convo::isr::DSPHandle handle) noexcept
     convo::isr::ShutdownRuntime::QuiescenceObservation obs;
     obs.admissionReservationsZero = (shutdownRuntime_.outstanding() == 0);  // Q0
     // D101-31-B B-6: outstanding() is the authority. AudioEngine must NOT access packedState_ directly.
-    obs.allProducersJoined = true;          // Q2: shutdown 確定 + producer join 完了
+    // ★ Q2 (2026-11-08): 実測。CoordinatorLoop と RebuildThread の join 完了のみを true とする
+    //   （rebuildThreadStopped は join 後に publish — R8。coordinatorLoopStopped は
+    //     stopLoop の join 成功時のみ publish）。ShutdownRuntime 側でも joinProducers() 成功と
+    //     AND されるため、ここが true でも join 未実施なら Proof は成立しない。
+    obs.allProducersJoined = convo::consumeAtomic(rebuildThreadStopped, std::memory_order_acquire)
+                          && convo::consumeAtomic(coordinatorLoopStopped, std::memory_order_acquire);
     obs.readerRegistrationClosed = m_epochDomain.readerRegistrationClosed();  // Q3
     obs.activeReadersZero = (m_retireRouter != nullptr)
         ? (m_retireRouter->activeReaderCount() == 0) : true;                  // Q4
-    obs.epochSettled = true;                // Q5: EpochQuiescenceEvidence（shutdown 確定後）
-    obs.postStopEnqueueZero = true;         // Q6: postStopEnqueue == 0（shutdown 確定後）
+    // ★ Q5 (2026-11-08): EpochQuiescenceEvidence（H.11.13.3）。bool ではなく観測束で渡し、
+    //   ShutdownRuntime が quiescent() と generation 一致を検証する。
+    obs.epochEvidence = captureEpochQuiescenceEvidence();
     obs.noResurrection = !shutdownRuntime_.isAdmissionOpen();                 // Q7
-    obs.epochGeneration = m_epochDomain.epochGeneration();                    // G19
-    obs.readerRegistrationGeneration = m_epochDomain.readerRegistrationGeneration();  // G20
+    // ★ G19/G20: identity に束縛する generation は evidence と同じスナップショットを使う
+    //   （別々に読み直すと、同一 transaction 内でも値がずれ得る）。
+    obs.epochGeneration = obs.epochEvidence.epochGeneration;                  // G19
+    obs.readerRegistrationGeneration = obs.epochEvidence.readerRegistrationGeneration;  // G20
 
     auto proof = shutdownRuntime_.tryMakeQuiescenceProof(obs);
     if (!proof.has_value() || !proof->valid())
@@ -11912,6 +12127,14 @@ inline bool rollbackDSPHandleRegistration(convo::isr::DSPHandle handle) noexcept
             worldAuthority_.registry().unregister(seqId);
             return { convo::PublishStageResult::Failed, OwnershipDisposition::CallerDestroy };
         }
+
+        // ★ Item2: commit（所有者移譲の完了）を記録する。D1 とは別系統。
+        convo::isr::WorldLifetimeRecorder::instance().recordCommit(
+            newWorld,
+            static_cast<std::uint64_t>(newWorld->worldId),
+            shutdownRuntime_.isShutdownInProgress()
+                ? convo::isr::WorldLifetimeRecorder::Path::Shutdown
+                : convo::isr::WorldLifetimeRecorder::Path::Publish);
     }
 
     // 3. ISR 共通 Intent Queue へ enqueue（Producer = enqueue, Consumer = CoordinatorLoop）
@@ -12153,7 +12376,8 @@ public:
 
     // スナップショット基盤（Phase 2）
     // ==================================================================
-    convo::EpochDomain m_epochDomain;
+    // ★ domain tag (v2.9): Engine の epoch ドメイン（退役は EngineISR に帰属する）
+    convo::EpochDomain m_epochDomain { convo::RetireDomainId::EngineISR };
     // ★ T1 (D98): reference observer — m_retireRouter より前に宣言（初期化順: observer → m_retireRouter・
     //   破棄順: m_retireRouter → observer・D97 invariant を満たす）。measurement only・retirement authority でない。
     convo::isr::WorldRetirementReferenceObserver worldRetirementReference_;
@@ -12186,6 +12410,10 @@ public:
     //   Non-RT only (called from CoordinatorLoop::run).
     void waitForDrainSignalOrTimeout(int timeoutMs) noexcept;
     std::unique_ptr<convo::isr::CoordinatorLoop> coordinatorLoop_;
+    // ★ Q2 (2026-11-08): CoordinatorLoop の join 完了（stopLoop の stopThread 成功）でのみ true。
+    //   startCoordinatorLoop() で false、shutdownCoordinatorLoop() で join 結果を publish する。
+    //   loop を起動していない場合は「停止済み」として true（producer 不在）。
+    std::atomic<bool> coordinatorLoopStopped { true };
     std::mutex rebuildAdmissionIntentMutex_;
     RebuildAdmissionIntentState rebuildAdmissionPendingIntent_ {};
 
@@ -19433,15 +19661,25 @@ void AudioEngine::releaseResources()
         // ★ C4834 対応: reclaim の戻り値（Proof/Permit 認可結果）を確認。
         //   releaseResources は DrainRetire フェーズで quiescence 成立済みのため true が期待。
         const bool reclaimed = tryShutdownQuiescentReclaim(activeHandle);
-        jassert(reclaimed);
-        juce::ignoreUnused(reclaimed);
+        if (!reclaimed)
+        {
+            // ★ 2026-11-08: Q2/Q5/Q6 を含む Proof が成立しなかった、または Permit が
+            //   reject された。jassert は Release で消えるため、失敗回数を ShutdownRuntime に
+            //   記録して shutdown trace から観測できるようにする（動作は従来どおり継続 —
+            //   物理破棄は retireDetachedCoreForShutdown が handle 台帳経由で行う）。
+            shutdownRuntime_.noteReclaimProofFailure();
+            diagLog("[DIAG] releaseResources: quiescence proof rejected reclaim (active)");
+        }
     }
     if (!fadingHandle.isNull() && fadingHandle != activeHandle)
     {
         dspHandleRuntime_.retire(fadingHandle);
         const bool reclaimed = tryShutdownQuiescentReclaim(fadingHandle);
-        jassert(reclaimed);
-        juce::ignoreUnused(reclaimed);
+        if (!reclaimed)
+        {
+            shutdownRuntime_.noteReclaimProofFailure();
+            diagLog("[DIAG] releaseResources: quiescence proof rejected reclaim (fading)");
+        }
     }
 
     diagLog("[DIAG] releaseResources: before ui processor release");
@@ -19471,6 +19709,26 @@ void AudioEngine::releaseResources()
         RuntimePublicationBridge clearBridge{ *this, runtimePublicationValidator_ };
         clearBridge.retirePublishedRuntimeWorldNonRt(clearedWorld, true);
     }
+
+    // ★ DRAIN_DIAG (2026-11-13): clear→retire 経路の診断（読み取りのみ・処理は変更しない）。
+    //   各値が示すもの（混同禁止）:
+    //     cleared        = clearPublishedRuntimeSnapshotsNonRt が引き渡し対象 World を返したか（1/0）。
+    //                      retire の成否ではない。
+    //     retireResult   = 定数 "void"。retirePublishedRuntimeWorldNonRt は void を返すため、
+    //                      retire 成功/失敗は本経路では判定できない（未確認として扱う）。
+    //     publishedAudit = WorldLifecycleAudit の累計 publish 件数（起動からの累積）。
+    //     retiredAudit   = WorldLifecycleAudit の累計 retire 件数（起動からの累積）。
+    //     activeAudit    = WorldLifecycleAudit の現在 active World 件数。
+    //     terminalAfterRetire = clear→retire 直後に TerminalReclaimAuthority が保持している件数。
+    //                      直後の drainAllQuarantineStore() より前の値である。
+    //   1 shutdown あたり 1 行。
+    diagLog("[DRAIN_DIAG] worldClear cleared=" + juce::String(clearedWorld != nullptr ? 1 : 0)
+            + " retireResult=void"
+            + " publishedAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.publishedCount()))
+            + " retiredAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.retiredCount()))
+            + " activeAudit=" + juce::String(static_cast<juce::int64>(worldLifecycleAudit_.activeWorldCount()))
+            + " terminalAfterRetire=" + juce::String(m_retireRouter != nullptr
+                ? static_cast<juce::int64>(m_retireRouter->terminalReclaimResidentCount()) : juce::int64{0}));
 
     // ★ 15-P-5: clear 後の最終強制 drain（quiescence 確立時のみ）。
     //   clearPublishedRuntimeSnapshotsNonRt が返した oldWorld は enqueueDeferredDeleteNonRt →
@@ -19557,6 +19815,116 @@ void AudioEngine::releaseResources()
         else if (convo::consumeAtomic(rebuildThreadIsRunning, std::memory_order_acquire))
             reason = convo::isr::ShutdownBlockingReason::ActiveBuilder;   // ★ SHUTDOWN-7: Builder が Build Session 進行中
         shutdownRuntime_.markTimedOut(reason);
+
+        // ★ DRAIN_DIAG (2026-11-13): タイムアウト時点の isFullyDrained() 9 条件を 1 回だけ記録する。
+        //   - 値は isFullyDrained()（AudioEngine.Threading.cpp:243-303）が評価する式と同一にする。
+        //     audit.routerPendingRetire は fallbackQueueDepth_ を含む合算のため c3 には使わない（近似禁止）。
+        //   - c1/c4/c5/c6 は collectDrainAudit() の既存結果を再利用（式が同一）。
+        //     c1=deferredPublish / c4=pendingRetire / c5=overflowRingResident / c6=quarantineResident。
+        //   - c2/c3/c7/c8/c9 は同じアクセサを直接読む（読み取りのみ）。
+        //   - drain / reclaim / epoch 前進 / retire は追加しない。処理順序・同期・ロック範囲も変更しない。
+        //   - ポーリングごとではなく、タイムアウトした shutdown 1 回につき 1 行。
+        //   - domain=EngineISR はコード上の前提（AudioEngine.h:5456 / AudioEngine.CtorDtor.cpp:62）。
+        //     実行時にドメインを推定する処理は行わない。
+        const std::uint64_t c3RetireDepth = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->pendingRetireCount()) : 0u;
+        const std::uint64_t c7RetireQuarantine = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->quarantineResidentCount()) : 0u;
+        const std::uint64_t c8TerminalReclaim = (m_retireRouter != nullptr)
+            ? static_cast<std::uint64_t>(m_retireRouter->terminalReclaimResidentCount()) : 0u;
+        const std::size_t c2PendingReclaim = pendingReclaimHandleCount();
+
+        // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): c9 の 14 条件と、退役キュー先頭の epoch 安全条件。
+        //   A2: isFullyDrained() は変更せず、同じ式を診断側（collectDrainBreakdown）に複写している。
+        //   head は peekHead が sequence を前後で確認できたときだけ present になる。
+        const auto c9 = runtimePublicationBridge_.collectDrainBreakdown();
+        // ★ CI-SHUTDOWN-006 (2026-11-14): 診断のために isFullyDrained() の callsite を増やさない。
+        //   policy は runtimePublicationBridge_.isFullyDrained() を AudioEngine.Threading.cpp の
+        //   単一 drain authority に限定している（ReleaseResources から呼ぶと second authority）。
+        //   総合判定は、上で取得済みの collectDrainBreakdown() から述語と同じ 13 条件で求める。
+        //   retireBacklog は C9-A (2026-11-13) で述語から外れているため含めない（診断表示のみ）。
+        const bool c9BridgeDrained =
+            !c9.swapPending
+            && c9.intentQueue == 0
+            && c9.observeDeferredRing == 0
+            && c9.quarantineFallback == 0
+            && c9.recoveryIntentQueue == 0
+            && c9.publicationBacklog == 0
+            && c9.publicationIntentResidency == 0
+            && c9.pendingIntent == 0
+            && c9.reclaimInFlight == 0
+            && c9.quarantineIntentResidency == 0
+            && c9.quarantineRingResidency == 0
+            && !c9.recoveryAdmissionPending
+            && c9.liveRecoveryObligation == 0;
+        const auto head = m_epochDomain.inspectRetireHead();
+        auto u64OrNa = [](bool ok, juce::uint64 v)
+        {
+            return ok ? juce::String(static_cast<juce::int64>(v)) : juce::String("na");
+        };
+
+        juce::String failed;
+        auto addFailed = [&failed](const char* name)
+        {
+            if (failed.isNotEmpty()) failed += ",";
+            failed += name;
+        };
+        if (audit.deferredPublish != 0) addFailed("c1");
+        if (c2PendingReclaim != 0) addFailed("c2");
+        if (c3RetireDepth != 0) addFailed("c3");
+        if (audit.pendingRetire != 0) addFailed("c4");
+        if (audit.overflowRingResident != 0) addFailed("c5");
+        if (audit.quarantineResident != 0) addFailed("c6");
+        if (c7RetireQuarantine != 0) addFailed("c7");
+        if (c8TerminalReclaim != 0) addFailed("c8");
+        if (!c9BridgeDrained) addFailed("c9");
+        if (failed.isEmpty()) failed = "none";
+
+        diagLog("[DRAIN_DIAG] timedOut=1 domain=EngineISR failed=" + failed
+                + " c1_deferredPublish=" + juce::String(static_cast<juce::int64>(audit.deferredPublish))
+                + " c2_pendingReclaim=" + juce::String(static_cast<juce::int64>(c2PendingReclaim))
+                + " c3_retireDepth=" + juce::String(static_cast<juce::int64>(c3RetireDepth))
+                + " c4_lifetimeIntent=" + juce::String(static_cast<juce::int64>(audit.pendingRetire))
+                + " c5_overflowRing=" + juce::String(static_cast<juce::int64>(audit.overflowRingResident))
+                + " c6_dspQuarantine=" + juce::String(static_cast<juce::int64>(audit.quarantineResident))
+                + " c7_retireQuarantine=" + juce::String(static_cast<juce::int64>(c7RetireQuarantine))
+                + " c8_terminalReclaim=" + juce::String(static_cast<juce::int64>(c8TerminalReclaim))
+                + " c9_bridgeDrained=" + juce::String(c9BridgeDrained ? 1 : 0)
+                + " readers=" + juce::String(static_cast<juce::int64>(audit.activeReaderCount))
+                + " reclaimAttempts=" + juce::String(static_cast<juce::int64>(audit.reclaimAttemptCount))
+                + " reclaimSuccess=" + juce::String(static_cast<juce::int64>(audit.reclaimSuccessCount))
+                + " fallbackDepth=" + juce::String(static_cast<juce::int64>(
+                      convo::consumeAtomic(fallbackQueueDepth_, std::memory_order_acquire)))
+                + " published=" + juce::String(static_cast<juce::int64>(audit.publishedCount))
+                + " retired=" + juce::String(static_cast<juce::int64>(audit.retiredCount))
+                + " activeWorld=" + juce::String(static_cast<juce::int64>(audit.activeWorldCount))
+                + " c9_swap=" + juce::String(c9.swapPending ? 1 : 0)
+                + " c9_iq=" + juce::String(static_cast<juce::int64>(c9.intentQueue))
+                + " c9_oring=" + juce::String(static_cast<juce::int64>(c9.observeDeferredRing))
+                + " c9_qfb=" + juce::String(static_cast<juce::int64>(c9.quarantineFallback))
+                + " c9_rq=" + juce::String(static_cast<juce::int64>(c9.recoveryIntentQueue))
+                + " c9_rbl=" + juce::String(static_cast<juce::int64>(c9.retireBacklog))
+                + " c9_pbl=" + juce::String(static_cast<juce::int64>(c9.publicationBacklog))
+                + " c9_pir=" + juce::String(static_cast<juce::int64>(c9.publicationIntentResidency))
+                + " c9_pi=" + juce::String(static_cast<juce::int64>(c9.pendingIntent))
+                + " c9_rif=" + juce::String(static_cast<juce::int64>(c9.reclaimInFlight))
+                + " c9_qir=" + juce::String(static_cast<juce::int64>(c9.quarantineIntentResidency))
+                + " c9_qrr=" + juce::String(static_cast<juce::int64>(c9.quarantineRingResidency))
+                + " c9_rap=" + juce::String(c9.recoveryAdmissionPending ? 1 : 0)
+                + " c9_lo=" + juce::String(static_cast<juce::int64>(c9.liveRecoveryObligation))
+                + " head=" + juce::String(head.valid ? "present" : "unavailable")
+                + " headSlot=" + (head.valid ? juce::String(static_cast<juce::int64>(head.headSlotIndex)) : juce::String("na"))
+                + " headSeq=" + (head.valid ? juce::String(static_cast<juce::int64>(head.headSequence)) : juce::String("na"))
+                + " headRetireEpoch=" + u64OrNa(head.valid, head.headEpoch)
+                + " headType=" + (head.valid ? juce::String(static_cast<int>(head.type)) : juce::String("na"))
+                + " headDomain=" + (head.valid ? juce::String(static_cast<int>(head.domainId)) : juce::String("na"))
+                + " headScanned=" + (head.valid ? juce::String(head.scanned ? 1 : 0) : juce::String("na"))
+                + " headScanAgeMs=" + ((head.valid && head.scanned)
+                      ? juce::String(static_cast<juce::int64>(head.firstScanAgeMs)) : juce::String("na"))
+                + " minReaderEpoch=" + juce::String(static_cast<juce::int64>(head.minReaderEpoch))
+                + " currentEpoch=" + juce::String(static_cast<juce::int64>(head.currentEpoch))
+                + " retireEpochLtMinReader=" + (head.valid
+                      ? juce::String(head.epochOlderThanMinReader ? 1 : 0) : juce::String("na")));
     }
 
     // ★ 改善③: World Consistency 診断は VerifyDrained では常に実行（タイムアウト有無に依存しない）
@@ -20737,7 +21105,7 @@ void AudioEngine::requestRebuild(double sampleRate, int samplesPerBlock, bool fo
                     const double processingRate = sampleRate * static_cast<double>(osResult.resolvedOsFactor);
                     // A-closure (reader safety): hold the EBR reader slot across the
                     // getEQState() dereference below (fail-closed when unavailable).
-                    auto eqReadGuard = getEQProcessor().acquireReadGuard();
+                    auto eqReadGuard = getEQProcessor().acquireReadGuard("RebuildDispatch");   // ★ 計測タグ
                     auto* eqState = eqReadGuard.active() ? getEQProcessor().getEQState() : nullptr;
                     if (eqState)
                     {
@@ -22769,8 +23137,42 @@ bool AudioEngine::waitForDrain(int timeoutMs, int pollIntervalMs) noexcept
     const int boundedPollIntervalMs = juce::jlimit(1, 5, pollIntervalMs);
 
     const double startMs = juce::Time::getMillisecondCounterHiRes();
+
+    // ★ C3-D (2026-11-13, Owner 承認): 待機ループ内で epoch を前進させてから drain する。
+    //   設計 §2.7: 前進は waitForDrain に限定し、drainDeferredRetireQueues の内部には置かない
+    //   （同関数は shutdown の他 2 経路からも呼ばれるため）。waitForDrain の呼出し元は
+    //   releaseResources の 2 箇所（100ms / 2000ms）だけで、いずれも shutdown 待機経路。
+    //   設計 §2.3/§2.4: 同一 head identity (slot, sequence, epoch) への前進は最大 1 回。
+    //   epoch 前進は minReaderEpoch を変えないため、Reader の安全条件
+    //   （retireEpoch < minReaderEpoch）はそのまま維持される（INV-C3-3 / INV-C3-7）。
+    bool     advancedOnce = false;
+    uint32_t advancedSlot = 0xFFFFFFFFu;
+    uint32_t advancedSequence = 0xFFFFFFFFu;
+    uint64_t advancedEpoch = 0;
+
     while (!isFullyDrained())
     {
+        // (1) epoch 前進（同一 identity につき 1 回だけ）
+        {
+            const auto head = m_epochDomain.inspectRetireHead();
+            if (head.valid && !head.epochOlderThanMinReader)
+            {
+                const bool sameIdentity = advancedOnce
+                    && head.headSlotIndex == advancedSlot
+                    && head.headSequence == advancedSequence
+                    && head.headEpoch == advancedEpoch;
+                if (!sameIdentity)
+                {
+                    (void) advanceRetireEpoch();
+                    advancedSlot = head.headSlotIndex;
+                    advancedSequence = head.headSequence;
+                    advancedEpoch = head.headEpoch;
+                    advancedOnce = true;
+                }
+            }
+        }
+
+        // (2) drain（必ず前進の後）
         drainDeferredRetireQueues(true);
 
         const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
@@ -22815,6 +23217,8 @@ void AudioEngine::startCoordinatorLoop() noexcept
 {
     jassert(coordinatorLoop_ == nullptr);
     coordinatorLoop_ = std::make_unique<convo::isr::CoordinatorLoop>(*this);
+    // ★ Q2: producer が動き始めた時点で「停止済み」を撤回する。
+    convo::publishAtomic(coordinatorLoopStopped, false, std::memory_order_release);
     coordinatorLoop_->startLoop();
 }
 
@@ -22822,8 +23226,15 @@ void AudioEngine::shutdownCoordinatorLoop() noexcept
 {
     if (coordinatorLoop_)
     {
-        coordinatorLoop_->stopLoop();
+        // ★ Q2: join の成否を観測可能にする（Q2 は join 成功のみを producer 不在とみなす）。
+        const bool joined = coordinatorLoop_->stopLoop();
         coordinatorLoop_.reset();
+        convo::publishAtomic(coordinatorLoopStopped, joined, std::memory_order_release);
+    }
+    else
+    {
+        // loop を起動していない = producer 不在（停止済みとして扱う）。
+        convo::publishAtomic(coordinatorLoopStopped, true, std::memory_order_release);
     }
 }
 
@@ -23517,6 +23928,19 @@ void AudioEngine::timerCallback()
     const convo::RuntimeReaderContext messageCtx{ messageThreadRcuReader, convo::ObserveChannel::Message };
     const auto runtimeReadHandle = makeRuntimeReadHandle(messageCtx);
     const auto* runtimeWorld = getRuntimeWorldFromReadHandle(runtimeReadHandle);
+
+    // ★ 段階① (2026-11-11, Owner 承認): EQ ドメインの reclaim ドライバ（100 ms・Message Thread）
+    //   - publish（epoch 前進）は m_epochAdvancePending が true のときだけ。滞留だけでは前進させない。
+    //   - pending なしでも滞留があれば reclaim のみ実行する（判定は lock-free のみ）。
+    //   - Shutdown 中は呼ばない（teardown 中の drain 契約に触れない）。
+    //   - 対象は published RuntimeWorld の current DSP が持つ EQProcessor。
+    //     legacy activeRuntimeDSPSlot は placeholder 専用の非所有 mirror のため使わない。
+    //   - 周期は既存の startTimer(100) をそのまま使う（新規 timer / thread は追加しない）。
+    if (! isShutdownInProgress())
+    {
+        if (auto* eqDriverDsp = resolveActiveRuntimeDSPFromRuntimeWorldOnly(runtimeReadHandle))
+            eqDriverDsp->eqRt().driveRetireReclaimNonRt();
+    }
 
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     // ★ Timer exec開始時刻（timerCallback全体の実行時間計測用）
@@ -27027,6 +27451,19 @@ void FrozenRuntimeWorld::sealRecursively() noexcept
     state_->sealRecursively();
 }
 
+// ★ 2026-11-08: release は所有権の移譲のみを行う（seal は publish transaction 側の責務）。
+RuntimeState* FrozenRuntimeWorld::releaseState() noexcept
+{
+    // ★ 2026-11-08: seal を前提にしない。実経路では world は release 時点では未 seal で、
+    //   publish transaction の中で sealRecursively() → 検証（AudioEngine.Commit.cpp の
+    //   isFrozen / isSealedRecursively）→ commit の順に進む。ここで seal を要求すると
+    //   正当な publish を拒否してしまう（D12-1-C で実測）。
+    //   不変性の強制点は commit 側であり、本メソッドは所有権の移譲だけを担う。
+    if (!state_)
+        return nullptr;
+    return state_.release();
+}
+
 } // namespace convo
 
 ```
@@ -27061,6 +27498,22 @@ namespace convo {
 //   3. const access のみ提供（コンパイル時不変性）
 //   4. Coordinator は RuntimeState を直接使用（FrozenRuntimeWorld 非依存）
 //
+// ★ 不変性保証の層（2026-11-08 調査で明文化）:
+//   (a) 型レベル: get()/operator*/operator-> は const 参照のみ。呼出側が
+//       FrozenRuntimeWorld 経由でフィールドを書き換えることはコンパイルできない。
+//       ただし releaseState() は所有権移譲のため非 const ポインタを返すので、
+//       型レベルの保証は「移譲するまで」に限られる。
+//   (b) 規約 + 実行時ゲート: publish transaction の中で seal し、commit 側が
+//       RuntimeState::isSealedRecursively() を検証する（未 seal は publish 拒否）。
+//       releaseState() は seal を前提にしない — 実経路では release 時点で未 seal のため
+//       （2026-11-08 実測。ここに前提条件を置くと D12-1-C の正当な publish が落ちる）。
+//   (c) 実行時 sealing: SealedObject の flag は論理的な不変条件であり、メモリ保護
+//       ではない。RuntimeState のフィールドは public のため、seal 中の直接書き込みを
+//       型で禁止できない。唯一の意図的な seal 後書き込みは publish 時の publication
+//       metadata bake（RuntimeWorldAuthority::publish — seal-before-bake 順序）。
+//   (d) テスト: seal 済み/未 seal の移譲可否は AudioEngineHarness の
+//       STG11D12（D12-6）で検証する。
+//
 // Retire 時の unseal は bridge.retireRuntimePublishWorldNonRt が担当:
 //   AudioEngine.h 内で ptr->unseal() を呼び出し → aligned_free
 //   これにより FrozenRuntimeWorld が行うべき安全性を代替保証する。
@@ -27089,10 +27542,13 @@ public:
     //   unseal を実行しない（呼出側が責任を持つ）。
     //   Coordinator の retire 経路 (bridge.retireRuntimePublishWorldNonRt) が
     //   ptr->unseal() → aligned_free(ptr) を実行することを前提とする。
-    [[nodiscard]] RuntimeState* releaseState() noexcept
-    {
-        return state_.release();
-    }
+    // ★ 2026-11-08 調査で確定した順序: 実経路では release 時点で world は未 seal であり、
+    //   seal は publish transaction の中で行われる（publishWorld → sealRecursively →
+    //   commit 検証）。したがって本メソッドは seal を前提にせず、所有権の移譲だけを行う。
+    //   不変性の強制点は commit（AudioEngine.Commit.cpp の isFrozen / isSealedRecursively）
+    //   であり、ここに前提条件を足すと正当な publish を拒否する（D12-1-C で実測）。
+    //   実装は .cpp（RuntimeState 完全型が必要）。
+    [[nodiscard]] RuntimeState* releaseState() noexcept;
 
     // ★ ムーブのみ許可（unique_ptr 所有権モデル準拠）
     FrozenRuntimeWorld(FrozenRuntimeWorld&&) noexcept = default;
@@ -27603,7 +28059,7 @@ CoordinatorLoop::CoordinatorLoop(AudioEngine& engine) noexcept
 CoordinatorLoop::~CoordinatorLoop()
 {
     // juce::Thread asserts !isRunning() at destruction — guarantee exit first.
-    stopLoop();
+    (void)stopLoop();
 }
 
 void CoordinatorLoop::startLoop() noexcept
@@ -27612,11 +28068,11 @@ void CoordinatorLoop::startLoop() noexcept
         startThread();
 }
 
-void CoordinatorLoop::stopLoop() noexcept
+bool CoordinatorLoop::stopLoop() noexcept
 {
     signalThreadShouldExit();
     // Bounded join: the loop exits on the next tick once isShutdownInProgress().
-    stopThread(2000);
+    return stopThread(2000);
 }
 
 void CoordinatorLoop::run()
@@ -27670,7 +28126,9 @@ public:
     ~CoordinatorLoop() override;
 
     void startLoop() noexcept;
-    void stopLoop() noexcept;
+    // ★ Q2: 戻り値は join 成否（stopThread の結果）。join できなかった場合、
+    //   producer が残っている可能性があるため Q2 を成立させてはならない。
+    [[nodiscard]] bool stopLoop() noexcept;
 
     void run() override;
 
@@ -27692,10 +28150,14 @@ private:
 
 ```
 #include "ISRDebugRuntime.h"
+#include "ISREvidenceExporter.h"
+#include "AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 namespace {
 constexpr const char* currentBuildMode() noexcept
@@ -27731,6 +28193,21 @@ bool semanticHashEquals(const convo::isr::RuntimeSemanticHash& lhs,
 }
 
 namespace convo::isr {
+namespace
+{
+std::atomic<bool> g_forceEvidenceEmission { false };
+}
+
+void setForceEvidenceEmission(bool enabled) noexcept
+{
+    convo::publishAtomic (g_forceEvidenceEmission, enabled, std::memory_order_release);
+}
+
+bool isForceEvidenceEmission() noexcept
+{
+    return convo::consumeAtomic (g_forceEvidenceEmission, std::memory_order_acquire);
+}
+
 
 void DebugRuntime::runAtomicDotCallScan() {
     const auto path = std::filesystem::current_path() / "evidence" / "atomic_dotcall_scan.json";
@@ -27752,19 +28229,87 @@ void DebugRuntime::validateOwnershipClosure() {
     }
 }
 
+void DebugRuntime::emitFinalViolationReport()
+{
+    // ★ A(D1): 最終 drain 後に違反レポートを書き直し、final 段階（drainAll 後）を残す。
+    //   runtime 段階（最終 drain 直前）はレコーダが保持しており、レポート内に併記される。
+    const auto path = std::filesystem::current_path() / "evidence" / "hb_violation_report.json";
+
+    std::error_code ec;
+    if (! std::filesystem::exists (path, ec))
+        return;
+
+    // 既存の metadata を退避して、書き直し後も同じ値を使う。
+    // まだ metadata が無い場合は、この書き込み時刻と実行 ID を使う。
+    std::string runId = "runtime-local";
+
+    if (const char* envRunId = std::getenv ("CONVO_ISR_RUNTIME_RUN_ID");
+        envRunId != nullptr && *envRunId != '\0')
+    {
+        runId = envRunId;
+    }
+
+    std::uint64_t generatedAtNs = 0;
+    {
+        std::ifstream in (path, std::ios::binary);
+        const std::string text ((std::istreambuf_iterator<char> (in)),
+                                std::istreambuf_iterator<char>());
+
+        const std::string runKey = "\"runId\":\"";
+        const auto runPos = text.find (runKey);
+
+        if (runPos != std::string::npos)
+        {
+            const auto begin = runPos + runKey.size();
+            const auto end = text.find ('"', begin);
+
+            if (end != std::string::npos)
+                runId = text.substr (begin, end - begin);
+        }
+
+        const std::string genKey = "\"generatedAtNs\":";
+        const auto genPos = text.find (genKey);
+
+        if (genPos != std::string::npos)
+        {
+            const auto begin = genPos + genKey.size();
+            const auto end = text.find_first_not_of ("0123456789", begin);
+
+            if (end != std::string::npos)
+                generatedAtNs = static_cast<std::uint64_t> (std::stoull (text.substr (begin, end - begin)));
+        }
+    }
+
+    if (generatedAtNs == 0)
+        generatedAtNs = static_cast<std::uint64_t> (
+            std::chrono::duration_cast<std::chrono::nanoseconds> (
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+
+    hbVerifier_.setTraceRuntime (&hbTraceRuntime_);
+    hbVerifier_.emitViolationReport (path);
+    convo::isr::reapplyRuntimeMetadata (path, runId, generatedAtNs);
+}
+
 void DebugRuntime::emitCIArtifacts() {
     const std::string mode = currentBuildMode();
 
     runAtomicDotCallScan();
 
-    if (mode == "Release") {
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
         return;
     }
 
     validateOwnershipClosure();
 
-    if (mode == "CI") {
-        emitHBTrace();
+    // ★ B-11: HB 証跡と違反レポートは、記録済みの実イベントから生成する。
+    //   従来は CI モードで trace だけを出し、違反レポートはエクスポータの定数だった。
+    //   Release 以外（CI / Debug）では常に実測を出す。
+    emitHBTrace();
+
+    {
+        const auto root = std::filesystem::current_path() / "evidence";
+        hbVerifier_.setTraceRuntime(&hbTraceRuntime_);
+        hbVerifier_.emitViolationReport(root / "hb_violation_report.json");
     }
 
     emitShadowCompareCadenceReport();
@@ -27772,7 +28317,7 @@ void DebugRuntime::emitCIArtifacts() {
 
 void DebugRuntime::emitHBTrace() {
     const std::string mode = currentBuildMode();
-    if (mode == "Release") {
+    if (mode == "Release" && ! isForceEvidenceEmission()) {
         return;
     }
 
@@ -27886,11 +28431,17 @@ std::uint64_t DebugRuntime::escalationCount() const noexcept
 
 namespace convo::isr {
 
+// ★ B-11: 実測証跡モード。Release ビルドでも HB 証跡と違反レポートを発行させる。
+//   既定は false（本番の Release では従来どおり発行しない）。
+void setForceEvidenceEmission(bool enabled) noexcept;
+bool isForceEvidenceEmission() noexcept;
+
 class DebugRuntime {
 public:
     void runAtomicDotCallScan();
     void validateOwnershipClosure();
     void emitCIArtifacts();
+    void emitFinalViolationReport();   // ★ A(D1): 最終 drain 後の状態で違反レポートを更新
     void emitHBTrace();
     void recordHBEdge(std::uint32_t from,
                       std::uint32_t to,
@@ -27905,6 +28456,11 @@ public:
 
 private:
     HBTraceRuntime hbTraceRuntime_;
+    // ★ B-11: HB 違反レポート（status/violations/scenarioResults）の実測生成器。
+    //   従来は未接続で、エクスポータが status:"ok" の定数を書いていた。
+    //   参照元は emitFinalViolationReport() と emitCIArtifacts() の 2 つだけで、いずれも
+    //   非 const メンバ。const メンバから触る経路が無いため mutable は不要（LINT-AE-011）。
+    HBVerifierRuntime hbVerifier_;
     bool hasPreviousShadowCompare_{false};
     std::uint64_t lastSequenceId_{0};
     RuntimeSemanticHash lastSemanticHash_{};
@@ -29693,10 +30249,61 @@ std::string escapeJson(std::string_view s)
     return out;
 }
 
+const char* artifactSource(const char* name) noexcept
+{
+    // ★ B-11: 実測生成元がある artifact は "runtime"、CI シナリオ側で測るものは "ci"。
+    struct Entry { const char* name; const char* source; };
+    static constexpr Entry table[] = {
+        {"closure_graph.json", "runtime"},
+        {"mutation_fault_trace.json", "runtime"},
+        {"hb_graph_trace.json", "runtime"},
+        {"hb_violation_report.json", "runtime"},
+        {"retire_timeline.json", "runtime"},
+        {"shutdown_trace.json", "runtime"},
+        {"publication_failure_log.json", "runtime"},
+        {"publication_progress_log.json", "runtime"},
+        {"deferred_health.json", "runtime"},
+        {"payload_tier_report.json", "ci"},
+        {"retire_latency_report.json", "ci"},
+    };
+
+    for (const auto& e : table)
+        if (std::string_view(e.name) == std::string_view(name))
+            return e.source;
+
+    return "unknown";
+}
+
+
+// ★ B-11: 生成済み JSON から 1 フィールドの生トークンを取り出す。
+//   値が文字列なら引用符を外し、真偽値・数値はそのまま返す。
+std::string jsonFieldToken(std::string_view json, std::string_view key)
+{
+    const std::string quotedKey = "\"" + std::string(key) + "\"";
+    auto pos = json.find(quotedKey);
+    if (pos == std::string_view::npos) return {};
+    pos = json.find(':', pos + quotedKey.size());
+    if (pos == std::string_view::npos) return {};
+    ++pos;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'
+                                 || json[pos] == '\n' || json[pos] == '\r'))
+        ++pos;
+    if (pos >= json.size()) return {};
+    if (json[pos] == '"') {
+        const auto endQuote = json.find('"', pos + 1);
+        if (endQuote == std::string_view::npos) return {};
+        return std::string(json.substr(pos + 1, endQuote - pos - 1));
+    }
+    const auto endToken = json.find_first_of(",}\n\r", pos);
+    return std::string(json.substr(pos, (endToken == std::string_view::npos ? json.size() : endToken) - pos));
+}
+
+
 } // namespace
 
 void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot,
-                                      uint64_t monotonicViolationCount)
+                                      uint64_t monotonicViolationCount,
+                                      bool forceFullEvidence)
 {
     const auto root = artifactRoot();
     const auto buildMode = buildModeName();
@@ -29704,7 +30311,7 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     const auto runId = runtimeRunId();
     const auto generatedAtNs = nowNs();
 
-    const bool isRelease = (buildMode == "Release");
+    const bool isRelease = (buildMode == "Release") && ! forceFullEvidence;
     const bool isDebug = (buildMode == "Debug");
 
     // ★ P1-9: monotonic violation count を Evidence に含める
@@ -29719,17 +30326,17 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     const auto deferredHealthJson = snapshot ? buildDeferredHealthJson(*snapshot) : std::string{};
 
     const std::array<std::pair<const char*, const char*>, 11> artifacts{{
-        {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"generated\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":true,\"externalMutableDependencies\":0}"},
+        {"closure_graph.json", "{\"artifact\":\"closure_graph.json\",\"schema\":\"closure_graph_v1\",\"status\":\"not_measured\",\"nodeCount\":0,\"edgeCount\":0,\"descriptorCoverageComplete\":false,\"externalMutableDependencies\":0,\"reason\":\"closure walker produced no report in this run\"}"},
         {"mutation_fault_trace.json", mutationFaultTrace.c_str()},
-        {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"generated\",\"eventCount\":0}"},
-        {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"ok\",\"violations\":[]}"},
+        {"hb_graph_trace.json", "{\"artifact\":\"hb_graph_trace.json\",\"schema\":\"hb_trace_v1\",\"status\":\"not_measured\",\"eventCount\":0,\"events\":[],\"reason\":\"no HB events were recorded in this run\"}"},
+        {"hb_violation_report.json", "{\"artifact\":\"hb_violation_report.json\",\"schema\":\"hb_violation_report_v1\",\"status\":\"not_measured\",\"violations\":[],\"scenarioResults\":[],\"reason\":\"HB verifier produced no report in this run\"}"},
         // ★ work88（CI runtime evidence 整合）: retire_timeline schema を v1 → v2 に更新
         //   （isr-seed-evidence.ps1 / isr-verify-evidence-provenance.ps1 の期待 v2 に追従）。
         //   v2 追加フィールド（laneCounters / lifecycleCounters / lifecycleSample）は runtime 初期値 0。
-        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v2\",\"status\":\"generated\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":true,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0,\"laneCounters\":{\"rtIntent\":0,\"coordination\":0,\"epoch\":0,\"reclaim\":0,\"quarantine\":0},\"lifecycleCounters\":{\"visible\":0,\"compareEligible\":0,\"telemetryRetained\":0,\"replayRetainedOptional\":0,\"reclaimEligible\":0,\"reclaimed\":0},\"lifecycleSample\":[]}"},
-        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"template\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0}"},
-        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"template\",\"withinThreshold\":false}"},
-        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"generated\",\"violations\":0,\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
+        {"retire_timeline.json", "{\"artifact\":\"retire_timeline.json\",\"schema\":\"retire_timeline_v2\",\"status\":\"not_measured\",\"epochMode\":\"shared\",\"rollbackMode\":\"shared\",\"rollbackReady\":false,\"rollbackFlags\":{\"global\":true,\"publicationOnly\":false,\"crossfadeOnly\":false,\"retirePathOnly\":true},\"totalTransitions\":0,\"laneCounters\":{\"rtIntent\":0,\"coordination\":0,\"epoch\":0,\"reclaim\":0,\"quarantine\":0},\"lifecycleCounters\":{\"visible\":0,\"compareEligible\":0,\"telemetryRetained\":0,\"replayRetainedOptional\":0,\"reclaimEligible\":0,\"reclaimed\":0},\"lifecycleSample\":[],\"reason\":\"retire timeline was not emitted in this run\"}"},
+        {"shutdown_trace.json", "{\"artifact\":\"shutdown_trace.json\",\"schema\":\"shutdown_trace_v1\",\"status\":\"not_measured\",\"phase\":0,\"verified\":false,\"sh1_callbackCount\":0,\"sh2_activeCrossfade\":0,\"sh3_pendingRetire\":0,\"sh4_observerCount\":0,\"sh5_lateCallbackCount\":0,\"sh6_postStopEnqueueCount\":0,\"reason\":\"shutdown FSM produced no trace in this run\"}"},
+        {"retire_latency_report.json", "{\"artifact\":\"retire_latency_report.json\",\"schema\":\"retire_latency_report_v1\",\"status\":\"not_measured\",\"withinThreshold\":false,\"reason\":\"retire latency is measured by the CI scenario runner, not by the app\"}"},
+        {"payload_tier_report.json", "{\"artifact\":\"payload_tier_report.json\",\"schema\":\"payload_tier_report_v1\",\"status\":\"not_measured\",\"violations\":0,\"reason\":\"payload-tier violations are measured by the CI scenario runner, not by the app\",\"families\":[{\"name\":\"activeNode\",\"tier\":\"InlineImmutable\"},{\"name\":\"fadingNode\",\"tier\":\"ImmutableShared\"},{\"name\":\"transitionNext\",\"tier\":\"ImmutableShared\"},{\"name\":\"retireSlot\",\"tier\":\"MutableAuthority\"}]}"},
         {"publication_failure_log.json", failureLogJson.c_str()},
         {"publication_progress_log.json", progressLogJson.c_str()},
         {"deferred_health.json", deferredHealthJson.c_str()}
@@ -29775,6 +30382,8 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
     };
 
     bool first = true;
+    std::string detail;
+    bool firstDetail = true;
 
     for (std::size_t i = 0; i < artifacts.size(); ++i) {
         const auto& [name, content] = artifacts[i];
@@ -29800,8 +30409,20 @@ void EvidenceExporter::exportEvidence(const TelemetryRecorder::TelemetrySnapshot
         manifest += name;
         manifest += "\"";
         first = false;
+
+        // ★ B-11: 各 artifact が実測か placeholder かを明示する
+        //   （生成が成功したことは ISR 安全性の一般保証ではない）。
+        if (!firstDetail) {
+            detail += ",\n";
+        }
+        detail += std::string("    {\"name\":\"") + name + "\",\"source\":\""
+                + artifactSource(name) + "\",\"measured\":" + (exists ? "true" : "false") + "}";
+        firstDetail = false;
     }
 
+    manifest += "\n  ],\n";
+    manifest += "  \"artifactDetail\": [\n";
+    manifest += detail;
     manifest += "\n  ]\n";
     manifest += "}\n";
 
@@ -29853,8 +30474,32 @@ void BudgetManager::budgetCheck()
 void FailureHandler::handleFailure()
 {
     const auto root = artifactRoot();
-    const bool hbViolation = fileExistsAndNonEmpty(root / "hb_violation_report.json");
-    const bool shutdownViolation = fileExistsAndNonEmpty(root / "shutdown_violation_report.json");
+    // ★ B-11: 存在ではなく内容（status / verified）で判断する。従来はファイルの
+    //   存在だけで Quarantine を選ぶため、同じ run で "status":"ok" と Quarantine が
+    //   併存していた。不明な内容は安全側（violation 扱い）に倒す。
+    bool hbViolation = false;
+    {
+        const auto text = readTextFile(root / "hb_violation_report.json");
+
+        if (! text.empty())
+        {
+            const auto status = jsonFieldToken(text, "status");
+            hbViolation = (status != "ok");
+        }
+    }
+
+    bool shutdownViolation = fileExistsAndNonEmpty(root / "shutdown_violation_report.json");
+    {
+        const auto text = readTextFile(root / "shutdown_trace.json");
+
+        if (! text.empty())
+        {
+            const auto verified = jsonFieldToken(text, "verified");
+
+            if (verified == "false")
+                shutdownViolation = true;
+        }
+    }
 
     std::ostringstream oss;
     oss << "{\n"
@@ -29893,6 +30538,15 @@ void IntrospectionConsole::introspect()
     writeTextFile(root / "runtime_snapshot.json", oss.str());
 }
 
+
+// ★ A(D1): 既存 artifact の runtime metadata を再付与する公開ラッパー
+void reapplyRuntimeMetadata(const std::filesystem::path& path,
+                            std::string_view runId,
+                            std::uint64_t generatedAtNs)
+{
+    ensureArtifactRuntimeMetadata(path, runId, generatedAtNs);
+}
+
 } // namespace convo::isr
 
 ```
@@ -29901,7 +30555,10 @@ void IntrospectionConsole::introspect()
 
 ```
 #pragma once
+#include <cstdint>
+#include <filesystem>
 #include <string>
+#include <string_view>
 #include "TelemetryRecorder.h"
 
 namespace convo::isr {
@@ -29909,8 +30566,11 @@ namespace convo::isr {
 class EvidenceExporter {
 public:
     // exportEvidence: テレメトリデータを含むエビデンスを出力する。
+    // forceFullEvidence: Release ビルドでも全 artifact を書き出す（実測証跡モード用）。
+    //   既定 false。CI の run 経路だけが true を渡す。
     void exportEvidence(const TelemetryRecorder::TelemetrySnapshot* snapshot = nullptr,
-                        uint64_t monotonicViolationCount = 0);
+                        uint64_t monotonicViolationCount = 0,
+                        bool forceFullEvidence = false);
 };
 
 class BudgetManager {
@@ -29928,6 +30588,11 @@ public:
     void introspect();
 };
 
+// ★ A(D1): 既存 artifact に runtime metadata（provenance/runId/generatedAtNs）を付与する。
+void reapplyRuntimeMetadata(const std::filesystem::path& path,
+                                   std::string_view runId,
+                                   std::uint64_t generatedAtNs);
+
 } // namespace convo::isr
 
 ```
@@ -29937,6 +30602,11 @@ public:
 ```
 #include "ISRHB.h"
 #include "AtomicAccess.h"
+#include "ISRRetireLatency.h"
+#include "WorldLifetimeRecorder.h"   // ★ A(D1): 退役遅延の集計
+#include "core/SnapshotCoordinator.h"
+#include "core/ReaderMeasureRegistry.h"   // ★ 計測 (2026-11-11)
+#include <cstdio>   // ★ C2: RT 契約違反カウンタの出力
 
 #include <chrono>
 #include <filesystem>
@@ -30074,6 +30744,22 @@ bool HBVerifierRuntime::validateHBGraph() const noexcept
 
 void HBVerifierRuntime::emitViolationReport(const std::filesystem::path& outputPath) const
 {
+    // ★ W-2 (2026-11-10): レポート生成時点（final 段）の累積値を保持する。
+    //   postTeardown との差分を取るためだけに使い、判定には使わない。
+    convo::isr::RetireLatencyRecorder::instance().captureFinalStage();
+
+    // ★ 計測 (2026-11-11): final 段の reader レジストリ（active 一覧を含む）
+    {
+        std::error_code ecR;
+        const auto p = std::filesystem::current_path() / "evidence" / "reader_registry_final.json";
+        std::filesystem::create_directories(p.parent_path(), ecR);
+        if (std::FILE* rf = std::fopen(p.string().c_str(), "wb"))
+        {
+            convo::ReaderMeasureRegistry::dump(rf, "final");
+            std::fclose(rf);
+        }
+    }
+
     std::error_code ec;
     std::filesystem::create_directories(outputPath.parent_path(), ec);
 
@@ -30085,9 +30771,21 @@ void HBVerifierRuntime::emitViolationReport(const std::filesystem::path& outputP
     const bool valid = validateHBGraph();
     const auto scenarios = runScenarioSuite();
 
+    // ★ B-11: status は「グラフの妥当性」だけでなく「シナリオの合否」も反映する。
+    //   以前は scenario が fail でも status=ok になり、status だけを見る検証器が
+    //   失敗を見逃せた（実測で retire_delay=fail / status=ok を確認）。
+    bool anyScenarioFailed = false;
+    for (const auto& scenario : scenarios) {
+        if (!scenario.passed) {
+            anyScenarioFailed = true;
+            break;
+        }
+    }
+    const bool ok = valid && !anyScenarioFailed;
+
     file << "{\n";
     file << "  \"schema\": \"hb_violation_report_v1\",\n";
-    file << "  \"status\": \"" << (valid ? "ok" : "violation") << "\",\n";
+    file << "  \"status\": \"" << (ok ? "ok" : "violation") << "\",\n";
     file << "  \"violations\": [";
     bool wroteViolation = false;
     if (!valid) {
@@ -30110,13 +30808,387 @@ void HBVerifierRuntime::emitViolationReport(const std::filesystem::path& outputP
     for (std::size_t i = 0; i < scenarios.size(); ++i) {
         const auto& scenario = scenarios[i];
         file << "    {\"name\": \"" << scenario.name << "\", \"result\": \""
-             << (scenario.passed ? "pass" : "fail") << "\"}";
+             << (scenario.passed ? "pass" : "fail") << "\"";
+
+        if (scenario.reason != nullptr)
+            file << ", \"reason\": \"" << scenario.reason << "\"";
+
+        if (scenario.required > 0)
+            file << ", \"observations\": " << scenario.observations
+                 << ", \"required\": " << scenario.required
+                 << ", \"maxLatencyNs\": " << scenario.maxLatencyNs;
+
+        file << "}";
         if (i + 1u < scenarios.size()) {
             file << ",";
         }
         file << "\n";
     }
-    file << "  ]\n";
+    file << "  ],\n";
+
+    // ★ A(D1): 退役遅延の集計（全体・経路別）と生の観測
+    file << "  \"retireLatencyD1\": {\n";
+    file << "    \"thresholdNs\": " << convo::isr::RetireLatencyRecorder::kThresholdNs << ",\n";
+    file << "    \"required\": 59,\n";
+    // ★ C2: RT 契約違反（RT からの resetFadeStateAndRetireTarget 呼出し）の回数
+    file << "    \"snapshotRtViolations\": " << convo::SnapshotCoordinator::rtViolationCount() << ",\n";
+    {
+        const auto timingRuntime = convo::isr::RetireLatencyRecorder::instance().runtimeStage();
+        const auto timingSnapshot = convo::isr::RetireLatencyRecorder::instance().snapshot();
+
+        file << "    \"timing\": {\n";
+        file << "      \"stage\": \"" << (timingRuntime.valid ? "runtime" : "final") << "\",\n";
+        file << "      \"ebrCount\": " << (timingRuntime.valid ? timingRuntime.ebrCount : timingSnapshot.ebrCount) << ",\n";
+        file << "      \"ebrSumNs\": " << (timingRuntime.valid ? timingRuntime.ebrSumNs : timingSnapshot.ebrSumNs) << ",\n";
+        file << "      \"ebrMaxNs\": " << (timingRuntime.valid ? timingRuntime.ebrMaxNs : timingSnapshot.ebrMaxNs) << ",\n";
+        file << "      \"execCount\": " << (timingRuntime.valid ? timingRuntime.execCount : timingSnapshot.execCount) << ",\n";
+        file << "      \"execSumNs\": " << (timingRuntime.valid ? timingRuntime.execSumNs : timingSnapshot.execSumNs) << ",\n";
+        file << "      \"execMaxNs\": " << (timingRuntime.valid ? timingRuntime.execMaxNs : timingSnapshot.execMaxNs) << ",\n";
+        file << "      \"unobservedSafe\": " << (timingRuntime.valid ? timingRuntime.unobservedSafe : timingSnapshot.unobservedSafe) << ",\n";
+        file << "      \"rtRequests\": " << timingSnapshot.rtRequests << "\n";
+        file << "    },\n";
+    }
+
+    const auto& latencyRecorder = convo::isr::RetireLatencyRecorder::instance();
+    const auto latencySnapshot = latencyRecorder.snapshot();
+    const auto latencyRuntime = latencyRecorder.runtimeStage();
+
+    convo::isr::RetireLatencyRecorder::StageStats latencyFinal;
+    latencyFinal.valid = true;
+    latencyFinal.requests = latencySnapshot.requests;
+    latencyFinal.completions = latencySnapshot.completions;
+    latencyFinal.unmatchedCompletions = latencySnapshot.unmatchedCompletions;
+    latencyFinal.overflow = latencySnapshot.overflow;
+    latencyFinal.idExhausted = latencySnapshot.idExhausted;
+    latencyFinal.postShutdownRequests = latencySnapshot.postShutdownRequests;
+    latencyFinal.recordMisses = latencySnapshot.recordMisses;   // ★ C5
+    latencyFinal.pending = (latencySnapshot.requests > latencySnapshot.completions)
+                             ? (latencySnapshot.requests - latencySnapshot.completions) : 0;
+
+    for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+        latencyFinal.paths[p] = latencySnapshot.paths[p];
+
+    const auto writeLatencyStage = [&file] (
+        const char* label,
+        const convo::isr::RetireLatencyRecorder::StageStats& stage,
+        bool last) noexcept
+    {
+        file << "    \"" << label << "\": {\n";
+        file << "      \"captured\": " << (stage.valid ? "true" : "false") << ",\n";
+        file << "      \"requests\": " << stage.requests << ",\n";
+        file << "      \"completions\": " << stage.completions << ",\n";
+        file << "      \"pending\": " << stage.pending << ",\n";
+        file << "      \"unmatchedCompletions\": " << stage.unmatchedCompletions << ",\n";
+        file << "      \"overflow\": " << stage.overflow << ",\n";
+        file << "      \"idExhausted\": " << stage.idExhausted << ",\n";
+        file << "      \"postShutdownRequests\": " << stage.postShutdownRequests << ",\n";
+        file << "      \"postShutdownCompletions\": " << stage.postShutdownCompletions << ",\n";
+    file << "      \"recordMisses\": " << stage.recordMisses << ",\n";
+        file << "      \"paths\": [";
+
+        bool firstPathInStage = true;
+
+        for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+        {
+            const auto& ps = stage.paths[p];
+
+            if (ps.count == 0)
+                continue;
+
+            file << (firstPathInStage ? "\n" : ",\n");
+            file << "        {\"name\": \""
+                 << convo::isr::RetireLatencyRecorder::pathName(
+                        static_cast<convo::isr::RetireLatencyRecorder::Path>(p))
+                 << "\", \"count\": " << ps.count
+                 << ", \"overThreshold\": " << ps.overThreshold
+                 << ", \"maxNs\": " << ps.maxNs << "}";
+            firstPathInStage = false;
+        }
+
+        file << (firstPathInStage ? "]\n" : "\n      ]\n");
+        file << "    }" << (last ? "\n" : ",\n");
+    };
+
+    writeLatencyStage ("runtime", latencyRuntime, false);
+    writeLatencyStage ("final", latencyFinal, false);
+
+    file << "    \"observations\": [";
+
+    bool firstLatencyObs = true;
+
+    for (const auto& o : latencySnapshot.observations)
+    {
+        file << (firstLatencyObs ? "\n" : ",\n");
+        file << "      {\"requestId\": " << o.requestId
+             << ", \"epoch\": " << o.epoch
+             << ", \"path\": \""
+             << convo::isr::RetireLatencyRecorder::pathName(
+                    static_cast<convo::isr::RetireLatencyRecorder::Path>(o.path))
+             << "\", \"latencyNs\": " << o.latencyNs
+             << ", \"enqueueTsNs\": " << o.enqueueTsNs
+             << ", \"safeTsNs\": " << o.safeTsNs
+             << ", \"minReaderEpoch\": " << o.minReaderEpoch
+             << ", \"minReaderSlot\": " << o.minReaderSlot << "}";
+        firstLatencyObs = false;
+    }
+
+    file << (firstLatencyObs ? "],\n" : "\n    ],\n");
+    file << "    \"pending\": [";
+
+    bool firstLatencyPending = true;
+
+    for (const auto& o : latencySnapshot.pending)
+    {
+        file << (firstLatencyPending ? "\n" : ",\n");
+        file << "      {\"requestId\": " << o.requestId << ", \"epoch\": " << o.epoch << "}";
+        firstLatencyPending = false;
+    }
+
+    file << (firstLatencyPending ? "]\n" : "\n    ]\n");
+    file << "  },\n";
+
+    // ★ 段階③ (2026-11-11, Owner 承認): 3 分類診断の追加セクション。
+    //   既存の retireLatencyD1（判定に使う）は一切変更しない。ここは診断のみ。
+    {
+        const auto clsSnapshot = convo::isr::RetireLatencyRecorder::instance().snapshot();
+        const auto& tot = clsSnapshot.classTotals;
+
+        file << "  \"retireLatencyClassified\": {\n";
+        file << "    \"note\": \"diagnostic only; the verdict uses retireLatencyD1.runtime and is unchanged\",\n";
+        file << "    \"thresholdNs\": " << convo::isr::RetireLatencyRecorder::kThresholdNs << ",\n";
+        file << "    \"required\": 59,\n";
+        file << "    \"paths\": [";
+
+        bool firstClassPath = true;
+
+        for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+        {
+            const auto& cp = clsSnapshot.classifiedPaths[p];
+
+            if (cp.driverWait.count == 0 && cp.ebrWait.count == 0 && cp.execWait.count == 0
+                && cp.unclassifiedCount == 0 && cp.excludedCount == 0)
+                continue;
+
+            const auto writeComponent = [&file] (const char* name,
+                                                 const convo::isr::RetireLatencyRecorder::ClassComponent& c)
+            {
+                file << "\"" << name << "\": {\"count\": " << c.count
+                     << ", \"sumNs\": " << c.sumNs
+                     << ", \"maxNs\": " << c.maxNs
+                     << ", \"over50ms\": " << c.overThreshold << "}";
+            };
+
+            file << (firstClassPath ? "\n" : ",\n");
+            file << "      {\"name\": \""
+                 << convo::isr::RetireLatencyRecorder::pathName(
+                        static_cast<convo::isr::RetireLatencyRecorder::Path>(p))
+                 << "\", ";
+            writeComponent ("driverWait", cp.driverWait);
+            file << ", ";
+            writeComponent ("ebrWait", cp.ebrWait);
+            file << ", ";
+            writeComponent ("execWait", cp.execWait);
+            file << ", \"unclassified\": {\"count\": " << cp.unclassifiedCount
+                 << ", \"sumNs\": " << cp.unclassifiedSumNs << "}"
+                 << ", \"excluded\": {\"count\": " << cp.excludedCount << "}";
+            file << "}";
+            firstClassPath = false;
+        }
+
+        file << (firstClassPath ? "],\n" : "\n    ],\n");
+        file << "    \"totals\": {\"requests\": " << tot.requests
+             << ", \"completions\": " << tot.completions
+             << ", \"classified\": " << tot.classified
+             << ", \"unclassified\": " << tot.unclassified
+             << ", \"excluded\": " << tot.excluded
+             << ", \"consistencyErrors\": " << tot.consistencyErrors
+             << ", \"pending\": " << tot.pending << "},\n";
+        // ★ domain tag (v2.9 §5.1): ドメイン別の 4 行を常に出力する（0 件でも省略しない）。
+        //   paths / totals は既存の合算のままで、キーも値も変えない。
+        {
+            const auto& domains = clsSnapshot.domains;
+
+            file << "    \"domains\": [";
+
+            for (int d = 0; d < convo::kRetireDomainCount; ++d)
+            {
+                const auto& ds = domains[static_cast<std::size_t>(d)];
+                const auto id = static_cast<convo::RetireDomainId>(d);
+
+                file << (d == 0 ? "\n" : ",\n");
+                file << "      {\"id\": \"" << convo::retireDomainName(id) << "\""
+                     << ", \"count\": " << ds.count
+                     << ", \"classified\": " << ds.classified
+                     << ", \"unclassified\": " << ds.unclassified
+                     << ", \"excluded\": " << ds.excluded
+                     << ", \"consistencyErrors\": " << ds.consistencyErrors
+                     << ", \"sumNs\": " << ds.sumNs
+                     << ", \"maxNs\": " << ds.maxNs
+                     << ", \"over50ms\": " << ds.overThreshold;
+
+                if (id == convo::RetireDomainId::Unknown)
+                {
+                    file << ", \"unknownReasons\": {\"providerUnknown\": " << clsSnapshot.providerUnknown
+                         << ", \"providerAbsent\": " << clsSnapshot.providerAbsent << "}";
+                }
+                else if (id == convo::RetireDomainId::Unstamped)
+                {
+                    file << ", \"unknownReasons\": {\"stampMissing\": " << clsSnapshot.stampMissing << "}";
+                }
+
+                file << ", \"paths\": [";
+
+                bool firstDomainPath = true;
+
+                for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+                {
+                    const auto& cp = ds.paths[p];
+
+                    if (cp.driverWait.count == 0 && cp.ebrWait.count == 0 && cp.execWait.count == 0
+                        && cp.unclassifiedCount == 0 && cp.excludedCount == 0)
+                        continue;
+
+                    const auto writeComponent = [&file] (const char* name,
+                                                         const convo::isr::RetireLatencyRecorder::ClassComponent& c)
+                    {
+                        file << "\"" << name << "\": {\"count\": " << c.count
+                             << ", \"sumNs\": " << c.sumNs
+                             << ", \"maxNs\": " << c.maxNs
+                             << ", \"over50ms\": " << c.overThreshold << "}";
+                    };
+
+                    file << (firstDomainPath ? "\n" : ",\n");
+                    file << "        {\"name\": \""
+                         << convo::isr::RetireLatencyRecorder::pathName(
+                                static_cast<convo::isr::RetireLatencyRecorder::Path>(p))
+                         << "\", ";
+                    writeComponent ("driverWait", cp.driverWait);
+                    file << ", ";
+                    writeComponent ("ebrWait", cp.ebrWait);
+                    file << ", ";
+                    writeComponent ("execWait", cp.execWait);
+                    file << ", \"unclassified\": {\"count\": " << cp.unclassifiedCount
+                         << ", \"sumNs\": " << cp.unclassifiedSumNs << "}"
+                         << ", \"excluded\": {\"count\": " << cp.excludedCount << "}";
+                    file << "}";
+                    firstDomainPath = false;
+                }
+
+                file << (firstDomainPath ? "]" : "\n      ]");
+                file << "}";
+            }
+
+            file << "\n    ],\n";
+
+            std::uint64_t sumCount = 0, sumClassified = 0, sumUnclassified = 0, sumExcluded = 0,
+                           sumConsistency = 0, sumDriver = 0, sumEbr = 0, sumExec = 0,
+                           sumUnclassifiedPath = 0, sumExcludedPath = 0;
+
+            for (int d = 0; d < convo::kRetireDomainCount; ++d)
+            {
+                const auto& ds = domains[static_cast<std::size_t>(d)];
+                sumCount += ds.count;
+                sumClassified += ds.classified;
+                sumUnclassified += ds.unclassified;
+                sumExcluded += ds.excluded;
+                sumConsistency += ds.consistencyErrors;
+
+                for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+                {
+                    sumDriver += ds.paths[p].driverWait.count;
+                    sumEbr += ds.paths[p].ebrWait.count;
+                    sumExec += ds.paths[p].execWait.count;
+                    sumUnclassifiedPath += ds.paths[p].unclassifiedCount;
+                    sumExcludedPath += ds.paths[p].excludedCount;
+                }
+            }
+
+            std::uint64_t totalsDriver = 0, totalsEbr = 0, totalsExec = 0,
+                           totalsUnclassifiedPath = 0, totalsExcludedPath = 0;
+
+            for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+            {
+                totalsDriver += clsSnapshot.classifiedPaths[p].driverWait.count;
+                totalsEbr += clsSnapshot.classifiedPaths[p].ebrWait.count;
+                totalsExec += clsSnapshot.classifiedPaths[p].execWait.count;
+                totalsUnclassifiedPath += clsSnapshot.classifiedPaths[p].unclassifiedCount;
+                totalsExcludedPath += clsSnapshot.classifiedPaths[p].excludedCount;
+            }
+
+            const bool domainSumsConsistent =
+                sumCount == tot.completions
+                && sumClassified == tot.classified
+                && sumUnclassified == tot.unclassified
+                && sumExcluded == tot.excluded
+                && sumConsistency == tot.consistencyErrors
+                && sumDriver == totalsDriver
+                && sumEbr == totalsEbr
+                && sumExec == totalsExec
+                && sumUnclassifiedPath == totalsUnclassifiedPath
+                && sumExcludedPath == totalsExcludedPath;
+
+            file << "    \"stampMissing\": " << clsSnapshot.stampMissing << ",\n";
+            file << "    \"providerUnknown\": " << clsSnapshot.providerUnknown << ",\n";
+            file << "    \"providerAbsent\": " << clsSnapshot.providerAbsent << ",\n";
+            file << "    \"domainSumsConsistent\": " << (domainSumsConsistent ? "true" : "false") << ",\n";
+        }
+
+        const bool countsConsistent = (tot.classified + tot.unclassified + tot.excluded) == tot.completions;
+        file << "    \"countsConsistent\": " << (countsConsistent ? "true" : "false") << "\n";
+        file << "  },\n";
+    }
+
+    // ★ Item2: RuntimeWorld の寿命（D1 は別系統・別判定）
+    {
+        const auto worldSnapshot = convo::isr::WorldLifetimeRecorder::instance().snapshot();
+
+        file << "  \"worldLifetime\": {\n";
+        file << "    \"commits\": " << worldSnapshot.commits << ",\n";
+        file << "    \"destroys\": " << worldSnapshot.destroys << ",\n";
+        file << "    \"unmatched\": " << worldSnapshot.unmatched << ",\n";
+        file << "    \"overflow\": " << worldSnapshot.overflow << ",\n";
+        file << "    \"paths\": [";
+
+        bool firstWorldPath = true;
+
+        for (std::size_t p = 0; p < convo::isr::WorldLifetimeRecorder::kPathCount; ++p)
+        {
+            const auto& ps = worldSnapshot.paths[p];
+
+            if (ps.commits == 0 && ps.destroys == 0)
+                continue;
+
+            file << (firstWorldPath ? "\n" : ",\n");
+            file << "      {\"name\": \""
+                 << convo::isr::WorldLifetimeRecorder::pathName(
+                        static_cast<convo::isr::WorldLifetimeRecorder::Path>(p))
+                 << "\", \"commits\": " << ps.commits
+                 << ", \"destroys\": " << ps.destroys
+                 << ", \"sumNs\": " << ps.sumNs
+                 << ", \"maxNs\": " << ps.maxNs << "}";
+            firstWorldPath = false;
+        }
+
+        file << (firstWorldPath ? "],\n" : "\n    ],\n");
+        file << "    \"observations\": [";
+
+        bool firstWorldObs = true;
+
+        for (const auto& o : worldSnapshot.observations)
+        {
+            file << (firstWorldObs ? "\n" : ",\n");
+            file << "      {\"worldId\": " << o.worldId
+                 << ", \"path\": \""
+                 << convo::isr::WorldLifetimeRecorder::pathName(
+                        static_cast<convo::isr::WorldLifetimeRecorder::Path>(o.path))
+                 << "\", \"lifetimeNs\": " << o.lifetimeNs << "}";
+            firstWorldObs = false;
+        }
+
+        file << (firstWorldObs ? "]\n" : "\n    ]\n");
+        file << "  }\n";
+    }
+
     file << "}\n";
 }
 
@@ -30137,7 +31209,7 @@ bool HBVerifierRuntime::simulateReorderScenario(HBReorderScenario scenario) cons
     case HBReorderScenario::EpochLag:
         return checkBoundedEpochLag(4u);
     case HBReorderScenario::RetireDelay:
-        return checkRetireDelayBound(50'000'000u);
+        return evaluateRetireDelay().passed;
     case HBReorderScenario::ObserveRace:
         return checkObserveRaceFree();
     default:
@@ -30150,7 +31222,7 @@ std::array<HBScenarioResult, 4> HBVerifierRuntime::runScenarioSuite() const noex
     return {{
         {"forced_reorder", simulateReorderScenario(HBReorderScenario::ForcedReorder)},
         {"epoch_lag", simulateReorderScenario(HBReorderScenario::EpochLag)},
-        {"retire_delay", simulateReorderScenario(HBReorderScenario::RetireDelay)},
+        evaluateRetireDelay(),
         {"observe_race", simulateReorderScenario(HBReorderScenario::ObserveRace)}
     }};
 }
@@ -30209,26 +31281,86 @@ bool HBVerifierRuntime::checkBoundedEpochLag(std::uint64_t maxLag) const noexcep
     return true;
 }
 
-bool HBVerifierRuntime::checkRetireDelayBound(std::uint64_t maxNs) const noexcept
+HBScenarioResult HBVerifierRuntime::evaluateRetireDelay() const noexcept
 {
-    if (!hasTraceRuntimeBound()) {
-        return false;
+    // N_req = ceil(ln(0.05)/ln(0.95)) = 59（95% 信頼で超過率 5% 未満、超過 0 件の場合）
+    constexpr std::uint64_t kNReq = 59;
+
+    const auto& recorder = convo::isr::RetireLatencyRecorder::instance();
+
+    // 判定は「最終 drain 直前（runtime）」の状態で行う。drainAll の解放は通常経路に混ぜない。
+    auto stage = recorder.runtimeStage();
+
+    if (! stage.valid)
+    {
+        const auto snapshot = recorder.snapshot();
+        stage.valid = true;
+        stage.requests = snapshot.requests;
+        stage.completions = snapshot.completions;
+        stage.unmatchedCompletions = snapshot.unmatchedCompletions;
+        stage.overflow = snapshot.overflow;
+        stage.idExhausted = snapshot.idExhausted;
+        stage.postShutdownRequests = snapshot.postShutdownRequests;
+        stage.pending = (snapshot.requests > snapshot.completions)
+                          ? (snapshot.requests - snapshot.completions) : 0;
+
+        for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+            stage.paths[p] = snapshot.paths[p];
     }
 
-    const auto events = traceRuntime_->snapshotEvents();
-    if (events.size() < 2u) {
-        return true;
+    using Path = convo::isr::RetireLatencyRecorder::Path;
+
+    // 通常経路: sync / drain / queue / quarantine（queue は EBR 待ちを含むが D1 の一部）
+    constexpr std::size_t kNormalPaths[] = {
+        static_cast<std::size_t> (Path::Sync),
+        static_cast<std::size_t> (Path::Drain),
+        static_cast<std::size_t> (Path::Queue),
+        static_cast<std::size_t> (Path::Quarantine)
+    };
+
+    std::uint64_t normalCount = 0;
+    std::uint64_t normalMaxNs = 0;
+
+    for (const auto index : kNormalPaths)
+    {
+        normalCount += stage.paths[index].count;
+
+        if (stage.paths[index].maxNs > normalMaxNs)
+            normalMaxNs = stage.paths[index].maxNs;
     }
 
-    for (std::size_t i = 1; i < events.size(); ++i) {
-        const auto prev = events[i - 1u].timestamp;
-        const auto curr = events[i].timestamp;
-        if (curr > prev && (curr - prev) > maxNs) {
-            return false;
-        }
+    HBScenarioResult result;
+    result.name = "retire_delay";
+    result.required = kNReq;
+    result.observations = normalCount;
+    result.maxLatencyNs = normalMaxNs;
+
+    const auto insufficient = [&result] (const char* why)
+    {
+        result.passed = false;
+        result.insufficient = true;
+        result.reason = why;
+        return result;
+    };
+
+    if (stage.overflow > 0 || stage.idExhausted > 0)
+        return insufficient ("observation_overflow");
+
+    if (stage.pending > 0)
+        return insufficient ("incomplete_requests");
+
+    if (normalCount < kNReq)
+        return insufficient ("insufficient_observations");
+
+    if (normalMaxNs > convo::isr::RetireLatencyRecorder::kThresholdNs)
+    {
+        result.passed = false;
+        result.reason = "latency_exceeds_threshold";
+        return result;
     }
 
-    return true;
+    result.passed = true;
+    return result;
 }
 
 bool HBVerifierRuntime::checkObserveRaceFree() const noexcept
@@ -30358,8 +31490,13 @@ enum class HBReorderScenario : uint8_t
 
 struct HBScenarioResult
 {
-    const char* name;
-    bool passed;
+    const char* name = nullptr;
+    bool passed = false;
+    bool insufficient = false;          // 観測不足（pass に読み替えない）
+    const char* reason = nullptr;       // 不合格・観測不足の理由
+    std::uint64_t observations = 0;     // 有効観測数 N_valid
+    std::uint64_t required = 0;         // 必要観測数 N_req
+    std::uint64_t maxLatencyNs = 0;     // 有効観測の最大遅延
 };
 
 /**
@@ -30381,7 +31518,7 @@ private:
     bool hasAnyEvent() const noexcept;
     bool checkEpochOrder() const noexcept;
     bool checkBoundedEpochLag(std::uint64_t maxLag) const noexcept;
-    bool checkRetireDelayBound(std::uint64_t maxNs) const noexcept;
+    HBScenarioResult evaluateRetireDelay() const noexcept;
     bool checkObserveRaceFree() const noexcept;
 
     HBTraceRuntime* traceRuntime_ = nullptr;
@@ -30937,8 +32074,12 @@ private:
 //   Step 3: ReclaimPermit（move-only / single-use / identity-bound — H.11.11.9.5）
 //   Step 6: ReclaimIdentity（DSPHandle + retireSequence — H.11.11.9.5）
 //
-// ★ 現在は「型のみ・production 未接続」。production reclaim の接続は
-//   Phase A2（15-Step 7-15 / A2-G01〜G23 PASS 後）で行う（H.11.17.5）。
+// ★ 接続状況（実装が正）: Phase A2（15-Step 7-15）で production の shutdown reclaim
+//   経路へ接続済み。呼出チェーンは
+//     AudioEngine::tryShutdownQuiescentReclaim（AudioEngine.h）
+//       → ShutdownRuntime::tryMakeQuiescenceProof / tryMakeReclaimPermit（ISRShutdown.cpp）
+//       → RuntimeIntentCoordinator::reclaimShutdownQuiescent（identity 照合 + permit.consume）
+//   であり、~AudioEngine → releaseResources() から到達する。
 //   ReclaimPermit の生成は ShutdownRuntime のみ（friend / AC-X3-11 / INV-LIFE-4）。
 //
 // ★ 不変条件（H.11.11.7 INV-LIFE）:
@@ -30995,6 +32136,30 @@ struct ReclaimIdentity {
     [[nodiscard]] bool operator==(const ReclaimIdentity& o) const noexcept = default;
 };
 
+// ── Step 5: EpochQuiescenceEvidence（H.11.13.3 / Q5） ───────────────────────
+//   Q5 EpochSettled を「generation 値」や caller の bool 単独で成立させないための
+//   transactional evidence。epoch の前進・reader 登録の閉鎖・active reader ゼロを
+//   同一の観測点で取得し、ShutdownRuntime が identity（epochGeneration /
+//   readerRegistrationGeneration）と照合して初めて Q5 を成立させる。
+//   ［observer は AudioEngine（EpochDomain / ISRRetireRouter の所有者）。
+//     検証と Proof への格納は ShutdownRuntime の責務（authority singularization）］
+//   ［第七者 C: generation 単独では quiescence を証明できない。quiescent() を必ず要求する］
+struct EpochQuiescenceEvidence {
+    bool          captured{false};                    // 観測を実施したか（false = 未取得 → Q5 不成立）
+    std::uint64_t epoch{0};                           // EpochDomain::currentEpoch()
+    std::uint64_t epochGeneration{0};                 // EpochDomain::epochGeneration()
+    std::uint64_t readerRegistrationGeneration{0};    // EpochDomain::readerRegistrationGeneration()
+    bool          readerRegistrationClosed{false};    // EpochDomain::readerRegistrationClosed()
+    std::uint32_t activeReaders{0};                   // ISRRetireRouter::activeReaderCount()
+    std::uint64_t minReaderEpoch{0};                  // ISRRetireRouter::minReaderEpoch()
+
+    // quiescence の実体（登録閉鎖 + active reader ゼロ）。generation 一致は呼出側で照合する。
+    [[nodiscard]] bool quiescent() const noexcept
+    {
+        return captured && readerRegistrationClosed && activeReaders == 0;
+    }
+};
+
 // ── Step 2: ShutdownQuiescenceProof ─────────────────────────────────────────
 //   「これ以降、新しい lifetime obligation が発生しない」ことの証明（Q0〜Q7, H.11.11.3）。
 //   ⚠️ 循環排除（第五者レビュー）: pendingReclaimIdentities.empty() と
@@ -31022,6 +32187,8 @@ public:
     [[nodiscard]] bool epochSettled() const noexcept { return qEpochSettled_; }
     [[nodiscard]] bool postStopEnqueueZero() const noexcept { return qPostStopEnqueueZero_; }
     [[nodiscard]] bool noResurrection() const noexcept { return qNoResurrection_; }
+    // Q5 の根拠（quiescence 時に取得した epoch / reader 観測）。Proof の事後監査に使う。
+    [[nodiscard]] const EpochQuiescenceEvidence& epochEvidence() const noexcept { return epochEvidence_; }
 
 private:
     // 生成は ShutdownRuntime のみ（INV-LIFE-3 / AC-X3-11）。簡易生成（if (isFullyDrained()) return ...）
@@ -31039,9 +32206,10 @@ private:
     bool qAllProducersJoined_{false};          // Q2
     bool qReaderRegClosed_{false};             // Q3
     bool qActiveReadersZero_{false};           // Q4
-    bool qEpochSettled_{false};                // Q5
+    bool qEpochSettled_{false};                // Q5（epochEvidence_ の検証結果）
     bool qPostStopEnqueueZero_{false};         // Q6
     bool qNoResurrection_{false};              // Q7
+    EpochQuiescenceEvidence epochEvidence_{};  // Q5 の根拠（事後監査用）
 };
 
 // ── Step 3: ReclaimPermit ───────────────────────────────────────────────────
@@ -31767,6 +32935,1226 @@ enum class RetireLane {
 
 ```
 
+### 📄 `src\audioengine\ISRRetireLatency.h`
+
+```
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <vector>
+
+#include "AtomicAccess.h"                 // ★ atomic 直接 dot-call を廃止（convo::*Atomic 経由）
+#include "../core/RetireDomain.h"   // ★ domain tag (v2.9): ドメイン別集計
+
+
+namespace convo {
+namespace isr {
+
+/**
+ * Retire latency recorder (D1: retire request -> actual free)
+ *
+ * 設計上の約束:
+ *  - 固定容量のスロット配列とアトミック操作のみを使う。動的確保もロックもしない。
+ *  - requestId は単調増加で、0 を払い出さない。ラップしたら払い出しを止める（再利用しない）。
+ *  - 対応付けはポインタ（オブジェクト同一性）で行い、epoch は記録用に持つだけ。
+ *  - 完了は CAS で 1 回だけ取り出す。2 回目の完了は unmatched として数え、上書きしない。
+ *  - スロット満杯は overflow として数え、その要求は観測に含めない。
+ *  - スロットは state で 3 段階（free / filling / ready）にし、書込み途中の公開を防ぐ。
+ */
+class RetireLatencyRecorder
+{
+public:
+    enum class Path : std::uint8_t
+    {
+        Sync = 0,        // terminalReclaim の同期解放
+        Drain,           // TerminalReclaimAuthority::drain
+        DrainAll,        // TerminalReclaimAuthority::drainAll（終了時の全排水）
+        Queue,           // DeferredDeletionQueue::reclaim
+        QueueOverflow,   // DeletionQueue::enqueue の容量超過による即時解放
+        Quarantine,      // RetireQuarantineStore::drain
+        Count
+    };
+
+    static constexpr std::size_t kPathCount = static_cast<std::size_t> (Path::Count);
+    static constexpr std::size_t kSlots = 512;
+    static constexpr std::size_t kRanges = 8;                    // RT スレッドごとの区画数
+    static constexpr std::size_t kRangeSize = kSlots / kRanges;  // 1 区画 64 スロット
+    static constexpr std::size_t kObservationCapacity = 256;
+    static constexpr std::uint64_t kThresholdNs = 50'000'000ull;   // 50 ms（変更しない）
+
+    static const char* pathName (Path p) noexcept
+    {
+        switch (p)
+        {
+            case Path::Sync:          return "sync";
+            case Path::Drain:         return "drain";
+            case Path::DrainAll:      return "drainAll";
+            case Path::Queue:         return "queue";
+            case Path::QueueOverflow: return "queueOverflow";
+            case Path::Quarantine:    return "quarantine";
+            default:                  return "unknown";
+        }
+    }
+
+    static RetireLatencyRecorder& instance() noexcept
+    {
+        static RetireLatencyRecorder recorder;
+        return recorder;
+    }
+
+    // 要求を記録する。戻り値 0 は「記録できなかった」（容量不足・ID 枯渇）。
+    std::uint64_t recordRequest (const void* object, std::uint64_t epoch,
+                                 std::uint64_t minReaderEpoch = 0,
+                                 std::uint32_t minReaderSlot = 0xFFFFFFFFu,
+                                 bool* created = nullptr) noexcept
+    {
+        if (created != nullptr)
+            *created = false;
+        if (object == nullptr)
+            return 0;
+
+        // 終了処理（drainAll 以降）の要求は測定対象外として別集計する
+        if (convo::consumeAtomic (shutdownPhase_, std::memory_order_acquire))
+        {
+            addCount (postShutdown_);
+            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+            return 0;
+        }
+
+        const std::uint64_t id = nextId_.fetch_add (1u, std::memory_order_relaxed) + 1u;
+
+        if (id == 0u || id == std::numeric_limits<std::uint64_t>::max())
+        {
+            addCount (idExhausted_);
+            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+            return 0;
+        }
+
+        // 同じポインタの再 enqueue（リトライ段階）では既存の要求を再利用する。
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            const std::uint8_t state = convo::consumeAtomic (slots_[i].state, std::memory_order_acquire);
+
+            if (state != kStateFree
+                && convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) == object)
+            {
+                // 既存記録。作成フラグは false のまま。未確定の最小 reader 情報だけ補完する
+                //   （既知の情報は上書きしない）。
+                if (minReaderSlot != 0xFFFFFFFFu
+                    && slots_[i].minReaderSlot.load (std::memory_order_relaxed) == 0xFFFFFFFFu)
+                {
+                    slots_[i].minReaderEpoch.store (minReaderEpoch, std::memory_order_relaxed);
+                    slots_[i].minReaderSlot.store (minReaderSlot, std::memory_order_relaxed);
+                }
+
+                return slots_[i].id.load (std::memory_order_relaxed);
+            }
+        }
+
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            std::uint8_t expected = kStateFree;
+
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed))
+            {
+                continue;
+            }
+
+            slots_[i].object.store (object, std::memory_order_relaxed);
+            slots_[i].id.store (id, std::memory_order_relaxed);
+            slots_[i].tsNs.store (nowNs(), std::memory_order_relaxed);
+            slots_[i].safeTsNs.store (0, std::memory_order_relaxed);
+            slots_[i].epoch.store (epoch, std::memory_order_relaxed);
+            slots_[i].minReaderEpoch.store (minReaderEpoch, std::memory_order_relaxed);
+            slots_[i].minReaderSlot.store (minReaderSlot, std::memory_order_relaxed);
+            convo::publishAtomic (slots_[i].state, kStateReady, std::memory_order_release);
+
+            addCount (requests_);
+
+            if (created != nullptr)
+                *created = true;
+
+            return id;
+        }
+
+        addCount (overflow_);
+        addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+        return 0;
+    }
+
+    // RT 経路用: TLS で確保した区画の中だけを走査する（O(kRangeSize)、確保・ロックなし）。
+    std::uint64_t recordRequestRT (const void* object, std::uint64_t epoch,
+                                   std::uint64_t minReaderEpoch = 0,
+                                   bool* created = nullptr) noexcept
+    {
+        if (created != nullptr)
+            *created = false;
+        if (object == nullptr)
+            return 0;
+
+        if (convo::consumeAtomic (shutdownPhase_, std::memory_order_acquire))
+        {
+            addCount (postShutdown_);
+            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+            return 0;
+        }
+
+        const std::uint64_t id = nextId_.fetch_add (1u, std::memory_order_relaxed) + 1u;
+
+        if (id == 0u || id == std::numeric_limits<std::uint64_t>::max())
+        {
+            addCount (idExhausted_);
+            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+            return 0;
+        }
+
+        const std::uint32_t range = rangeForCurrentThread();
+        const std::size_t begin = static_cast<std::size_t> (range) * kRangeSize;
+        const std::size_t end = begin + kRangeSize;
+
+        for (std::size_t i = begin; i < end; ++i)
+        {
+            std::uint8_t expected = kStateFree;
+
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed))
+            {
+                continue;
+            }
+
+            slots_[i].object.store (object, std::memory_order_relaxed);
+            slots_[i].id.store (id, std::memory_order_relaxed);
+            slots_[i].tsNs.store (nowNs(), std::memory_order_relaxed);
+            slots_[i].safeTsNs.store (0, std::memory_order_relaxed);
+            slots_[i].epoch.store (epoch, std::memory_order_relaxed);
+            slots_[i].minReaderEpoch.store (minReaderEpoch, std::memory_order_relaxed);
+            slots_[i].minReaderSlot.store (0xFFFFFFFFu, std::memory_order_relaxed);
+            convo::publishAtomic (slots_[i].state, kStateReady, std::memory_order_release);
+
+            addCount (requests_);
+            convo::fetchAddAtomic (rtRequests_, 1u, std::memory_order_acq_rel);
+
+            if (created != nullptr)
+                *created = true;
+
+            return id;
+        }
+
+        addCount (overflow_);
+        addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+        return 0;
+    }
+
+    // 指定 ID の記録だけを取り消す（object・id・ready の 3 条件が一致したときのみ）。
+    void cancelRequestById (const void* object, std::uint64_t requestId) noexcept
+    {
+        if (object == nullptr || requestId == 0u)
+            return;
+
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
+                continue;
+
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
+                continue;
+
+            if (slots_[i].id.load (std::memory_order_relaxed) != requestId)
+                continue;
+
+            std::uint8_t expected = kStateReady;
+
+            if (convo::compareExchangeAtomic (slots_[i].state, expected, kStateFree,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
+            {
+                addCount (cancelled_);
+            }
+
+            return;
+        }
+    }
+
+    // RT 版: TLS 区画内だけを走査する（O(kRangeSize)、ロック・確保なし）。
+    void cancelRequestRTById (const void* object, std::uint64_t requestId) noexcept
+    {
+        if (object == nullptr || requestId == 0u)
+            return;
+
+        const std::uint32_t range = rangeForCurrentThread();
+        const std::size_t begin = static_cast<std::size_t> (range) * kRangeSize;
+        const std::size_t end = begin + kRangeSize;
+
+        for (std::size_t i = begin; i < end; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
+                continue;
+
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
+                continue;
+
+            if (slots_[i].id.load (std::memory_order_relaxed) != requestId)
+                continue;
+
+            std::uint8_t expected = kStateReady;
+
+            if (convo::compareExchangeAtomic (slots_[i].state, expected, kStateFree,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
+            {
+                addCount (cancelled_);
+            }
+
+            return;
+        }
+    }
+
+    // enqueue に失敗した要求を取り消す（観測に含めない）。
+    void cancelRequest (const void* object) noexcept
+    {
+        std::size_t index = 0;
+
+        if (claim (object, index))
+        {
+            convo::publishAtomic (slots_[index].state, kStateFree, std::memory_order_release);
+            addCount (cancelled_);
+        }
+    }
+
+    // EBR 安全条件を満たした時刻を記録する（最初の 1 回だけ）。
+    void recordSafe (const void* object) noexcept
+    {
+        if (object == nullptr)
+            return;
+
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
+                continue;
+
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
+                continue;
+
+            const std::uint64_t now = nowNs();
+            std::uint64_t expected = 0;
+
+            convo::compareExchangeAtomic (slots_[i].safeTsNs, expected, now,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_relaxed);
+            return;
+        }
+    }
+
+    // 解放完了を記録する。対応する要求が無ければ unmatched として数える。
+    // ★ domain tag (v2.9 §4.2/§5): domain は enqueue 時の刻印（Unstamped=刻印漏れ・Unknown=意図的未特定）。
+    //   providerAbsent は Router の provider_ == nullptr（防御的・現行 API では到達不能）のときだけ true。
+    void recordComplete (const void* object, Path path, RetireDomainId domain,
+                         std::uint64_t firstScanTsNs = 0, bool providerAbsent = false) noexcept
+    {
+        // ★ W-2: shutdown 相以降の完了を要求拒否数とは別に数える
+        if (convo::consumeAtomic (shutdownPhase_, std::memory_order_acquire))
+            addCount (postShutdownCompletions_);
+
+        std::size_t index = 0;
+
+        if (! claim (object, index))
+        {
+            addCount (unmatchedCompletions_);
+            return;
+        }
+
+        const std::uint64_t id = slots_[index].id.load (std::memory_order_relaxed);
+        const std::uint64_t ts = slots_[index].tsNs.load (std::memory_order_relaxed);
+        const std::uint64_t safeTs = slots_[index].safeTsNs.load (std::memory_order_relaxed);
+        const std::uint64_t epoch = slots_[index].epoch.load (std::memory_order_relaxed);
+        const std::uint64_t minReaderEpoch = slots_[index].minReaderEpoch.load (std::memory_order_relaxed);
+        const std::uint32_t minReaderSlot = slots_[index].minReaderSlot.load (std::memory_order_relaxed);
+        convo::publishAtomic (slots_[index].state, kStateFree, std::memory_order_release);
+
+        const std::uint64_t now = nowNs();
+        const std::uint64_t latency = (now >= ts) ? (now - ts) : 0u;
+
+        addCount (completions_);
+        accumulatePath (path, latency);
+
+        // EBR 待ちと実行待ちの分離（safeTs が観測できた場合のみ）
+        if (safeTs != 0 && safeTs >= ts)
+        {
+            const std::uint64_t ebrNs = safeTs - ts;
+            const std::uint64_t execNs = (now >= safeTs) ? (now - safeTs) : 0u;
+            convo::fetchAddAtomic (ebrCount_, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (ebrSumNs_, ebrNs, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (execCount_, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (execSumNs_, execNs, std::memory_order_acq_rel);
+            updateMax (ebrMaxNs_, ebrNs);
+            updateMax (execMaxNs_, execNs);
+        }
+        else
+        {
+            convo::fetchAddAtomic (unobservedSafe_, 1u, std::memory_order_acq_rel);
+        }
+
+        // ★ 段階③ (2026-11-11, Owner 承認): 3 分類の計算と集計
+        //   既存の latency / ebr / exec の計算は上で終っている（判定は完全に不変）。
+        //   safeTs は生の値を渡す（safeTs < ts の順序不整合を
+        //   excluded に落とさず consistencyErrors に拾うため）。
+        const Classification cls = classifyTimes (ts, firstScanTsNs, safeTs, now);
+        const std::size_t pathIndex = static_cast<std::size_t> (path);
+
+        // ★ domain tag (v2.9 §5): ドメイン別の集計（既存の paths / totals は不変・追加のみ）
+        accumulateDomain (domainIndexFor (domain), path, cls, latency);
+        if (domain == RetireDomainId::Unstamped)
+            addCount (domainStampMissing_);
+        else if (domain == RetireDomainId::Unknown)
+            addCount (providerAbsent ? domainProviderAbsent_ : domainProviderUnknown_);
+        if (cls.excluded)
+        {
+            if (pathIndex < kPathCount)
+                convo::fetchAddAtomic (classExcluded_[pathIndex], 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classExcludedTotal_, 1u, std::memory_order_acq_rel);
+        }
+        else if (cls.inconsistent)
+        {
+            convo::fetchAddAtomic (classConsistencyErrors_, 1u, std::memory_order_acq_rel);
+            accumulateUnclassified (pathIndex, cls.unclassifiedNs);
+        }
+        else if (cls.classified)
+        {
+            convo::fetchAddAtomic (classClassifiedTotal_, 1u, std::memory_order_acq_rel);
+            accumulateComponent (driverCount_[pathIndex], driverSumNs_[pathIndex],
+                                 driverMaxNs_[pathIndex], driverOver_[pathIndex], cls.driverWaitNs);
+            accumulateComponent (ebrCountC_[pathIndex], ebrSumNsC_[pathIndex],
+                                 ebrMaxNsC_[pathIndex], ebrOverC_[pathIndex], cls.ebrWaitNs);
+            accumulateComponent (execCountC_[pathIndex], execSumNsC_[pathIndex],
+                                 execMaxNsC_[pathIndex], execOverC_[pathIndex], cls.execWaitNs);
+            // ★ 残差が実際にあるときだけ unclassified に数える（
+            //   分類できた要求を unclassified に加算しない）。
+            if (cls.unclassifiedNs > 0u)
+                accumulateUnclassified (pathIndex, cls.unclassifiedNs);
+        }
+        else
+        {
+            accumulateUnclassified (pathIndex, cls.unclassifiedNs);
+        }
+
+        appendObservation (id, epoch, latency, path, ts,
+                           (safeTs != 0 && safeTs >= ts) ? safeTs : 0,
+                           minReaderEpoch, minReaderSlot,
+                           firstScanTsNs, cls);
+    }
+
+    struct PathStats
+    {
+        std::uint64_t count = 0;
+        std::uint64_t overThreshold = 0;
+        std::uint64_t maxNs = 0;
+    };
+
+    // ★ 段階③: 3 分類のパス別集計（診断用。形式は設計書 §2 の JSON に対応）
+    struct ClassComponent
+    {
+        std::uint64_t count = 0;
+        std::uint64_t sumNs = 0;
+        std::uint64_t maxNs = 0;
+        std::uint64_t overThreshold = 0;
+    };
+    struct ClassifiedPath
+    {
+        ClassComponent driverWait;
+        ClassComponent ebrWait;
+        ClassComponent execWait;
+        std::uint64_t unclassifiedCount = 0;
+        std::uint64_t unclassifiedSumNs = 0;
+        std::uint64_t excludedCount = 0;   // safeTs 未観測（分類対象外）
+    };
+    // ★ domain tag (v2.9 §5.1): ドメイン別の 1 行分（4 行を常に出力する）
+    struct DomainStats
+    {
+        std::uint64_t count = 0;
+        std::uint64_t classified = 0;
+        std::uint64_t unclassified = 0;
+        std::uint64_t excluded = 0;
+        std::uint64_t consistencyErrors = 0;
+        std::uint64_t sumNs = 0;
+        std::uint64_t maxNs = 0;
+        std::uint64_t overThreshold = 0;
+        ClassifiedPath paths[kPathCount];
+    };
+
+    struct ClassifiedTotals
+    {
+        std::uint64_t requests = 0;
+        std::uint64_t completions = 0;
+        std::uint64_t classified = 0;
+        std::uint64_t unclassified = 0;
+        std::uint64_t excluded = 0;
+        std::uint64_t consistencyErrors = 0;
+        std::uint64_t pending = 0;
+    };
+
+    // ★ 段階③: 時刻から 3 分類を計算する純関数（テスト可能にするため public）
+    struct Classification
+    {
+        bool excluded = false;      // safeTs 未観測（分類しない）
+        bool inconsistent = false;  // 順序不整合（unclassified に全額）
+        bool classified = false;
+        std::uint64_t driverWaitNs = 0;
+        std::uint64_t ebrWaitNs = 0;
+        std::uint64_t execWaitNs = 0;
+        std::uint64_t unclassifiedNs = 0;
+    };
+    static Classification classifyTimes (std::uint64_t ts,
+                                         std::uint64_t firstScanTs,
+                                         std::uint64_t safeTs,
+                                         std::uint64_t now) noexcept
+    {
+        Classification c;
+        const std::uint64_t latency = (now >= ts) ? (now - ts) : 0u;
+        if (safeTs == 0)
+        {
+            c.excluded = true;            // 既存の unobservedSafe に計上される層
+            return c;
+        }
+        if (firstScanTs == 0)
+        {
+            c.unclassifiedNs = latency;   // 一度も走査されない（drainAll など）
+            return c;
+        }
+        if (firstScanTs < ts || safeTs < firstScanTs)
+        {
+            c.inconsistent = true;
+            c.unclassifiedNs = latency;
+            return c;
+        }
+        c.driverWaitNs = firstScanTs - ts;
+        c.ebrWaitNs = safeTs - firstScanTs;
+        c.execWaitNs = (now >= safeTs) ? (now - safeTs) : 0u;
+        const std::uint64_t sum = c.driverWaitNs + c.ebrWaitNs + c.execWaitNs;
+        if (sum > latency)
+        {
+            c.inconsistent = true;        // 時刻の年代があわない（0 埋めしない）
+            c.driverWaitNs = 0;
+            c.ebrWaitNs = 0;
+            c.execWaitNs = 0;
+            c.unclassifiedNs = latency;
+            return c;
+        }
+        c.classified = true;
+        c.unclassifiedNs = latency - sum;  // 実際の残差（0 埋めしない）
+        return c;
+    }
+
+    struct Observation
+    {
+        std::uint64_t requestId = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t latencyNs = 0;
+        std::uint8_t path = 0;
+        std::uint64_t enqueueTsNs = 0;     // 要求時刻
+        std::uint64_t safeTsNs = 0;        // EBR 安全到達時刻（0 = 未観測）
+        std::uint64_t minReaderEpoch = 0;  // 要求時の最小 reader epoch
+        std::uint32_t minReaderSlot = 0xFFFFFFFFu; // その保持スロット
+        // ★ 段階③ (2026-11-11, Owner 承認): 3 分類診断（追加・既存の判定は不変）
+        std::uint64_t firstScanTsNs = 0;   // 最初にreclaim走査で評価された時刻（0 = 未走査）
+        std::uint64_t driverWaitNs = 0;    // firstScanTs - ts
+        std::uint64_t ebrWaitNs = 0;       // safeTs - firstScanTs
+        std::uint64_t execWaitNs = 0;      // now - safeTs
+        std::uint64_t unclassifiedNs = 0;  // latency - (driver+ebr+exec)（負なら latency 全額）
+        std::uint8_t classified = 0;       // 1 = 3 分類成立 / 0 = 未分類
+    };
+
+    struct Snapshot
+    {
+        std::uint64_t requests = 0;
+        std::uint64_t completions = 0;
+        std::uint64_t unmatchedCompletions = 0;
+        std::uint64_t overflow = 0;
+        std::uint64_t idExhausted = 0;
+        std::uint64_t cancelled = 0;
+        std::uint64_t postShutdownRequests = 0;   // drainAll 以降の要求
+        std::uint64_t postShutdownCompletions = 0; // ★ W-2: shutdown 相以降の完了
+        std::uint64_t recordMisses = 0;           // ★ C5: 記録できなかった要求
+        std::uint64_t ebrCount = 0;
+        std::uint64_t ebrSumNs = 0;
+        std::uint64_t ebrMaxNs = 0;
+        std::uint64_t execCount = 0;
+        std::uint64_t execSumNs = 0;
+        std::uint64_t execMaxNs = 0;
+        std::uint64_t unobservedSafe = 0;
+        std::uint64_t rtRequests = 0;
+        PathStats paths[kPathCount];
+        // ★ 段階③: 3 分類（診断用の追加情報）
+        ClassifiedPath classifiedPaths[kPathCount];
+        ClassifiedTotals classTotals;
+        // ★ domain tag (v2.9 §5): ドメイン別の集計と原因カウンタ
+        DomainStats domains[static_cast<std::size_t> (kRetireDomainCount)];
+        std::uint64_t stampMissing = 0;
+        std::uint64_t providerUnknown = 0;
+        std::uint64_t providerAbsent = 0;
+        std::vector<Observation> observations;
+        std::vector<Observation> pending;   // 完了が観測できていない要求（先頭 8 件）
+    };
+
+    // 2 段階記録（Owner 条件）: 最終 drain 直前の状態を保持する
+    struct StageStats
+    {
+        bool valid = false;
+        std::uint64_t requests = 0;
+        std::uint64_t completions = 0;
+        std::uint64_t unmatchedCompletions = 0;
+        std::uint64_t overflow = 0;
+        std::uint64_t idExhausted = 0;
+        std::uint64_t postShutdownRequests = 0;
+        std::uint64_t postShutdownCompletions = 0; // ★ W-2
+        std::uint64_t recordMisses = 0;   // ★ C5: 記録できなかった要求
+        std::uint64_t pending = 0;
+        std::uint64_t ebrCount = 0;
+        std::uint64_t ebrSumNs = 0;
+        std::uint64_t ebrMaxNs = 0;
+        std::uint64_t execCount = 0;
+        std::uint64_t execSumNs = 0;
+        std::uint64_t execMaxNs = 0;
+        std::uint64_t unobservedSafe = 0;
+        std::uint64_t rtRequests = 0;
+        PathStats paths[kPathCount];
+    };
+
+    void captureRuntimeStage() noexcept
+    {
+        StageStats s;
+        s.valid = true;
+        s.requests = convo::consumeAtomic (requests_, std::memory_order_acquire);
+        s.completions = convo::consumeAtomic (completions_, std::memory_order_acquire);
+        s.unmatchedCompletions = convo::consumeAtomic (unmatchedCompletions_, std::memory_order_acquire);
+        s.overflow = convo::consumeAtomic (overflow_, std::memory_order_acquire);
+        s.idExhausted = convo::consumeAtomic (idExhausted_, std::memory_order_acquire);
+        s.postShutdownRequests = convo::consumeAtomic (postShutdown_, std::memory_order_acquire);
+        s.postShutdownCompletions = convo::consumeAtomic (postShutdownCompletions_, std::memory_order_acquire);
+        s.recordMisses = convo::consumeAtomic (recordMisses_, std::memory_order_acquire);
+        s.ebrCount = convo::consumeAtomic (ebrCount_, std::memory_order_acquire);
+        s.ebrSumNs = convo::consumeAtomic (ebrSumNs_, std::memory_order_acquire);
+        s.ebrMaxNs = convo::consumeAtomic (ebrMaxNs_, std::memory_order_acquire);
+        s.execCount = convo::consumeAtomic (execCount_, std::memory_order_acquire);
+        s.execSumNs = convo::consumeAtomic (execSumNs_, std::memory_order_acquire);
+        s.execMaxNs = convo::consumeAtomic (execMaxNs_, std::memory_order_acquire);
+        s.unobservedSafe = convo::consumeAtomic (unobservedSafe_, std::memory_order_acquire);
+        s.rtRequests = convo::consumeAtomic (rtRequests_, std::memory_order_acquire);
+        s.pending = (s.requests > s.completions) ? (s.requests - s.completions) : 0;
+
+        for (std::size_t p = 0; p < kPathCount; ++p)
+        {
+            s.paths[p].count = convo::consumeAtomic (pathCount_[p], std::memory_order_acquire);
+            s.paths[p].overThreshold = convo::consumeAtomic (pathOver_[p], std::memory_order_acquire);
+            s.paths[p].maxNs = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
+        }
+
+        std::size_t slot = 0;
+        const std::size_t current = convo::consumeAtomic (runtimeStageSlot_, std::memory_order_acquire);
+        slot = (current == 0u) ? 1u : 0u;
+        runtimeStage_[slot] = s;
+        convo::publishAtomic (runtimeStageSlot_, static_cast<std::size_t> (slot + 1u), std::memory_order_release);
+    }
+
+    // ★ W-2 (2026-11-10): 違反レポート生成時点（final 段）の累積値を保持する。
+    //   postTeardown との差分を取るために使う。判定には使わない。
+    void captureFinalStage() noexcept
+    {
+        const Snapshot s = snapshot();
+        StageStats st;
+        st.valid = true;
+        st.requests = s.requests;
+        st.completions = s.completions;
+        st.unmatchedCompletions = s.unmatchedCompletions;
+        st.overflow = s.overflow;
+        st.idExhausted = s.idExhausted;
+        st.postShutdownRequests = s.postShutdownRequests;
+        st.postShutdownCompletions = s.postShutdownCompletions;
+        st.recordMisses = s.recordMisses;
+        st.pending = (s.requests > s.completions) ? (s.requests - s.completions) : 0;
+        st.ebrCount = s.ebrCount;
+        st.ebrSumNs = s.ebrSumNs;
+        st.ebrMaxNs = s.ebrMaxNs;
+        st.execCount = s.execCount;
+        st.execSumNs = s.execSumNs;
+        st.execMaxNs = s.execMaxNs;
+        st.unobservedSafe = s.unobservedSafe;
+        st.rtRequests = s.rtRequests;
+        for (std::size_t p = 0; p < kPathCount; ++p)
+            st.paths[p] = s.paths[p];
+
+        finalStage_ = st;
+        convo::publishAtomic (finalStageValid_, true, std::memory_order_release);
+    }
+
+    StageStats finalStage() const noexcept
+    {
+        return finalStage_;
+    }
+
+    StageStats runtimeStage() const noexcept
+    {        const std::size_t marker = convo::consumeAtomic (runtimeStageSlot_, std::memory_order_acquire);
+
+        if (marker == 0u)
+            return StageStats{};
+
+        return runtimeStage_[(marker - 1u) == 0u ? 0u : 1u];
+    }
+
+    Snapshot snapshot() const
+    {
+        Snapshot s;
+        s.requests = convo::consumeAtomic (requests_, std::memory_order_acquire);
+        s.completions = convo::consumeAtomic (completions_, std::memory_order_acquire);
+        s.unmatchedCompletions = convo::consumeAtomic (unmatchedCompletions_, std::memory_order_acquire);
+        s.overflow = convo::consumeAtomic (overflow_, std::memory_order_acquire);
+        s.idExhausted = convo::consumeAtomic (idExhausted_, std::memory_order_acquire);
+        s.cancelled = convo::consumeAtomic (cancelled_, std::memory_order_acquire);
+        s.postShutdownRequests = convo::consumeAtomic (postShutdown_, std::memory_order_acquire);
+        s.postShutdownCompletions = convo::consumeAtomic (postShutdownCompletions_, std::memory_order_acquire);
+        s.recordMisses = convo::consumeAtomic (recordMisses_, std::memory_order_acquire);
+        s.ebrCount = convo::consumeAtomic (ebrCount_, std::memory_order_acquire);
+        s.ebrSumNs = convo::consumeAtomic (ebrSumNs_, std::memory_order_acquire);
+        s.ebrMaxNs = convo::consumeAtomic (ebrMaxNs_, std::memory_order_acquire);
+        s.execCount = convo::consumeAtomic (execCount_, std::memory_order_acquire);
+        s.execSumNs = convo::consumeAtomic (execSumNs_, std::memory_order_acquire);
+        s.execMaxNs = convo::consumeAtomic (execMaxNs_, std::memory_order_acquire);
+        s.unobservedSafe = convo::consumeAtomic (unobservedSafe_, std::memory_order_acquire);
+        s.rtRequests = convo::consumeAtomic (rtRequests_, std::memory_order_acquire);
+
+        for (std::size_t p = 0; p < kPathCount; ++p)
+        {
+            s.paths[p].count = convo::consumeAtomic (pathCount_[p], std::memory_order_acquire);
+            s.paths[p].overThreshold = convo::consumeAtomic (pathOver_[p], std::memory_order_acquire);
+            s.paths[p].maxNs = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
+        }
+
+        // 未完了の要求（診断用に先頭 8 件だけ）
+        for (std::size_t i = 0; i < kSlots && s.pending.size() < 8; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
+                continue;
+
+            Observation o;
+            o.requestId = slots_[i].id.load (std::memory_order_relaxed);
+            o.epoch = slots_[i].epoch.load (std::memory_order_relaxed);
+            o.latencyNs = 0;
+            o.path = 0xFFu;
+            s.pending.push_back (o);
+        }
+
+        const std::uint64_t written = convo::consumeAtomic (observationCount_, std::memory_order_acquire);
+        const std::uint64_t limit = written < kObservationCapacity ? written : kObservationCapacity;
+
+        for (std::uint64_t i = 0; i < limit; ++i)
+        {
+            const auto& o = observations_[i];
+
+            if (o.path == 0xFFu)
+                continue;
+
+            s.observations.push_back (o);
+        }
+
+        // ★ 段階③: 3 分類のパス別集計（診断用の追加情報）
+        for (std::size_t p = 0; p < kPathCount; ++p)
+        {
+            auto& cp = s.classifiedPaths[p];
+            cp.driverWait.count = convo::consumeAtomic (driverCount_[p], std::memory_order_acquire);
+            cp.driverWait.sumNs = convo::consumeAtomic (driverSumNs_[p], std::memory_order_acquire);
+            cp.driverWait.maxNs = convo::consumeAtomic (driverMaxNs_[p], std::memory_order_acquire);
+            cp.driverWait.overThreshold = convo::consumeAtomic (driverOver_[p], std::memory_order_acquire);
+            cp.ebrWait.count = convo::consumeAtomic (ebrCountC_[p], std::memory_order_acquire);
+            cp.ebrWait.sumNs = convo::consumeAtomic (ebrSumNsC_[p], std::memory_order_acquire);
+            cp.ebrWait.maxNs = convo::consumeAtomic (ebrMaxNsC_[p], std::memory_order_acquire);
+            cp.ebrWait.overThreshold = convo::consumeAtomic (ebrOverC_[p], std::memory_order_acquire);
+            cp.execWait.count = convo::consumeAtomic (execCountC_[p], std::memory_order_acquire);
+            cp.execWait.sumNs = convo::consumeAtomic (execSumNsC_[p], std::memory_order_acquire);
+            cp.execWait.maxNs = convo::consumeAtomic (execMaxNsC_[p], std::memory_order_acquire);
+            cp.execWait.overThreshold = convo::consumeAtomic (execOverC_[p], std::memory_order_acquire);
+            cp.unclassifiedCount = convo::consumeAtomic (classUnclassifiedCount_[p], std::memory_order_acquire);
+            cp.unclassifiedSumNs = convo::consumeAtomic (classUnclassifiedSumNs_[p], std::memory_order_acquire);
+            cp.excludedCount = convo::consumeAtomic (classExcluded_[p], std::memory_order_acquire);
+        }
+
+        s.classTotals.requests = s.requests;
+        s.classTotals.completions = s.completions;
+        s.classTotals.classified = convo::consumeAtomic (classClassifiedTotal_, std::memory_order_acquire);
+        s.classTotals.unclassified = convo::consumeAtomic (classUnclassifiedTotal_, std::memory_order_acquire);
+        s.classTotals.excluded = convo::consumeAtomic (classExcludedTotal_, std::memory_order_acquire);
+        s.classTotals.consistencyErrors = convo::consumeAtomic (classConsistencyErrors_, std::memory_order_acquire);
+        s.classTotals.pending = (s.requests > s.completions) ? (s.requests - s.completions) : 0;
+
+        // ★ domain tag (v2.9 §5.1): 4 ドメイン分を常に埋める（0 件でも省略しない）
+        for (std::size_t d = 0; d < static_cast<std::size_t> (kRetireDomainCount); ++d)
+        {
+            auto& ds = s.domains[d];
+            const auto& t = domainTotals_[d];
+            ds.count = convo::consumeAtomic (t.count, std::memory_order_acquire);
+            ds.classified = convo::consumeAtomic (t.classified, std::memory_order_acquire);
+            ds.unclassified = convo::consumeAtomic (t.unclassified, std::memory_order_acquire);
+            ds.excluded = convo::consumeAtomic (t.excluded, std::memory_order_acquire);
+            ds.consistencyErrors = convo::consumeAtomic (t.consistencyErrors, std::memory_order_acquire);
+            ds.sumNs = convo::consumeAtomic (t.sumNs, std::memory_order_acquire);
+            ds.maxNs = convo::consumeAtomic (t.maxNs, std::memory_order_acquire);
+            ds.overThreshold = convo::consumeAtomic (t.overThreshold, std::memory_order_acquire);
+
+            for (std::size_t p = 0; p < kPathCount; ++p)
+            {
+                const auto& dp = domainPaths_[d][p];
+                auto& cp = ds.paths[p];
+                cp.driverWait.count = convo::consumeAtomic (dp.driverCount, std::memory_order_acquire);
+                cp.driverWait.sumNs = convo::consumeAtomic (dp.driverSum, std::memory_order_acquire);
+                cp.driverWait.maxNs = convo::consumeAtomic (dp.driverMax, std::memory_order_acquire);
+                cp.driverWait.overThreshold = convo::consumeAtomic (dp.driverOver, std::memory_order_acquire);
+                cp.ebrWait.count = convo::consumeAtomic (dp.ebrCount, std::memory_order_acquire);
+                cp.ebrWait.sumNs = convo::consumeAtomic (dp.ebrSum, std::memory_order_acquire);
+                cp.ebrWait.maxNs = convo::consumeAtomic (dp.ebrMax, std::memory_order_acquire);
+                cp.ebrWait.overThreshold = convo::consumeAtomic (dp.ebrOver, std::memory_order_acquire);
+                cp.execWait.count = convo::consumeAtomic (dp.execCount, std::memory_order_acquire);
+                cp.execWait.sumNs = convo::consumeAtomic (dp.execSum, std::memory_order_acquire);
+                cp.execWait.maxNs = convo::consumeAtomic (dp.execMax, std::memory_order_acquire);
+                cp.execWait.overThreshold = convo::consumeAtomic (dp.execOver, std::memory_order_acquire);
+                cp.unclassifiedCount = convo::consumeAtomic (dp.unclassifiedCount, std::memory_order_acquire);
+                cp.unclassifiedSumNs = convo::consumeAtomic (dp.unclassifiedSum, std::memory_order_acquire);
+                cp.excludedCount = convo::consumeAtomic (dp.excluded, std::memory_order_acquire);
+            }
+        }
+
+        s.stampMissing = convo::consumeAtomic (domainStampMissing_, std::memory_order_acquire);
+        s.providerUnknown = convo::consumeAtomic (domainProviderUnknown_, std::memory_order_acquire);
+        s.providerAbsent = convo::consumeAtomic (domainProviderAbsent_, std::memory_order_acquire);
+
+        return s;
+    }
+
+    // 終了処理に入ったことを記録する（以後の要求は測定対象外）
+    void markShutdownPhase() noexcept
+    {
+        captureRuntimeStage();   // ★ 最終 drain 直前の状態を保存する
+        convo::publishAtomic (shutdownPhase_, true, std::memory_order_release);
+    }
+
+    // ★ 呼び出し契約: reset() は「誰も記録・参照していない静止状態」からのみ呼ぶ。
+    //   本番の呼び出しは AudioEngine の ctor（initialize() 前・オーディオコールバック登録前）だけで、
+    //   テストでは各テストの初期化で 1 回。RT スレッドやワーカーが動いている間に呼ぶと、
+    //   記録系と同じスロット・カウンタへ並行アクセスするため、オーダーの強弱に関係なく競合になる。
+    //   カウンタの初期化は release で行い、読み手は acquire で観測する（同時実行を前提にしない）。
+    void reset() noexcept
+    {
+        convo::publishAtomic (shutdownPhase_, false, std::memory_order_release);
+        runtimeStage_[0] = StageStats{};
+        runtimeStage_[1] = StageStats{};
+        convo::publishAtomic (runtimeStageSlot_, 0, std::memory_order_release);
+        convo::publishAtomic (postShutdown_, 0, std::memory_order_release);
+        convo::publishAtomic (postShutdownCompletions_, 0, std::memory_order_release);
+        convo::publishAtomic (recordMisses_, 0, std::memory_order_release);
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            convo::publishAtomic (slots_[i].state, kStateFree, std::memory_order_release);
+            slots_[i].object.store (nullptr, std::memory_order_relaxed);
+            slots_[i].id.store (0, std::memory_order_relaxed);
+            slots_[i].tsNs.store (0, std::memory_order_relaxed);
+            slots_[i].epoch.store (0, std::memory_order_relaxed);
+        }
+
+        for (std::size_t i = 0; i < kObservationCapacity; ++i)
+            observations_[i] = Observation{0, 0, 0, 0xFFu};
+
+        convo::publishAtomic (requests_, 0, std::memory_order_release);
+        convo::publishAtomic (completions_, 0, std::memory_order_release);
+        convo::publishAtomic (unmatchedCompletions_, 0, std::memory_order_release);
+        convo::publishAtomic (overflow_, 0, std::memory_order_release);
+        convo::publishAtomic (idExhausted_, 0, std::memory_order_release);
+        convo::publishAtomic (cancelled_, 0, std::memory_order_release);
+        convo::publishAtomic (observationCount_, 0, std::memory_order_release);
+        convo::publishAtomic (nextId_, 0, std::memory_order_release);
+        convo::publishAtomic (nextRange_, 0, std::memory_order_release);
+        convo::publishAtomic (ebrCount_, 0, std::memory_order_release);
+        convo::publishAtomic (ebrSumNs_, 0, std::memory_order_release);
+        convo::publishAtomic (ebrMaxNs_, 0, std::memory_order_release);
+        convo::publishAtomic (execCount_, 0, std::memory_order_release);
+        convo::publishAtomic (execSumNs_, 0, std::memory_order_release);
+        convo::publishAtomic (execMaxNs_, 0, std::memory_order_release);
+        convo::publishAtomic (unobservedSafe_, 0, std::memory_order_release);
+        convo::publishAtomic (rtRequests_, 0, std::memory_order_release);
+
+        for (std::size_t p = 0; p < kPathCount; ++p)
+        {
+            convo::publishAtomic (pathCount_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathOver_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathMaxNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverCount_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverSumNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverMaxNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (driverOver_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrCountC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrSumNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrMaxNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (ebrOverC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execCountC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execSumNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execMaxNsC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (execOverC_[p], 0, std::memory_order_release);
+            convo::publishAtomic (classUnclassifiedCount_[p], 0, std::memory_order_release);
+            convo::publishAtomic (classUnclassifiedSumNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (classExcluded_[p], 0, std::memory_order_release);
+        }
+        convo::publishAtomic (classClassifiedTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classUnclassifiedTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classUnclassifiedSumTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classExcludedTotal_, 0, std::memory_order_release);
+        convo::publishAtomic (classConsistencyErrors_, 0, std::memory_order_release);
+
+        // ★ domain tag: ドメイン別の集計も初期化する
+        for (std::size_t d = 0; d < static_cast<std::size_t> (kRetireDomainCount); ++d)
+        {
+            auto& t = domainTotals_[d];
+            convo::publishAtomic (t.count, 0); convo::publishAtomic (t.classified, 0); convo::publishAtomic (t.unclassified, 0);
+            convo::publishAtomic (t.excluded, 0); convo::publishAtomic (t.consistencyErrors, 0);
+            convo::publishAtomic (t.sumNs, 0); convo::publishAtomic (t.maxNs, 0); convo::publishAtomic (t.overThreshold, 0);
+            for (std::size_t p = 0; p < kPathCount; ++p)
+            {
+                auto& dp = domainPaths_[d][p];
+                convo::publishAtomic (dp.driverCount, 0); convo::publishAtomic (dp.driverSum, 0);
+                convo::publishAtomic (dp.driverMax, 0); convo::publishAtomic (dp.driverOver, 0);
+                convo::publishAtomic (dp.ebrCount, 0); convo::publishAtomic (dp.ebrSum, 0);
+                convo::publishAtomic (dp.ebrMax, 0); convo::publishAtomic (dp.ebrOver, 0);
+                convo::publishAtomic (dp.execCount, 0); convo::publishAtomic (dp.execSum, 0);
+                convo::publishAtomic (dp.execMax, 0); convo::publishAtomic (dp.execOver, 0);
+                convo::publishAtomic (dp.unclassifiedCount, 0); convo::publishAtomic (dp.unclassifiedSum, 0);
+                convo::publishAtomic (dp.excluded, 0);
+            }
+        }
+        convo::publishAtomic (domainStampMissing_, 0, std::memory_order_release);
+        convo::publishAtomic (domainProviderUnknown_, 0, std::memory_order_release);
+        convo::publishAtomic (domainProviderAbsent_, 0, std::memory_order_release);
+    }
+
+private:
+    // ★ domain tag (v2.9 §5): ドメイン別の集計領域（診断専用・既存の集計は不変）
+    struct DomainTotals
+    {
+        std::atomic<std::uint64_t> count { 0 };
+        std::atomic<std::uint64_t> classified { 0 };
+        std::atomic<std::uint64_t> unclassified { 0 };
+        std::atomic<std::uint64_t> excluded { 0 };
+        std::atomic<std::uint64_t> consistencyErrors { 0 };
+        std::atomic<std::uint64_t> sumNs { 0 };
+        std::atomic<std::uint64_t> maxNs { 0 };
+        std::atomic<std::uint64_t> overThreshold { 0 };
+    };
+
+    struct DomainPathCounters
+    {
+        std::atomic<std::uint64_t> driverCount { 0 };
+        std::atomic<std::uint64_t> driverSum { 0 };
+        std::atomic<std::uint64_t> driverMax { 0 };
+        std::atomic<std::uint64_t> driverOver { 0 };
+        std::atomic<std::uint64_t> ebrCount { 0 };
+        std::atomic<std::uint64_t> ebrSum { 0 };
+        std::atomic<std::uint64_t> ebrMax { 0 };
+        std::atomic<std::uint64_t> ebrOver { 0 };
+        std::atomic<std::uint64_t> execCount { 0 };
+        std::atomic<std::uint64_t> execSum { 0 };
+        std::atomic<std::uint64_t> execMax { 0 };
+        std::atomic<std::uint64_t> execOver { 0 };
+        std::atomic<std::uint64_t> unclassifiedCount { 0 };
+        std::atomic<std::uint64_t> unclassifiedSum { 0 };
+        std::atomic<std::uint64_t> excluded { 0 };
+    };
+
+    static std::size_t domainIndexFor (RetireDomainId domain) noexcept
+    {
+        const auto raw = static_cast<std::size_t> (domain);
+        return raw < static_cast<std::size_t> (kRetireDomainCount)
+                   ? raw
+                   : static_cast<std::size_t> (RetireDomainId::Unknown);
+    }
+
+    void accumulateDomain (std::size_t domainIdx, Path path, const Classification& cls,
+                           std::uint64_t latency) noexcept
+    {
+        if (domainIdx >= static_cast<std::size_t> (kRetireDomainCount))
+            return;
+
+        auto& t = domainTotals_[domainIdx];
+        addCount (t.count);
+        convo::fetchAddAtomic (t.sumNs, latency, std::memory_order_acq_rel);
+        updateMax (t.maxNs, latency);
+        if (latency > kThresholdNs)
+            addCount (t.overThreshold);
+
+        const std::size_t pathIndex = static_cast<std::size_t> (path);
+        if (pathIndex >= kPathCount)
+            return;
+
+        auto& dp = domainPaths_[domainIdx][pathIndex];
+        if (cls.excluded)
+        {
+            addCount (t.excluded);
+            addCount (dp.excluded);
+        }
+        else if (cls.inconsistent)
+        {
+            addCount (t.consistencyErrors);
+            addCount (t.unclassified);
+            convo::fetchAddAtomic (dp.unclassifiedCount, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (dp.unclassifiedSum, cls.unclassifiedNs, std::memory_order_acq_rel);
+        }
+        else if (cls.classified)
+        {
+            addCount (t.classified);
+            accumulateComponent (dp.driverCount, dp.driverSum, dp.driverMax, dp.driverOver,
+                                 cls.driverWaitNs);
+            accumulateComponent (dp.ebrCount, dp.ebrSum, dp.ebrMax, dp.ebrOver, cls.ebrWaitNs);
+            accumulateComponent (dp.execCount, dp.execSum, dp.execMax, dp.execOver,
+                                 cls.execWaitNs);
+            if (cls.unclassifiedNs > 0u)
+            {
+                addCount (t.unclassified);
+                convo::fetchAddAtomic (dp.unclassifiedCount, 1u, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (dp.unclassifiedSum, cls.unclassifiedNs, std::memory_order_acq_rel);
+            }
+        }
+        else
+        {
+            addCount (t.unclassified);
+            convo::fetchAddAtomic (dp.unclassifiedCount, 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (dp.unclassifiedSum, cls.unclassifiedNs, std::memory_order_acq_rel);
+        }
+    }
+
+    DomainTotals domainTotals_[static_cast<std::size_t> (kRetireDomainCount)];
+    DomainPathCounters domainPaths_[static_cast<std::size_t> (kRetireDomainCount)][kPathCount];
+    std::atomic<std::uint64_t> domainStampMissing_ { 0 };
+    std::atomic<std::uint64_t> domainProviderUnknown_ { 0 };
+    std::atomic<std::uint64_t> domainProviderAbsent_ { 0 };
+
+    static constexpr std::uint8_t kStateFree = 0;
+    static constexpr std::uint8_t kStateFilling = 1;
+    static constexpr std::uint8_t kStateReady = 2;
+
+    struct Slot
+    {
+        std::atomic<std::uint8_t> state{kStateFree};
+        std::atomic<const void*> object{nullptr};
+        std::atomic<std::uint64_t> id{0};
+        std::atomic<std::uint64_t> tsNs{0};        // enqueueTs
+        std::atomic<std::uint64_t> safeTsNs{0};    // 0 = 未観測（強制解放など）
+        std::atomic<std::uint64_t> epoch{0};       // enqueueEpoch
+        std::atomic<std::uint64_t> minReaderEpoch{0};
+        std::atomic<std::uint32_t> minReaderSlot{0xFFFFFFFFu};
+    };
+
+    RetireLatencyRecorder() { reset(); }
+
+    static std::uint64_t nowNs() noexcept
+    {
+        using namespace std::chrono;
+        return static_cast<std::uint64_t> (
+            duration_cast<nanoseconds> (steady_clock::now().time_since_epoch()).count());
+    }
+
+    std::uint32_t rangeForCurrentThread() noexcept
+    {
+        // RT スレッド（recordRequestRT → claim）から初回アクセスされ得る。
+        // 値は定数初期化される std::uint32_t で、TLS ブロックは .tdata に置かれ、
+        // 初回アクセス時の動的初期化・確保・ロック・ガード変数は発生しない（MSVC 実測）。
+        // 初回だけ relaxed な fetch_add と剰余で 8 range の 1 つを決め、以降は読み出しのみ。
+        thread_local std::uint32_t assigned = 0xFFFFFFFFu;  // NOLINT(thread-local) RT-SAFE: constant-initialized POD in .tdata (no dynamic init/alloc/lock/guard); first use is a relaxed fetch_add + modulo only and the 8-range assignment contract is unchanged
+
+        if (assigned == 0xFFFFFFFFu)
+            assigned = convo::fetchAddAtomic (nextRange_, 1u, std::memory_order_relaxed)
+                       % static_cast<std::uint32_t> (kRanges);
+
+        return assigned;
+    }
+
+    static void addCount (std::atomic<std::uint64_t>& counter) noexcept
+    {
+        convo::fetchAddAtomic (counter, 1u, std::memory_order_acq_rel);
+    }
+
+    // object に対応する ready スロットを 1 つだけ確保する（CAS で二重取得を防ぐ）。
+    bool claim (const void* object, std::size_t& index) noexcept
+    {
+        if (object == nullptr)
+            return false;
+
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
+                continue;
+
+            if (convo::consumeAtomic (slots_[i].object, std::memory_order_acquire) != object)
+                continue;
+
+            std::uint8_t expected = kStateReady;
+
+            if (convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
+            {
+                index = i;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // ★ 段階③: 1 成分（driver/ebr/exec）の集計
+    static void accumulateComponent (std::atomic<std::uint64_t>& count,
+                                     std::atomic<std::uint64_t>& sumNs,
+                                     std::atomic<std::uint64_t>& maxNs,
+                                     std::atomic<std::uint64_t>& overThreshold,
+                                     std::uint64_t value) noexcept
+    {
+        convo::fetchAddAtomic (count, 1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (sumNs, value, std::memory_order_acq_rel);
+        if (value > kThresholdNs)
+            convo::fetchAddAtomic (overThreshold, 1u, std::memory_order_acq_rel);
+        updateMax (maxNs, value);
+    }
+    void accumulateUnclassified (std::size_t pathIndex, std::uint64_t value) noexcept
+    {
+        convo::fetchAddAtomic (classUnclassifiedTotal_, 1u, std::memory_order_acq_rel);
+        convo::fetchAddAtomic (classUnclassifiedSumTotal_, value, std::memory_order_acq_rel);
+        if (pathIndex < kPathCount)
+        {
+            convo::fetchAddAtomic (classUnclassifiedCount_[pathIndex], 1u, std::memory_order_acq_rel);
+            convo::fetchAddAtomic (classUnclassifiedSumNs_[pathIndex], value, std::memory_order_acq_rel);
+        }
+    }
+    static void updateMax (std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
+    {
+        std::uint64_t current = convo::consumeAtomic (target, std::memory_order_acquire);
+
+        while (value > current
+               && ! convo::compareExchangeWeakAtomic (target, current, value,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
+        {
+        }
+    }
+
+    void accumulatePath (Path path, std::uint64_t latency) noexcept
+    {
+        const std::size_t p = static_cast<std::size_t> (path);
+
+        if (p >= kPathCount)
+            return;
+
+        convo::fetchAddAtomic (pathCount_[p], 1u, std::memory_order_acq_rel);
+
+        if (latency > kThresholdNs)
+            convo::fetchAddAtomic (pathOver_[p], 1u, std::memory_order_acq_rel);
+
+        std::uint64_t current = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
+
+        while (latency > current
+               && ! convo::compareExchangeWeakAtomic (pathMaxNs_[p], current, latency,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
+        {
+        }
+    }
+
+    void appendObservation (std::uint64_t id, std::uint64_t epoch,
+                            std::uint64_t latency, Path path,
+                            std::uint64_t enqueueTs, std::uint64_t safeTs,
+                            std::uint64_t minReaderEpoch, std::uint32_t minReaderSlot,
+                            std::uint64_t firstScanTs = 0,
+                            Classification cls = Classification{}) noexcept
+    {
+        const std::uint64_t index = convo::fetchAddAtomic (observationCount_, 1u, std::memory_order_acq_rel);
+        Observation o;
+        o.requestId = id;
+        o.epoch = epoch;
+        o.latencyNs = latency;
+        o.path = static_cast<std::uint8_t> (path);
+        o.enqueueTsNs = enqueueTs;
+        o.safeTsNs = safeTs;
+        o.minReaderEpoch = minReaderEpoch;
+        o.minReaderSlot = minReaderSlot;
+        // ★ 段階③: 3 分類の値（診断用。既存フィールドは不変）
+        o.firstScanTsNs = firstScanTs;
+        o.driverWaitNs = cls.driverWaitNs;
+        o.ebrWaitNs = cls.ebrWaitNs;
+        o.execWaitNs = cls.execWaitNs;
+        o.unclassifiedNs = cls.unclassifiedNs;
+        o.classified = (cls.classified ? 1u : 0u);
+        observations_[index % kObservationCapacity] = o;
+    }
+
+    Slot slots_[kSlots];
+    Observation observations_[kObservationCapacity];
+
+    std::atomic<std::uint64_t> nextId_{0};
+    std::atomic<std::uint32_t> nextRange_{0};
+    std::atomic<std::uint64_t> requests_{0};
+    std::atomic<std::uint64_t> completions_{0};
+    std::atomic<std::uint64_t> unmatchedCompletions_{0};
+    std::atomic<std::uint64_t> overflow_{0};
+    std::atomic<std::uint64_t> idExhausted_{0};
+    std::atomic<std::uint64_t> cancelled_{0};
+    std::atomic<std::uint64_t> postShutdown_{0};
+    std::atomic<std::uint64_t> postShutdownCompletions_{0};   // ★ W-2
+    // ★ C5 (2026-11-10): 記録できなかった要求の総数（overflow・ID 枯渇・shutdown 相）
+    std::atomic<std::uint64_t> recordMisses_{0};
+    std::atomic<bool> shutdownPhase_{false};
+    StageStats runtimeStage_[2]{};
+    std::atomic<std::size_t> runtimeStageSlot_{0};
+    // ★ W-2: final 段（違反レポート生成時点）
+    StageStats finalStage_{};
+    std::atomic<bool> finalStageValid_{false};
+    std::atomic<std::uint64_t> observationCount_{0};
+    std::atomic<std::uint64_t> ebrCount_{0};
+    std::atomic<std::uint64_t> ebrSumNs_{0};
+    std::atomic<std::uint64_t> ebrMaxNs_{0};
+    std::atomic<std::uint64_t> execCount_{0};
+    std::atomic<std::uint64_t> execSumNs_{0};
+    std::atomic<std::uint64_t> execMaxNs_{0};
+    std::atomic<std::uint64_t> unobservedSafe_{0};
+    std::atomic<std::uint64_t> rtRequests_{0};
+    // ★ 段階③: 3 分類のパス別集計（診断用・判定には使わない）
+    std::atomic<std::uint64_t> driverCount_[kPathCount];
+    std::atomic<std::uint64_t> driverSumNs_[kPathCount];
+    std::atomic<std::uint64_t> driverMaxNs_[kPathCount];
+    std::atomic<std::uint64_t> driverOver_[kPathCount];
+    std::atomic<std::uint64_t> ebrCountC_[kPathCount];
+    std::atomic<std::uint64_t> ebrSumNsC_[kPathCount];
+    std::atomic<std::uint64_t> ebrMaxNsC_[kPathCount];
+    std::atomic<std::uint64_t> ebrOverC_[kPathCount];
+    std::atomic<std::uint64_t> execCountC_[kPathCount];
+    std::atomic<std::uint64_t> execSumNsC_[kPathCount];
+    std::atomic<std::uint64_t> execMaxNsC_[kPathCount];
+    std::atomic<std::uint64_t> execOverC_[kPathCount];
+    std::atomic<std::uint64_t> classUnclassifiedCount_[kPathCount];
+    std::atomic<std::uint64_t> classUnclassifiedSumNs_[kPathCount];
+    std::atomic<std::uint64_t> classExcluded_[kPathCount];
+    std::atomic<std::uint64_t> classClassifiedTotal_{0};
+    std::atomic<std::uint64_t> classUnclassifiedTotal_{0};
+    std::atomic<std::uint64_t> classUnclassifiedSumTotal_{0};
+    std::atomic<std::uint64_t> classExcludedTotal_{0};
+    std::atomic<std::uint64_t> classConsistencyErrors_{0};
+    std::atomic<std::uint64_t> pathCount_[kPathCount];
+    std::atomic<std::uint64_t> pathOver_[kPathCount];
+    std::atomic<std::uint64_t> pathMaxNs_[kPathCount];
+};
+
+} // namespace isr
+} // namespace convo
+
+```
+
 ### 📄 `src\audioengine\ISRRetireOverflowRing.h`
 
 ```
@@ -31914,7 +34302,8 @@ private:
 
 #include "ISRRetireRouter.h"
 #include "core/TimeUtils.h"     // ★ Practical-4: getCurrentTimeUs
-#include "../DspNumericPolicy.h" // ★ P-4: isAudioThread() — RT 防御（synchronous destruction 禁止）
+#include "../DspNumericPolicy.h"
+#include "ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定 // ★ P-4: isAudioThread() — RT 防御（synchronous destruction 禁止）
 
 namespace convo {
 namespace isr {
@@ -32011,7 +34400,8 @@ std::size_t TerminalReclaimAuthority::retryableResidentCount() const noexcept
 }
 
 void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
-                                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
+                                     const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+                                     RetireDomainId domain) noexcept
 {
     // ★ F1'-b (2026-10-25): 所有権の扱いを「消費」から「結果を見て消費」へ変更。
     //   旧実装は epoch-safe なエントリを pending に移した時点で entries_ から消していたため、
@@ -32113,6 +34503,9 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
 
     // --- 5) 従来 deleter の実行（ロック外・reentrancy 安全）---
     for (auto& e : legacyPending) {
+        convo::isr::RetireLatencyRecorder::instance().recordSafe (e.ptr);   // ★ A(D1): drain は安全到達後
+        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+            e.ptr, convo::isr::RetireLatencyRecorder::Path::Drain, domain);   // ★ A(D1)
         e.deleter(e.ptr);
         if (e.type == DeletionEntryType::World)
         {
@@ -32123,7 +34516,7 @@ void TerminalReclaimAuthority::drain(uint64_t minReaderEpoch,
     }
 }
 
-void TerminalReclaimAuthority::drainAll() noexcept
+void TerminalReclaimAuthority::drainAll(RetireDomainId domain) noexcept
 {
     // ★ Step 5-I: telemetry — increment drainAll invocation count
     convo::fetchAddAtomic(terminalDrainAllCount_, std::uint64_t{1}, std::memory_order_acq_rel);
@@ -32149,6 +34542,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
             const DestroyOutcome outcome = e.retryable(e.ptr);
             if (outcome == DestroyOutcome::Destroyed)
             {
+                convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                    e.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll, domain);   // ★ A(D1)
                 convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1},
                                       std::memory_order_release);
                 if (e.type == DeletionEntryType::World)
@@ -32173,6 +34568,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
         }
 
         if (e.deleter != nullptr) {
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                e.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll, domain);   // ★ A(D1)
             e.deleter(e.ptr);
             // ★ Step 5-I: telemetry — count actually drained entries
             convo::fetchAddAtomic(terminalDrainEntryCount_, std::uint64_t{1}, std::memory_order_release);
@@ -32199,7 +34596,8 @@ void TerminalReclaimAuthority::drainAll() noexcept
 }
 
 bool TerminalReclaimAuthority::tryReclaim(uint64_t minReaderEpoch,
-                                        const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
+                                        const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+                                        RetireDomainId domain) noexcept
 {
     // Drain epoch-safe entries; return true if at least one was reclaimed
     std::size_t beforeCount = 0;
@@ -32210,7 +34608,7 @@ bool TerminalReclaimAuthority::tryReclaim(uint64_t minReaderEpoch,
     if (beforeCount == 0)
         return false;
 
-    drain(minReaderEpoch, isOlderFn);
+    drain(minReaderEpoch, isOlderFn, domain);
 
     std::size_t afterCount = 0;
     {
@@ -32336,6 +34734,42 @@ RetireEnqueueResult ISRRetireRouter::enqueueRetire(void* ptr,
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
 
+    // ★ A(D1): 退役要求の時刻・epoch・最小 reader を記録する（同一ポインタの再試行は同じ要求）
+    {
+        const std::uint64_t minReaderExpr = provider_->getMinReaderEpoch();
+        std::uint32_t minReaderSlot = 0xFFFFFFFFu;
+        std::uint64_t smallestActiveEpoch = 0;
+        std::uint32_t smallestActiveSlot = 0xFFFFFFFFu;
+
+        const int capacity = provider_->readerCapacity();
+
+        for (int r = 0; r < capacity; ++r)
+        {
+            const auto detail = provider_->getReaderSlotDetail (r);
+
+            if (! detail.active || detail.epoch == 0)
+                continue;
+
+            if (smallestActiveSlot == 0xFFFFFFFFu || detail.epoch < smallestActiveEpoch)
+            {
+                smallestActiveEpoch = detail.epoch;
+                smallestActiveSlot = static_cast<std::uint32_t> (r);
+            }
+
+            if (detail.epoch == minReaderExpr)
+            {
+                minReaderSlot = static_cast<std::uint32_t> (r);
+                break;
+            }
+        }
+
+        if (minReaderSlot == 0xFFFFFFFFu)
+            minReaderSlot = smallestActiveSlot;
+
+        convo::isr::RetireLatencyRecorder::instance().recordRequest (
+            ptr, epoch, minReaderExpr, minReaderSlot);
+    }
+
     // Route through IEpochProvider interface（★ T1: telemetry type tag を伝搬・D86）。
     if (provider_->enqueueRetireTyped(ptr, deleter, epoch, type))
     {
@@ -32375,7 +34809,21 @@ bool ISRRetireRouter::retireRT(void* ptr, void (*deleter)(void*)) noexcept
     assert(provider_ != nullptr);
     if (ptr == nullptr || deleter == nullptr)
         return true;
-    return provider_->enqueueRetire(ptr, deleter, provider_->currentEpoch());
+
+    const std::uint64_t epoch = provider_->currentEpoch();
+
+    // ★ 設計 v2: RT 経路でも要求を記録する（TLS 区画内の走査のみ・確保/ロックなし）。
+    //   完了より先に要求を置き、enqueue 失敗時は **自分が作成した記録だけ** を取り消す。
+    bool requestCreated = false;
+    const auto requestId = convo::isr::RetireLatencyRecorder::instance().recordRequestRT (
+        ptr, epoch, provider_->getMinReaderEpoch(), &requestCreated);
+
+    const bool ok = provider_->enqueueRetire(ptr, deleter, epoch);
+
+    if (! ok && requestCreated && requestId != 0u)
+        convo::isr::RetireLatencyRecorder::instance().cancelRequestRTById (ptr, requestId);
+
+    return ok;
 }
 
 // ★ R-1: IRetireRouter::retire — リトライ込み（NonRT）
@@ -32492,7 +34940,7 @@ void ISRRetireRouter::drainQuarantineStore() noexcept
     const uint64_t minReader = minReaderEpoch();
     m_retireQuarantine.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
-    });
+    }, retireDomainId());
 }
 
 // ★ BUG-015/027 (work88): Router API — 退避ストアへの移送（directDelete しない）。
@@ -32534,11 +34982,11 @@ std::uint64_t ISRRetireRouter::quarantineOverflowCount() const noexcept
 // ★ BUG-015/027: shutdown 時 — Audio Thread 停止後のみ全強制解放（drainAllUnsafe と同契約）
 void ISRRetireRouter::drainAllQuarantineStore() noexcept
 {
-    m_retireQuarantine.drainAllUnsafe();
+    m_retireQuarantine.drainAllUnsafe(retireDomainId());
     // ★ P-4: EmergencyQ も全強制解放（Audio Thread 停止後）
-    m_emergencyQuarantine.drainAllUnsafe();
+    m_emergencyQuarantine.drainAllUnsafe(retireDomainId());
     // ★ P-4: TerminalReclaimAuthority も全強制解放（Audio Thread 停止後）
-    m_terminalReclaim.drainAll();
+    m_terminalReclaim.drainAll(retireDomainId());
 }
 
 // ★ E-1.9-B: Signal the CoordinatorLoop that Q/E/T may have new entries.
@@ -32612,6 +35060,10 @@ bool ISRRetireRouter::terminalReclaim(void* ptr, void (*deleter)(void*), uint64_
     if (epochSafe && !isRt)
     {
         // Synchronous destruction — Non-RT context guaranteed by caller
+        convo::isr::RetireLatencyRecorder::instance().recordSafe (ptr);   // ★ A(D1): 同期経路は要求時点で安全
+        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+            ptr, convo::isr::RetireLatencyRecorder::Path::Sync,
+            retireDomainId());   // ★ A(D1) + domain tag
         deleter(ptr);
         if (type == DeletionEntryType::World)
             m_terminalReclaim.recordWorldReclaim();
@@ -32656,6 +35108,10 @@ bool ISRRetireRouter::terminalReclaimRetryable(void* ptr, RetryableDeleter retry
     {
         if (retryable(ptr) == DestroyOutcome::Destroyed)
         {
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                ptr, convo::isr::RetireLatencyRecorder::Path::Sync,
+                retireDomainId());   // ★ A(D1) + domain tag
+
             if (type == DeletionEntryType::World)
                 m_terminalReclaim.recordWorldReclaim();
         }
@@ -32675,7 +35131,7 @@ void ISRRetireRouter::drainTerminalReclaim() noexcept
     const uint64_t minReader = minReaderEpoch();
     m_terminalReclaim.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
-    });
+    }, retireDomainId());
 }
 
 // ★ P-4: EmergencyQ + TerminalReclaimAuthority の epoch-gated drain
@@ -32686,7 +35142,7 @@ void ISRRetireRouter::drainEmergencyAndTerminal() noexcept
         const uint64_t minReader = minReaderEpoch();
         m_emergencyQuarantine.drain(minReader, [](uint64_t a, uint64_t b) noexcept {
             return static_cast<int64_t>(a - b) < 0;  // == EpochDomain::isOlder(a, b)
-        });
+        }, retireDomainId());
     }
     // drain TerminalReclaimAuthority (epoch-gated)
     drainTerminalReclaim();
@@ -32723,6 +35179,9 @@ uint32_t ISRRetireRouter::pendingRetireCount() const noexcept
 
 void ISRRetireRouter::drainAll() noexcept
 {
+    // ★ A(D1): 終了処理に入ったことを記録する（以後の要求は測定対象外）
+    convo::isr::RetireLatencyRecorder::instance().markShutdownPhase();
+
     // ★ P0-A: IRetireProvider 経由で委譲（dynamic_cast 不要）
     assert(provider_ != nullptr);
     provider_->drainAll();
@@ -32845,16 +35304,20 @@ public:
 
     // Drain epoch-safe entries. Executes deleter for entries where isOlder(entry.epoch, minReaderEpoch) == true.
     // isOlderFn: EpochDomain::isOlder(a, b) == static_cast<int64_t>(a - b) < 0
+    // ★ domain tag (v2.9 §3.3): Terminal のエントリは DeletionEntry を持たないため、
+    //   Router が自分の retireDomainId() を明示引数で渡す（entry から推測しない）。
     void drain(uint64_t minReaderEpoch,
-               const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
+               const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+               RetireDomainId domain) noexcept;
 
     // Drain ALL entries unconditionally (shutdown only — audio thread must be stopped).
-    void drainAll() noexcept;
+    void drainAll(RetireDomainId domain) noexcept;
 
     // Try to reclaim epoch-safe entries and, if any are safe, destroy immediately.
     // Returns true if at least one entry was reclaimed.
     bool tryReclaim(uint64_t minReaderEpoch,
-                    const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept;
+                    const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+                    RetireDomainId domain) noexcept;
 
     [[nodiscard]] std::size_t residentCount() const noexcept;
 
@@ -32995,6 +35458,13 @@ public:
     [[nodiscard]] uint64_t reclaimAttemptCount() const noexcept override;
     [[nodiscard]] uint64_t reclaimSuccessCount() const noexcept override;
 
+    // ★ domain tag (v2.9 §3.1): provider_ へ委譲する。provider() アクセサは公開しない。
+    //   provider_ == nullptr は現行 API では到達不能（防御的）。その場合だけ Unknown。
+    [[nodiscard]] RetireDomainId retireDomainId() const noexcept override
+    {
+        return provider_ != nullptr ? provider_->retireDomainId() : RetireDomainId::Unknown;
+    }
+
     // ── Retire API (実装は .cpp) ──
 
     RetireEnqueueResult enqueueRetire(void* ptr,
@@ -33131,7 +35601,7 @@ public:
     //   （本番は shutdown 経路から呼ばれる。テストは同じ契約を単独で確認する）。
     void drainAllTerminalForTest() noexcept
     {
-        m_terminalReclaim.drainAll();
+        m_terminalReclaim.drainAll(retireDomainId());
     }
 
     // ★ F1'-b 監査対応: ルータの API は「epoch unsafe / RT のときだけ Terminal に預ける」。
@@ -34243,6 +36713,7 @@ private:
 
 ```
 #include "ISRRuntimePublicationCoordinator.h"
+#include "ISRRetireLatency.h"   // ★ 設計 v2: 要求記録
 #include "AtomicAccess.h"
 #include "SequenceArithmetic.h"  // ★ dash2 §1.6.1 (Phase H): modular sequence arithmetic（commit monotonicity）
 #include "ISRRetireOverflowRing.h"
@@ -34258,7 +36729,7 @@ RuntimeIntentCoordinator::RuntimeIntentCoordinator()
     , shutdownScheduler_(*this)
     , priorityScheduler_(*this)
     , lastRejectCode_(RejectCode::None)
-    , retireBacklogCount_(0)
+    , retireAcceptedCount_(0)
     , publicationBacklogCount_(0)
     , pendingIntentCount_(0)
     , reclaimInFlightCount_(0)
@@ -34380,9 +36851,9 @@ void RuntimeIntentCoordinator::retire(RetireAuthority,
     //   ［本メソッドは入力契約（NonRTWorld・oldWorld 非 null）の検証 + Fault のみを維持］
 
     // ★ dash2 §1.4 (B0-3): 本メソッドは world-retire 時に AudioEngine.Commit.cpp:461 から呼ばれる。
-    //   retireBacklogCount_ はここで増加させない — 元コードは Commit.cpp:481 の setRetireBacklogCount
+    //   retireAcceptedCount_ はここで増加させない — 元コードは Commit.cpp:481 の setRetireAcceptedCount
     //   （lifetime pendingIntentCount スナップショット）で上書きされており、external setter 撤去後は
-    //   retireBacklogCount_ が commit ごとに無制限増加して Layer 2 の isFullyDrained（retireBacklogCount_==0）
+    //   retireAcceptedCount_ が commit ごとに無制限増加して Layer 2 の isFullyDrained（retireAcceptedCount_==0）
     //   がシャットダウンで失敗する回帰を防ぐ。retire バックログの実測判定は Layer 1
     //   （AudioEngine::isFullyDrained）が m_retireRouter->pendingRetireCount() と
     //   worldAuthority_.lifetime().pendingIntentCount() を直接参照する（dash2 §1.4 設計方針）。
@@ -34402,13 +36873,22 @@ RetireEnqueueResult RuntimeIntentCoordinator::enqueueRetire(RetireAuthority,
     if (ptr == nullptr || deleter == nullptr)
         return RetireEnqueueResult::Success;
 
+    // ★ 設計 v2: 要求を記録する（B 経路の時刻。A の記録は冪等に再利用される）。
+    bool requestCreated = false;
+    const auto requestId = convo::isr::RetireLatencyRecorder::instance().recordRequest (
+        ptr, epoch, 0u, 0xFFFFFFFFu, &requestCreated);
+
     // ★ Bug#2-d: enqueueWithRetry に委譲（リトライロジックは Router に集約）
     const auto result = router.enqueueWithRetry(ptr, deleter, epoch, DeletionEntryType::Generic);
+
+    if (result != RetireEnqueueResult::Success && requestCreated && requestId != 0u)
+        convo::isr::RetireLatencyRecorder::instance().cancelRequestById (ptr, requestId);
+
     if (result != RetireEnqueueResult::Success)
         return result;
 
-    // ★ dash2 §1.4 (B0-3): 非原子的 load+setRetireBacklogCount RMW を semantic event に置換。
-    //   （本メソッドは production で未使用 — 将来の retire 経路用。retireBacklogCount_ は
+    // ★ dash2 §1.4 (B0-3): 非原子的 load+setRetireAcceptedCount RMW を semantic event に置換。
+    //   （本メソッドは production で未使用 — 将来の retire 経路用。retireAcceptedCount_ は
     //   onRetireConsumed と対で維持される。Layer 1 が実測で drain 判定するため authoritative ではない。）
     onRetireAccepted();
 
@@ -34431,16 +36911,16 @@ std::uint64_t RuntimeIntentCoordinator::retireAuthorityCount() const noexcept
 //   違反時は Faulted → Proof 生成不能へ遷移（dash2 §1.4 第三者的レビュー反映 3）。
 void RuntimeIntentCoordinator::onRetireAccepted() noexcept {
     // fetch_add 後（= 更新後の絶対値）を noteRetireBacklogChanged に渡し、pressure slope 検出を共通化。
-    const auto newCount = convo::fetchAddAtomic(retireBacklogCount_,
+    const auto newCount = convo::fetchAddAtomic(retireAcceptedCount_,
                                                 std::uint64_t{1},
                                                 std::memory_order_acq_rel) + std::uint64_t{1};
     noteRetireBacklogChanged(newCount);
 }
 
 void RuntimeIntentCoordinator::onRetireConsumed() noexcept {
-    const auto old = convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+    const auto old = convo::consumeAtomic(retireAcceptedCount_, std::memory_order_acquire);
     if (old > 0) {
-        convo::fetchSubAtomic(retireBacklogCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+        convo::fetchSubAtomic(retireAcceptedCount_, std::uint64_t{1}, std::memory_order_acq_rel);
     } else {
         // underflow 違反（consume と fetch_sub の間の race では old==0 でも他 writer が先に
         // 書いている可能性があるため、ここでは Faulted 化のみ行う。実害のある負方向超過は
@@ -34505,8 +36985,8 @@ void RuntimeIntentCoordinator::noteRetireBacklogChanged(std::uint64_t count) noe
 }
 
 // ⚠️ TEST-ONLY（dash2 §1.4）: production からの絶対値上書きは禁止。テスト初期化リセットのみ。
-void RuntimeIntentCoordinator::setRetireBacklogCount(std::uint64_t count) noexcept {
-    convo::publishAtomic(retireBacklogCount_, count, std::memory_order_release);
+void RuntimeIntentCoordinator::setRetireAcceptedCount(std::uint64_t count) noexcept {
+    convo::publishAtomic(retireAcceptedCount_, count, std::memory_order_release);
     noteRetireBacklogChanged(count);
 }
 
@@ -34689,8 +37169,8 @@ std::uint64_t RuntimeIntentCoordinator::getPendingIntentCount() const noexcept {
     return convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
 }
 
-std::uint64_t RuntimeIntentCoordinator::getRetireBacklogCount() const noexcept {
-    return convo::consumeAtomic(retireBacklogCount_, std::memory_order_acquire);
+std::uint64_t RuntimeIntentCoordinator::getRetireAcceptedCount() const noexcept {
+    return convo::consumeAtomic(retireAcceptedCount_, std::memory_order_acquire);
 }
 
 // ★ work88 (X6 §6.6): Quarantine transport residency counters（INV-X6-4）。
@@ -34708,6 +37188,31 @@ std::uint64_t RuntimeIntentCoordinator::getQuarantineRingResidencyCount() const 
 // ★ Phase5: Delegation to ShutdownScheduler
 bool RuntimeIntentCoordinator::isFullyDrained() const noexcept {
     return shutdownScheduler_.isFullyDrained();
+}
+
+// ★ AC_DIAG (2026-11-13, Owner 承認 A2): 診断専用 — c9 の 14 条件の生値。
+//   各式は ShutdownScheduler::isFullyDrained()（本ファイル :521-572）と同一。
+//   相違点は短絡評価をしないことだけで、判定結果は変わらない。
+//   C9-A (2026-11-13) で述語から retireAcceptedCount_ == 0 を外したため、述語は 13 条件。
+//   retireBacklog は内訳には残すが、判定には使わない（診断表示専用）。
+RuntimeIntentCoordinator::DrainBreakdown
+RuntimeIntentCoordinator::collectDrainBreakdown() const noexcept {
+    DrainBreakdown d;
+    d.swapPending = convo::consumeAtomic(swapPending_, std::memory_order_acquire);
+    d.intentQueue = static_cast<std::uint32_t>(intentQueue_.sizeApprox());
+    d.observeDeferredRing = static_cast<std::uint32_t>(observeDeferredRing_.size());
+    d.quarantineFallback = static_cast<std::uint32_t>(quarantineFallbackQueue_.sizeApprox());
+    d.recoveryIntentQueue = static_cast<std::uint32_t>(recoveryIntentQueue_.size());
+    d.retireBacklog = convo::consumeAtomic(retireAcceptedCount_, std::memory_order_acquire);
+    d.publicationBacklog = convo::consumeAtomic(publicationBacklogCount_, std::memory_order_acquire);
+    d.publicationIntentResidency = convo::consumeAtomic(publicationIntentResidencyCount_, std::memory_order_acquire);
+    d.pendingIntent = convo::consumeAtomic(pendingIntentCount_, std::memory_order_acquire);
+    d.reclaimInFlight = convo::consumeAtomic(reclaimInFlightCount_, std::memory_order_acquire);
+    d.quarantineIntentResidency = convo::consumeAtomic(quarantineIntentResidencyCount_, std::memory_order_acquire);
+    d.quarantineRingResidency = convo::consumeAtomic(quarantineRingResidencyCount_, std::memory_order_acquire);
+    d.recoveryAdmissionPending = convo::consumeAtomic(recoveryAdmissionPending_, std::memory_order_acquire);
+    d.liveRecoveryObligation = liveLogicalRecoveryObligationCount();
+    return d;
 }
 
 void RuntimeIntentCoordinator::requestShutdown() noexcept {
@@ -34768,11 +37273,15 @@ bool RuntimeIntentCoordinator::ShutdownScheduler::isFullyDrained() const noexcep
     //     coordinator state が ShuttingDown へ遷移した後（producer が全て閉じた後）に
     //     isFullyDrained が呼ばれる前提。進行中 producer が居る最中はキューが空でも
     //     新たな Intent が到着し得るため、単独では drain 完了を保証しない。
+    // ★ C9-A (2026-11-13, Owner 承認): retireAcceptedCount_ == 0 の条件を外した。
+    //   この counter は onRetireAccepted() で +1 されるが production に減算経路が無く
+    //   （onRetireConsumed() の呼出し元が 0）、実 backlog を表さない。retire 資源の実測は
+    //   Layer 1（AudioEngine::isFullyDrained の pendingRetireCount）が担う。
+    //   残る条件は 13 個（swapPending の早期 return ＋ 12 個の &&）。
     return coordinator_.intentQueue_.sizeApprox() == 0
         && coordinator_.observeDeferredRing_.size() == 0
         && coordinator_.quarantineFallbackQueue_.sizeApprox() == 0
         && coordinator_.recoveryIntentQueue_.size() == 0
-        && convo::consumeAtomic(coordinator_.retireBacklogCount_, std::memory_order_acquire) == 0
         && convo::consumeAtomic(coordinator_.publicationBacklogCount_, std::memory_order_acquire) == 0
         // ★ work88 (X5 §6.5): Publish Intent residency も独立に == 0 を要求（INV-X5-1）。
         //   queue emptiness と pendingIntentCount_ だけでは Publish 残留（intentQueue_ 内の
@@ -35959,7 +38468,7 @@ public:
     //   は production caller ゼロのため削除。published-world read は RuntimeStore::current が単一 source。
 
     // ── dash2 §1.4 (REPAIR_PLAN2-dash2): semantic event accounting ──
-    //   外部 setter（setRetireBacklogCount 等）の廃止に伴い、Coordinator は自身のカウンタを
+    //   外部 setter（setRetireAcceptedCount 等）の廃止に伴い、Coordinator は自身のカウンタを
     //   semantic event API で原子的に維持する（fetch_add/fetch_sub・underflow ガード付き）。
     //   呼び出し元（AudioEngine）は setter で絶対値を上書きせず、本イベントで増減のみを通知する。
     //   ⚠️ isFullyDrained の retire/fallback/deferred 判定は AudioEngine 側（Layer 1）が
@@ -35978,9 +38487,9 @@ public:
     //   production からの絶対値上書きは禁止（コンパイル時参照 = 0 を維持すること）。
     //   ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
     //     setDeferredRetireResidencyCount / setQuarantineResidentCount は削除済み
-    //     （D101-32-C §7 削除境界）。setRetireBacklogCount は Pressure FSM / drain violation
+    //     （D101-32-C §7 削除境界）。setRetireAcceptedCount は Pressure FSM / drain violation
     //     の決定論的テスト駆動のため KEEP（絶対値注入がテストの意味本体）。
-    void setRetireBacklogCount(std::uint64_t count) noexcept;        // TEST-ONLY（KEEP — Pressure FSM 駆動）
+    void setRetireAcceptedCount(std::uint64_t count) noexcept;        // TEST-ONLY（KEEP — Pressure FSM 駆動）
     void setPublicationBacklogCount(std::uint64_t count) noexcept;   // TEST-ONLY（dead counter）
     void setPendingIntentCount(std::uint64_t count) noexcept;        // TEST-ONLY
     void escalateAllRetires(RetirePriority minPriority) noexcept;    // ★ Phase5: 全RetireIntent の優先度を底上げ
@@ -35997,7 +38506,7 @@ public:
     //   process lifetime 累積・reset なし。差分運用。
     [[nodiscard]] std::uint64_t getCoordinatorTakeCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingIntentCount() const noexcept;
-    [[nodiscard]] std::uint64_t getRetireBacklogCount() const noexcept;
+    [[nodiscard]] std::uint64_t getRetireAcceptedCount() const noexcept;
     // ★ D101-32-D: getFallbackBacklogCount / getDeferredRetireResidencyCount /
     //   getQuarantineResidentCount（Coordinator側）は削除済み（D101-32-C §7 — vestigial counter
     //   の getter も domain 一括で除去）。実在 quarantine DSP は DSPQuarantineManager::residentCount()、
@@ -36027,6 +38536,30 @@ public:
     }
     [[nodiscard]] std::uint64_t getReclaimInFlightCount() const noexcept;
     [[nodiscard]] std::uint64_t getOverflowMaxAgeUs() const noexcept;          // ★ Phase5
+
+    // ★ AC_DIAG (2026-11-13, Owner 承認 A2): 診断専用 — c9（ShutdownScheduler::isFullyDrained）の
+    //   14 条件の生値。判定式は isFullyDrained() と同一だが、短絡評価をせず全条件を読む。
+    //   isFullyDrained() 自体は変更しない（A2: 複写方式）。将来 isFullyDrained() を変えた場合は
+    //   本構造体と collectDrainBreakdown() も同じ式へ追随させること
+    //   （対応は ISRSemanticValidationTests の AC1 が検出する）。
+    struct DrainBreakdown {
+        bool          swapPending{false};
+        std::uint32_t intentQueue{0};                // intentQueue_.sizeApprox()
+        std::uint32_t observeDeferredRing{0};        // observeDeferredRing_.size()
+        std::uint32_t quarantineFallback{0};         // quarantineFallbackQueue_.sizeApprox()
+        std::uint32_t recoveryIntentQueue{0};        // recoveryIntentQueue_.size()
+        std::uint64_t retireBacklog{0};
+        std::uint64_t publicationBacklog{0};
+        std::uint64_t publicationIntentResidency{0};
+        std::uint64_t pendingIntent{0};
+        std::uint64_t reclaimInFlight{0};
+        std::uint64_t quarantineIntentResidency{0};
+        std::uint64_t quarantineRingResidency{0};
+        bool          recoveryAdmissionPending{false};
+        std::uint64_t liveRecoveryObligation{0};
+    };
+    [[nodiscard]] DrainBreakdown collectDrainBreakdown() const noexcept;
+
     [[nodiscard]] bool isFullyDrained() const noexcept;
     [[nodiscard]] CoordinatorState getState() const noexcept;
     void markTransitionStart() noexcept;
@@ -36402,7 +38935,7 @@ public:
        void postRecoveryFailureSignal(std::uint64_t obligationId) noexcept;
        void adjudicateRecoveryFailureSignals() noexcept;
 
-       // ★ TEST-ONLY (D152 §7; h:147 setRetireBacklogCount precedent): synchronous compatibility
+       // ★ TEST-ONLY (D152 §7; h:147 setRetireAcceptedCount precedent): synchronous compatibility
        //   wrapper = postRecoveryFailureSignal + immediate adjudicate on the CALLING thread.
        //   Preserves the old "1 observation = 1 adjudicated increment" semantics for the R18/R20/
        //   R21/P2/P3 suites. Production call count of this method MUST remain 0 (D153 V1, grep-enforced).
@@ -36741,7 +39274,7 @@ private:
     void drainObserveDeferred(DSPLifetimeManager& lifetimeMgr, PublicationEpoch currentEpoch) noexcept;
 
     // ── dash2 §1.4: retire backlog 変更時の pressure slope 検出 + 状態遷移 ──
-    //   setRetireBacklogCount（TEST-ONLY）と onRetireAccepted（production semantic event）が
+    //   setRetireAcceptedCount（TEST-ONLY）と onRetireAccepted（production semantic event）が
     //   共通で使用する。count は更新後の絶対値。slope = count - previous で Pressure 遷移を判定。
     void noteRetireBacklogChanged(std::uint64_t count) noexcept;
 
@@ -36789,7 +39322,12 @@ private:
     //   published-world metadata は RuntimeStore::current（RuntimeWorldAuthority）が単一 source。
 
     std::atomic<RejectCode> lastRejectCode_;
-    std::atomic<std::uint64_t> retireBacklogCount_;
+    // ★ 改名 (2026-11-13, Owner 承認): retireBacklogCount_ → retireAcceptedCount_。
+    //   実体は「累積 accepted 数」で残存件数ではない（onRetireAccepted で +1、production の
+    //   減算経路は無い）。drain 判定からは C9-A で除外済みで、pressure の slope 検出にのみ使う。
+    //   注: 更新通知の private ヘルパ noteRetireBacklogChanged と previousRetireBacklogCount_ は
+    //   課題票の変更対象外のため旧名のまま（別途判断）。
+    std::atomic<std::uint64_t> retireAcceptedCount_;
     std::atomic<std::uint64_t> publicationBacklogCount_;
     // ★ work88 (X5 §6.5): Publish Intent residency 専用 counter（INV-X5-1）。
     //   publicationIntentResidencyCount_ = intentQueue_ 内の Publish Intent 数 + producer
@@ -36810,7 +39348,7 @@ private:
     //   - 対象: Observe / Quarantine / Recovery の各 Intent（transport 内に存在する数）
     //   - 非対象: Publish と RetireIntent（混入禁止 — P2-1 §1.1.5）。Publish は
     //     enqueuePublicationIntent が reservation を取らない。RetireIntent は
-    //     retireBacklogCount_（setRetireBacklogCount）が担当する。
+    //     retireAcceptedCount_（setRetireAcceptedCount）が担当する。
     //   ★ INV-ISR-02 / Phase 0 #1: This counter excludes Publish and RetireIntent.
     //   - 増分: producer 側 enqueue 成功時（reservation-before-push で push 前に fetchAdd）
     //   - 減分: consumer 側 pop 成功時（processIntent / drainObserveDeferred /
@@ -38147,6 +40685,8 @@ ShutdownResult ShutdownRuntime::collectResult(
                                                     std::memory_order_acquire);
     result.postStopEnqueueCount = convo::consumeAtomic(sh6PostStopEnqueueCount_,
                                                        std::memory_order_acquire);
+    result.reclaimProofFailureCount = convo::consumeAtomic(reclaimProofFailureCount_,
+                                                           std::memory_order_acquire);
     return result;
 }
 
@@ -38241,6 +40781,9 @@ void ShutdownRuntime::emitShutdownTrace(ISRHealthState healthState) const
     file << "  \"sh4_observerCount\": " << sh4 << ",\n";
     file << "  \"sh5_lateCallbackCount\": " << sh5 << ",\n";
     file << "  \"sh6_postStopEnqueueCount\": " << sh6 << ",\n";
+    // ★ Q2/Q5/Q6 の Proof 不成立 / Permit reject 回数（Release でも観測可能）。
+    file << "  \"reclaimProofFailureCount\": "
+         << convo::consumeAtomic(reclaimProofFailureCount_, std::memory_order_acquire) << ",\n";
 
     // ★ A-2: BlockingReasonStats JSON出力
     file << "  \"blockingReasonStats\": [\n";
@@ -38320,15 +40863,24 @@ void ShutdownRuntime::markPostStopEnqueue() noexcept
 std::optional<ShutdownQuiescenceProof>
 ShutdownRuntime::tryMakeQuiescenceProof(const QuiescenceObservation& observation) noexcept
 {
-    // Q0〜Q7 を個別に観測（Q1 は ShutdownRuntime 内部の admissionState()==Closed、
-    // Q6 は observation.postStopEnqueueZero、それ以外は observation）
+    // Q0〜Q7 を個別に観測する。Q1/Q2/Q6 は authority（本クラス）側の状態と AND し、
+    // Q5 は EpochQuiescenceEvidence の内容と generation 一致まで検証する
+    // （caller の自己申告だけでは成立させない — A2-G05 の趣旨）。
     const bool q0 = observation.admissionReservationsZero;
     const bool q1 = (admissionState() == AdmissionState::Closed);
-    const bool q2 = observation.allProducersJoined;
+    const bool q2 = observation.allProducersJoined && producersJoined();
     const bool q3 = observation.readerRegistrationClosed;
     const bool q4 = observation.activeReadersZero;
-    const bool q5 = observation.epochSettled;
-    const bool q6 = observation.postStopEnqueueZero;
+    // ★ Q5 (H.11.13.3): generation 単独・bool 単独では成立しない。
+    //   - quiescent(): 観測実施 + reader 登録閉鎖 + active reader ゼロ
+    //   - identity との一致: evidence の generation が本 shutdown transaction の観測と一致
+    const auto& epochEvidence = observation.epochEvidence;
+    const bool q5 = epochEvidence.quiescent()
+                 && epochEvidence.epochGeneration == observation.epochGeneration
+                 && epochEvidence.readerRegistrationGeneration
+                        == observation.readerRegistrationGeneration;
+    // ★ Q6: authority 内部の post-stop enqueue 累計が 0 であること（observation 非依存）。
+    const bool q6 = (postStopEnqueueCount() == 0);
     const bool q7 = observation.noResurrection;
 
     // 全 Q 成立時のみ Proof 生成（quiescence 証明 — new obligation なし）
@@ -38365,6 +40917,7 @@ ShutdownRuntime::tryMakeQuiescenceProof(const QuiescenceObservation& observation
     proof.qEpochSettled_ = q5;
     proof.qPostStopEnqueueZero_ = q6;
     proof.qNoResurrection_ = q7;
+    proof.epochEvidence_ = epochEvidence;
     return proof;
 }
 
@@ -38421,6 +40974,9 @@ void ShutdownRuntime::closeAdmission() noexcept
             // ★ dash2 §2.2 (Step 14 — Race B / T10)
             (void)convo::fetchAddAtomic(shutdownGeneration_, static_cast<uint64_t>(1),
                                         std::memory_order_acq_rel);
+            // ★ Q2: 新しい shutdown transaction の開始点。前回の join evidence を破棄し、
+            //   joinProducers() が成立するまで Q2 を成立させない。
+            convo::publishAtomic(producersJoined_, false, std::memory_order_release);
             break;
         }
         // CAS failed — retry with updated expected
@@ -38430,6 +40986,29 @@ void ShutdownRuntime::closeAdmission() noexcept
 uint64_t ShutdownRuntime::currentShutdownGeneration() const noexcept
 {
     return convo::consumeAtomic(shutdownGeneration_, std::memory_order_acquire);
+}
+
+// ★ Q2: joinProducers() の Closing→Closed 成功でのみ true（authority 側 evidence）。
+bool ShutdownRuntime::producersJoined() const noexcept
+{
+    return convo::consumeAtomic(producersJoined_, std::memory_order_acquire);
+}
+
+// ★ Q6: post-stop enqueue の累計。markPostStopEnqueue() のみが増加させる。
+uint32_t ShutdownRuntime::postStopEnqueueCount() const noexcept
+{
+    return convo::consumeAtomic(sh6PostStopEnqueueCount_, std::memory_order_acquire);
+}
+
+// ★ reclaim 認可失敗の観測（防波堤）。Proof 不成立 / Permit reject を Release でも残す。
+void ShutdownRuntime::noteReclaimProofFailure() noexcept
+{
+    (void)convo::fetchAddAtomic(reclaimProofFailureCount_, uint32_t{1}, std::memory_order_acq_rel);
+}
+
+uint32_t ShutdownRuntime::reclaimProofFailureCount() const noexcept
+{
+    return convo::consumeAtomic(reclaimProofFailureCount_, std::memory_order_acquire);
 }
 
 bool ShutdownRuntime::joinProducers() noexcept
@@ -38450,7 +41029,12 @@ bool ShutdownRuntime::joinProducers() noexcept
          | (0u << kReservationShift));
         if (convo::compareExchangeAtomic(packedState_, expected, desired,
                                          std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            // ★ Q2: producer join の authority 側 evidence。caller の観測値だけでは
+            //   Q2 を成立させない（join を実行していない ShutdownRuntime は Proof を出せない）。
+            convo::publishAtomic(producersJoined_, true, std::memory_order_release);
             return true;  // Closing→Closed succeeded
+        }
         // CAS failed — retry
     }
 }
@@ -38681,6 +41265,8 @@ struct ShutdownResult {
     uint32_t transitionViolations{0};
     uint32_t lateCallbackCount{0};
     uint32_t postStopEnqueueCount{0};
+    // ★ Q2/Q5/Q6 の Proof が成立せず reclaim 認可に失敗した回数（Release でも観測可能）。
+    uint32_t reclaimProofFailureCount{0};
 };
 
 /**
@@ -38774,10 +41360,14 @@ public:
     //   ReclaimAuthority の wiring は public mutator ではなく constructor 固定注入で行う
     //   （上記コンストラクタ参照）— 外部 caller による wiring 権限は構造的に存在しない。
 
-    // ── ★ dash2 §2.2 (Phase A1 — H.11.17.5 15-Step, type only) ──
-    //   ShutdownQuiescenceProof / ReclaimPermit は「型のみ・production 未接続」。
-    //   production reclaim への接続は Phase A2（15-Step 7-15 / A2-G01〜G23 PASS）で行う。
+    // ── ★ dash2 §2.2 (Phase A2 — production 接続済み) ──
+    //   ShutdownQuiescenceProof / ReclaimPermit は ~AudioEngine → releaseResources() の
+    //   shutdown 経路で production 使用されている（AudioEngine::tryShutdownQuiescentReclaim）。
     //   本メソッド群は ShutdownRuntime のみが生成する（INV-LIFE-3/4 / AC-X3-11）。
+    //   Q2/Q5/Q6 は次の evidence で判定する（2026-11-08 是正）:
+    //     Q2: caller の producer 観測 AND joinProducers() 成功（producersJoined_）
+    //     Q5: EpochQuiescenceEvidence の quiescent() AND identity generation 一致
+    //     Q6: ShutdownRuntime 内部の postStopEnqueueCount() == 0
 
     // ── ★ dash2 §2.2 (Phase A2 — G10/G13/G19/G20): Quiescence 観測値 ──
     //   tryMakeQuiescenceProof が authority から取得・検証する観測値の束（H.11.11.3 Q0〜Q7）。
@@ -38787,16 +41377,18 @@ public:
     struct QuiescenceObservation {
         // Q0: OutstandingAdmissionReservations == 0（第九者必須修正2 — close vs enqueue race を閉じる）
         bool admissionReservationsZero{false};
-        // Q2: AllProducersJoined（requestShutdown 確定 + producer join 完了）
+        // Q2: AllProducersJoined（AudioEngine が producer スレッドの join 完了を実測して渡す）。
+        //   ShutdownRuntime は自身の joinProducers() 成功（producersJoined_）と AND して検証する
+        //   — caller の自己申告だけでは Q2 を成立させない。
         bool allProducersJoined{false};
         // Q3: ReaderRegistrationClosed（EpochDomain::readerRegistrationClosed()）
         bool readerRegistrationClosed{false};
         // Q4: ActiveReaders == 0（ISRRetireRouter::activeReaderCount() == 0）
         bool activeReadersZero{false};
-        // Q5: EpochSettled（EpochQuiescenceEvidence — H.11.13.3）
-        bool epochSettled{false};
-        // Q6: postStopEnqueueCount == 0（ShutdownRuntime 内部 sh6PostStopEnqueueCount_）
-        bool postStopEnqueueZero{false};
+        // Q5: EpochSettled — EpochQuiescenceEvidence（H.11.13.3）。
+        //   bool 単独ではなく epoch / registration / active reader の観測束で受け取り、
+        //   ShutdownRuntime が generation 一致まで照合する（captured==false は不成立）。
+        EpochQuiescenceEvidence epochEvidence{};
         // Q7: NoResurrection（AdmissionState == Closed 固定）
         bool noResurrection{false};
         // ★ G19: epochGeneration（EpochDomain::epochGeneration()）
@@ -38848,6 +41440,14 @@ public:
     //   ShutdownRuntimeIdentity::engineInstanceId に束縛し、cross-runtime confusion
     //   （Runtime A/B の generation=1 が同一に見える問題）を防ぐ。
     [[nodiscard]] uint64_t engineInstanceId() const noexcept { return engineInstanceId_; }
+    // ── ★ Q2/Q6/失敗観測（observation 依存の解消） ──
+    //   Q2: joinProducers() の Closing→Closed 成功でのみ true（caller の自己申告と AND する）。
+    [[nodiscard]] bool producersJoined() const noexcept;
+    //   Q6: post-stop enqueue の累計（markPostStopEnqueue()）。0 のときのみ Q6 成立。
+    [[nodiscard]] uint32_t postStopEnqueueCount() const noexcept;
+    //   reclaim 認可の失敗回数（Proof 不成立 / Permit reject）。Release でも観測できる。
+    void noteReclaimProofFailure() noexcept;
+    [[nodiscard]] uint32_t reclaimProofFailureCount() const noexcept;
 
 private:
     // ★ A-2: シャットダウン開始時刻
@@ -38876,6 +41476,12 @@ private:
     //   シャットダウン回数（単調増加）。ShutdownRuntimeIdentity の generation 源。
     //   tryMakeQuiescenceProof / tryMakeReclaimPermit の実装（Phase A2）で使用。
     std::atomic<uint64_t> shutdownGeneration_{0};
+    // ── ★ Q2: producer join の authority 側 evidence ──
+    //   joinProducers() の CAS 成功（Closing→Closed）でのみ true。caller の
+    //   QuiescenceObservation::allProducersJoined と AND して Q2 を成立させる。
+    std::atomic<bool> producersJoined_{false};
+    // ── ★ reclaim 認可失敗の観測（shutdown trace へ反映） ──
+    std::atomic<uint32_t> reclaimProofFailureCount_{0};
 
     // ── ★ dash2 §2.2 (Phase A2 — AUTH-09/13): Runtime インスタンス一意 ID。
     //   コンストラクタで g_shutdownRuntimeInstanceCounter から割り当てる。
@@ -40033,6 +42639,218 @@ private:
 
 ```
 
+### 📄 `src\audioengine\RetireLatencyTeardownReporter.h`
+
+```
+//==============================================================================
+// RetireLatencyTeardownReporter.h  (W-2, 2026-11-10 Owner 限定承認)
+//
+// 役割:
+//   AudioEngine の「最初の非 static データメンバ」として置かれ、メンバ破棄が
+//   すべて終わった時点（デストラクタ）で退役レイテンシ計測の postTeardown 段を
+//   独立した JSON ファイルへ書く。
+//
+// 制約（設計書 w2_post_teardown_design_v2.md）:
+//   - ISRDebugRuntime には依存しない（破棄時点で既に存在しないため）。
+//   - 他の AudioEngine メンバにも依存しない。レコーダ（グローバル）だけを読む。
+//   - 出力は evidence/retire_latency_post_teardown.json（独立ファイル）。
+//   - 判定には一切関与しない（evaluateRetireDelay は runtime 段のみを使う）。
+//
+// 位置づけ:
+//   postTeardown = AudioEngine のメンバ破棄完了時点の最終捕捉。
+//   postProcess（プロセス終了時の静的ガード）は今回の承認対象外（未実装）。
+//==============================================================================
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <cstdio>
+#include <system_error>
+
+#include "ISRRetireLatency.h"
+#include "../core/EpochDomain.h"        // ★ 計測: reader 保持時間の証跡
+#include "../core/ScopedEpochReader.h"  // ★ 計測: guard インスタンス単位の入退場
+#include "../core/ReaderMeasureRegistry.h"  // ★ 計測: RCUReader / 音声 reader
+
+namespace convo
+{
+namespace isr
+{
+
+class RetireLatencyTeardownReporter
+{
+public:
+    RetireLatencyTeardownReporter() noexcept = default;
+    ~RetireLatencyTeardownReporter() noexcept
+    {
+        write();
+    }
+
+    RetireLatencyTeardownReporter (const RetireLatencyTeardownReporter&) = delete;
+    RetireLatencyTeardownReporter& operator= (const RetireLatencyTeardownReporter&) = delete;
+
+    // 明示的に無効化したい場合（テスト等）に使う。既定は有効。
+    void setEnabled (bool enabled) noexcept { enabled_ = enabled; }
+
+    // 出力先（既定: current_path()/evidence/retire_latency_post_teardown.json）
+    void setOutputPath (std::filesystem::path path) { path_ = std::move (path); }
+
+private:
+    struct Values
+    {
+        std::uint64_t requests = 0;
+        std::uint64_t completions = 0;
+        std::uint64_t unmatched = 0;
+        std::uint64_t cancelled = 0;
+        std::uint64_t recordMisses = 0;
+        std::uint64_t postShutdownRequests = 0;
+        std::uint64_t postShutdownCompletions = 0;
+        std::uint64_t overflow = 0;
+        std::uint64_t idExhausted = 0;
+        std::uint64_t pending = 0;
+        std::uint64_t rtRequests = 0;
+        bool valid = false;
+    };
+
+    static Values fromStage (const RetireLatencyRecorder::StageStats& s) noexcept
+    {
+        Values v;
+        v.valid = s.valid;
+        v.requests = s.requests;
+        v.completions = s.completions;
+        v.unmatched = s.unmatchedCompletions;
+        v.recordMisses = s.recordMisses;
+        v.postShutdownRequests = s.postShutdownRequests;
+        v.postShutdownCompletions = s.postShutdownCompletions;
+        v.overflow = s.overflow;
+        v.idExhausted = s.idExhausted;
+        v.pending = s.pending;
+        v.rtRequests = s.rtRequests;
+        return v;
+    }
+
+    static void writeStage (std::ofstream& f, const char* name, const Values& v, bool last)
+    {
+        f << "    \"" << name << "\": {\n";
+        f << "      \"captured\": " << (v.valid ? "true" : "false") << ",\n";
+        f << "      \"cumulative\": true,\n";
+        f << "      \"requests\": " << v.requests << ",\n";
+        f << "      \"completions\": " << v.completions << ",\n";
+        f << "      \"unmatchedCompletions\": " << v.unmatched << ",\n";
+        f << "      \"recordMisses\": " << v.recordMisses << ",\n";
+        f << "      \"postShutdownRequests\": " << v.postShutdownRequests << ",\n";
+        f << "      \"postShutdownCompletions\": " << v.postShutdownCompletions << ",\n";
+        f << "      \"overflow\": " << v.overflow << ",\n";
+        f << "      \"idExhausted\": " << v.idExhausted << ",\n";
+        f << "      \"pending\": " << v.pending << ",\n";
+        f << "      \"rtRequests\": " << v.rtRequests << "\n";
+        f << "    }" << (last ? "\n" : ",\n");
+    }
+
+    static void writeDelta (std::ofstream& f, const char* name,
+                            const Values& a, const Values& b, bool last)
+    {
+        const auto d = [](std::uint64_t x, std::uint64_t y) -> std::uint64_t {
+            return (x >= y) ? (x - y) : 0u;
+        };
+        f << "    \"" << name << "\": {\n";
+        f << "      \"requests\": " << d (b.requests, a.requests) << ",\n";
+        f << "      \"completions\": " << d (b.completions, a.completions) << ",\n";
+        f << "      \"unmatchedCompletions\": " << d (b.unmatched, a.unmatched) << ",\n";
+        f << "      \"recordMisses\": " << d (b.recordMisses, a.recordMisses) << ",\n";
+        f << "      \"postShutdownRequests\": " << d (b.postShutdownRequests, a.postShutdownRequests) << ",\n";
+        f << "      \"postShutdownCompletions\": " << d (b.postShutdownCompletions, a.postShutdownCompletions) << ",\n";
+        f << "      \"pending\": " << b.pending << "\n";
+        f << "    }" << (last ? "\n" : ",\n");
+    }
+
+    void write() const noexcept
+    {
+        if (! enabled_)
+            return;
+
+        std::error_code ec;
+        std::filesystem::path out = path_;
+        if (out.empty())
+            out = std::filesystem::current_path (ec) / "evidence" / "retire_latency_post_teardown.json";
+
+        std::filesystem::create_directories (out.parent_path(), ec);
+
+        std::ofstream f (out, std::ios::binary | std::ios::trunc);
+        if (! f.is_open())
+            return;
+
+        const auto& rec = RetireLatencyRecorder::instance();
+
+        Values runtime = fromStage (rec.runtimeStage());
+        Values finalV = fromStage (rec.finalStage());
+        const auto snap = rec.snapshot();               // 現時点の累積（postTeardown）
+        Values teardown = fromStage (rec.finalStage()); // 型を借りて詰め替える
+        teardown.valid = true;
+        teardown.requests = snap.requests;
+        teardown.completions = snap.completions;
+        teardown.unmatched = snap.unmatchedCompletions;
+        teardown.cancelled = snap.cancelled;
+        teardown.recordMisses = snap.recordMisses;
+        teardown.postShutdownRequests = snap.postShutdownRequests;
+        teardown.postShutdownCompletions = snap.postShutdownCompletions;
+        teardown.overflow = snap.overflow;
+        teardown.idExhausted = snap.idExhausted;
+        teardown.pending = (snap.requests > snap.completions) ? (snap.requests - snap.completions) : 0u;
+        teardown.rtRequests = snap.rtRequests;
+
+        f << "{\n";
+        f << "  \"schema\": \"retire_latency_post_teardown_v1\",\n";
+        f << "  \"capturePoint\": \"~AudioEngine member destruction completion (first non-static data member)\",\n";
+        f << "  \"postTeardownRole\": \"final capture for AudioEngine-owned resources\",\n";
+        f << "  \"postProcess\": { \"implemented\": false, \"reason\": \"out of scope for this approval\" },\n";
+        f << "  \"verdictUsage\": \"not used (evaluateRetireDelay reads runtime stage only)\",\n";
+        f << "  \"stages\": {\n";
+        writeStage (f, "runtime", runtime, false);
+        writeStage (f, "final", finalV, false);
+        writeStage (f, "postTeardown", teardown, true);
+        f << "  },\n";
+        f << "  \"delta\": {\n";
+        writeDelta (f, "finalMinusRuntime", runtime, finalV, false);
+        writeDelta (f, "postTeardownMinusFinal", finalV, teardown, true);
+        f << "  }\n";
+        f << "}\n";
+
+        // ★ 計測 (2026-11-10): reader 区画の最長保持時間（タグ別）を別ファイルへ
+        const std::filesystem::path holds = out.parent_path() / "retire_latency_reader_holds.json";
+        if (std::FILE* hf = std::fopen (holds.string().c_str(), "wb"))
+        {
+            convo::EpochDomain::dumpHoldWitness (hf);
+            std::fclose (hf);
+        }
+
+        // ★ 計測 (2026-11-11): RCUReader / 音声 reader のレジストリ（postTeardown 段）
+        const std::filesystem::path reg = out.parent_path() / "reader_registry_post_teardown.json";
+        if (std::FILE* rf = std::fopen (reg.string().c_str(), "wb"))
+        {
+            convo::ReaderMeasureRegistry::dump (rf, "postTeardown");
+            std::fclose (rf);
+        }
+
+        // ★ 計測 (2026-11-11 Owner 限定承認): guard インスタンス単位の入退場
+        const std::filesystem::path guards = out.parent_path() / "retire_latency_guard_instances.json";
+        if (std::FILE* gf = std::fopen (guards.string().c_str(), "wb"))
+        {
+            convo::ScopedEpochReader::dumpMeasure (gf);
+            std::fclose (gf);
+        }
+    }
+
+    bool enabled_ = true;
+    std::filesystem::path path_;
+};
+
+} // namespace isr
+} // namespace convo
+
+```
+
 ### 📄 `src\audioengine\RetireQuarantineStore.h`
 
 ```
@@ -40056,6 +42874,8 @@ private:
 //   - drain は epoch 比較述語（EpochDomain::isOlder 相当）を注入して wraparound 安全に判定。
 //==============================================================================
 #pragma once
+
+#include "ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定
 
 #include <array>
 #include <cstdint>
@@ -40135,8 +42955,11 @@ public:
     // 定期 drain（Timer/CoordinatorLoop の tryReclaim 直後）: epoch < minReaderEpoch に
     // 達したエントリのみ deleter 実行。それ以外は保持継続（RT 離脱待ち — EBR 原則）。
     // isOlderFn: EpochDomain::isOlder(a, b)（static_cast<int64_t>(a-b)<0、wraparound 対応）を委譲。
+    // ★ domain tag (v2.9 §3.3): Quarantine のエントリは DeletionEntry を持たないため、
+    //   Router が自分の retireDomainId() を明示引数で渡す。
     void drain(uint64_t minReaderEpoch,
-               const std::function<bool(uint64_t, uint64_t)>& isOlderFn) noexcept
+               const std::function<bool(uint64_t, uint64_t)>& isOlderFn,
+               RetireDomainId domain) noexcept
     {
         // ★ work88 監査指摘: deleter を mutex 保持中に呼ばない（三次レビュー契約）。
         //   lock 内で safe エントリを抽出 → unlock 後に deleter 実行。
@@ -40172,6 +42995,9 @@ public:
         // unlock 後に deleter 実行（reentrancy / deadlock 回避）
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];   // deleter 実行後に判定（D86.1 の順序維持）
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                pendingPtrs[i], convo::isr::RetireLatencyRecorder::Path::Quarantine,
+                domain);   // ★ A(D1) + domain tag
             pendingDeleters[i](pendingPtrs[i]);
             // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（quarantine drain）。
             //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
@@ -40186,7 +43012,7 @@ public:
     }
 
     // Shutdown 専用: 全強制解放（Audio Thread 停止後 — destroyForShutdown と同契約）
-    void drainAllUnsafe() noexcept
+    void drainAllUnsafe(RetireDomainId domain) noexcept
     {
         void* pendingPtrs[kMaxQuarantinedEntries]{};
         void (*pendingDeleters[kMaxQuarantinedEntries])(void*) = {};
@@ -40210,6 +43036,9 @@ public:
         }
         for (std::size_t i = 0; i < pendingCount; ++i) {
             const auto entryType = pendingTypes[i];
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                pendingPtrs[i], convo::isr::RetireLatencyRecorder::Path::DrainAll,
+                domain);   // ★ A(D1) + domain tag
             pendingDeleters[i](pendingPtrs[i]);
             // ★ T1 (D86): shutdown drainAll でも type==World の terminal deleter 実行後 → world 破棄観測。
             if (entryType == DeletionEntryType::World)
@@ -49136,6 +51965,287 @@ private:
 
 ```
 
+### 📄 `src\audioengine\WorldLifetimeRecorder.h`
+
+```
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止（convo::*Atomic 経由）
+
+namespace convo {
+namespace isr {
+
+/**
+ * RuntimeWorld lifetime recorder（D1 とは別系統の計測）
+ *
+ * 起点: commit（owner channel への enqueue 完了）
+ * 終点: 旧所有者の物理破棄（deferred delete の deleter 実行）
+ *
+ * D1（DSP ハンドル／ライフタイム）とは key も判定も共有しない。
+ * 固定容量・アトミックのみ（RT 経路では使わない）。
+ */
+class WorldLifetimeRecorder
+{
+public:
+    enum class Path : std::uint8_t
+    {
+        Publish = 0,     // 通常公開
+        Deferred,        // deferred 再公開
+        Bootstrap,       // 初期化時の置換
+        Reconfigure,     // 再構成
+        Shutdown,        // 終了処理
+        Rejected,        // 公開拒否
+        Count
+    };
+
+    static constexpr std::size_t kPathCount = static_cast<std::size_t> (Path::Count);
+    static constexpr std::size_t kSlots = 256;
+    static constexpr std::size_t kObservationCapacity = 128;
+
+    static const char* pathName (Path p) noexcept
+    {
+        switch (p)
+        {
+            case Path::Publish:     return "publish";
+            case Path::Deferred:    return "deferred";
+            case Path::Bootstrap:   return "bootstrap";
+            case Path::Reconfigure: return "reconfigure";
+            case Path::Shutdown:    return "shutdown";
+            case Path::Rejected:    return "rejected";
+            default:                return "unknown";
+        }
+    }
+
+    static WorldLifetimeRecorder& instance() noexcept
+    {
+        static WorldLifetimeRecorder recorder;
+        return recorder;
+    }
+
+    struct PathStats
+    {
+        std::uint64_t commits = 0;
+        std::uint64_t destroys = 0;
+        std::uint64_t maxNs = 0;
+        std::uint64_t sumNs = 0;
+    };
+
+    struct Observation
+    {
+        std::uint64_t worldId = 0;
+        std::uint64_t lifetimeNs = 0;
+        std::uint8_t path = 0xFFu;
+    };
+
+    // commit（owner channel への移譲完了）を記録する
+    void recordCommit (const void* world, std::uint64_t worldId, Path path) noexcept
+    {
+        if (world == nullptr)
+            return;
+
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateFree)
+                continue;
+
+            std::uint8_t expected = kStateFree;
+
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_relaxed))
+            {
+                continue;
+            }
+
+            slots_[i].world.store (world, std::memory_order_relaxed);
+            slots_[i].worldId.store (worldId, std::memory_order_relaxed);
+            slots_[i].commitTs.store (nowNs(), std::memory_order_relaxed);
+            slots_[i].path.store (static_cast<std::uint8_t> (path), std::memory_order_relaxed);
+            convo::publishAtomic (slots_[i].state, kStateReady, std::memory_order_release);
+
+            convo::fetchAddAtomic (pathCommits_[static_cast<std::size_t> (path)], 1u, std::memory_order_acq_rel);
+            return;
+        }
+
+        convo::fetchAddAtomic (overflow_, 1u, std::memory_order_acq_rel);
+    }
+
+    // 物理破棄を記録する
+    void recordDestroy (const void* world) noexcept
+    {
+        if (world == nullptr)
+            return;
+
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            if (convo::consumeAtomic (slots_[i].state, std::memory_order_acquire) != kStateReady)
+                continue;
+
+            if (convo::consumeAtomic (slots_[i].world, std::memory_order_acquire) != world)
+                continue;
+
+            std::uint8_t expected = kStateReady;
+
+            if (! convo::compareExchangeAtomic (slots_[i].state, expected, kStateFilling,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire))
+            {
+                continue;
+            }
+
+            const std::uint64_t commitTs = slots_[i].commitTs.load (std::memory_order_relaxed);
+            const std::uint64_t worldId = slots_[i].worldId.load (std::memory_order_relaxed);
+            const auto path = static_cast<Path> (slots_[i].path.load (std::memory_order_relaxed));
+            convo::publishAtomic (slots_[i].state, kStateFree, std::memory_order_release);
+
+            const std::uint64_t now = nowNs();
+            const std::uint64_t lifetime = (now >= commitTs) ? (now - commitTs) : 0u;
+            const std::size_t p = static_cast<std::size_t> (path);
+
+            if (p < kPathCount)
+            {
+                convo::fetchAddAtomic (pathDestroys_[p], 1u, std::memory_order_acq_rel);
+                convo::fetchAddAtomic (pathSumNs_[p], lifetime, std::memory_order_acq_rel);
+                updateMax (pathMaxNs_[p], lifetime);
+            }
+
+            const std::uint64_t index = convo::fetchAddAtomic (observationCount_, 1u, std::memory_order_acq_rel);
+            observations_[index % kObservationCapacity] = Observation{worldId, lifetime,
+                                                                      static_cast<std::uint8_t> (path)};
+            return;
+        }
+
+        convo::fetchAddAtomic (unmatched_, 1u, std::memory_order_acq_rel);
+    }
+
+    struct Snapshot
+    {
+        std::uint64_t commits = 0;
+        std::uint64_t destroys = 0;
+        std::uint64_t unmatched = 0;
+        std::uint64_t overflow = 0;
+        PathStats paths[kPathCount];
+        std::vector<Observation> observations;
+    };
+
+    Snapshot snapshot() const
+    {
+        Snapshot s;
+
+        for (std::size_t p = 0; p < kPathCount; ++p)
+        {
+            s.paths[p].commits = convo::consumeAtomic (pathCommits_[p], std::memory_order_acquire);
+            s.paths[p].destroys = convo::consumeAtomic (pathDestroys_[p], std::memory_order_acquire);
+            s.paths[p].maxNs = convo::consumeAtomic (pathMaxNs_[p], std::memory_order_acquire);
+            s.paths[p].sumNs = convo::consumeAtomic (pathSumNs_[p], std::memory_order_acquire);
+            s.commits += s.paths[p].commits;
+            s.destroys += s.paths[p].destroys;
+        }
+
+        s.unmatched = convo::consumeAtomic (unmatched_, std::memory_order_acquire);
+        s.overflow = convo::consumeAtomic (overflow_, std::memory_order_acquire);
+
+        const std::uint64_t written = convo::consumeAtomic (observationCount_, std::memory_order_acquire);
+        const std::uint64_t limit = written < kObservationCapacity ? written : kObservationCapacity;
+
+        for (std::uint64_t i = 0; i < limit; ++i)
+        {
+            const auto& o = observations_[i];
+
+            if (o.path == 0xFFu)
+                continue;
+
+            s.observations.push_back (o);
+        }
+
+        return s;
+    }
+
+    void reset() noexcept
+    {
+        for (std::size_t i = 0; i < kSlots; ++i)
+        {
+            convo::publishAtomic (slots_[i].state, kStateFree, std::memory_order_release);
+            slots_[i].world.store (nullptr, std::memory_order_relaxed);
+            slots_[i].worldId.store (0, std::memory_order_relaxed);
+            slots_[i].commitTs.store (0, std::memory_order_relaxed);
+            slots_[i].path.store (0xFFu, std::memory_order_relaxed);
+        }
+
+        for (std::size_t i = 0; i < kObservationCapacity; ++i)
+            observations_[i] = Observation{0, 0, 0xFFu};
+
+        for (std::size_t p = 0; p < kPathCount; ++p)
+        {
+            convo::publishAtomic (pathCommits_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathDestroys_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathMaxNs_[p], 0, std::memory_order_release);
+            convo::publishAtomic (pathSumNs_[p], 0, std::memory_order_release);
+        }
+
+        convo::publishAtomic (observationCount_, 0, std::memory_order_release);
+        convo::publishAtomic (unmatched_, 0, std::memory_order_release);
+        convo::publishAtomic (overflow_, 0, std::memory_order_release);
+    }
+
+private:
+    static constexpr std::uint8_t kStateFree = 0;
+    static constexpr std::uint8_t kStateFilling = 1;
+    static constexpr std::uint8_t kStateReady = 2;
+
+    struct Slot
+    {
+        std::atomic<std::uint8_t> state{kStateFree};
+        std::atomic<const void*> world{nullptr};
+        std::atomic<std::uint64_t> worldId{0};
+        std::atomic<std::uint64_t> commitTs{0};
+        std::atomic<std::uint8_t> path{0xFFu};
+    };
+
+    WorldLifetimeRecorder() { reset(); }
+
+    static std::uint64_t nowNs() noexcept
+    {
+        using namespace std::chrono;
+        return static_cast<std::uint64_t> (
+            duration_cast<nanoseconds> (steady_clock::now().time_since_epoch()).count());
+    }
+
+    static void updateMax (std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
+    {
+        std::uint64_t current = convo::consumeAtomic (target, std::memory_order_acquire);
+
+        while (value > current
+               && ! convo::compareExchangeWeakAtomic (target, current, value,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
+        {
+        }
+    }
+
+    Slot slots_[kSlots];
+    Observation observations_[kObservationCapacity];
+
+    std::atomic<std::uint64_t> pathCommits_[kPathCount];
+    std::atomic<std::uint64_t> pathDestroys_[kPathCount];
+    std::atomic<std::uint64_t> pathMaxNs_[kPathCount];
+    std::atomic<std::uint64_t> pathSumNs_[kPathCount];
+    std::atomic<std::uint64_t> observationCount_{0};
+    std::atomic<std::uint64_t> unmatched_{0};
+    std::atomic<std::uint64_t> overflow_{0};
+};
+
+} // namespace isr
+} // namespace convo
+
+```
+
 ### 📄 `src\AudioSegmentBuffer.h`
 
 ```
@@ -50630,9 +53740,10 @@ ConvolverProcessor::ConvolverProcessor()
 // ────────────────────────────────────────────────────────────────
 ConvolverProcessor::~ConvolverProcessor()
 {
-    // ★ B-6: Generation を進めて全 LoaderThread を無効化（Loader は次回起動時に終了）。
-    //   Generation は Owner validity のみ。Thread join は別責務。
-    convo::fetchAddAtomic(loaderGeneration_, 1, std::memory_order_acq_rel);
+    // ★ 2026-11-08: 旧 loaderGeneration_ の加算は削除した（読み出しが無く、owner-validity を
+    //   何も保証していなかった）。loader の停止は stopUpgradeThread() / forceCleanup()
+    //   （stopThread + 破棄）が担い、stale completion は convolverStateGeneration の
+    //   commit 直前ガードが破棄する。callAsync は WeakReference で owner 破棄後に何もしない。
 
     stopUpgradeThread();
     stopTimer();
@@ -51093,6 +54204,13 @@ void ConvolverProcessor::reset()
 
 #include "audioengine/AtomicAccess.h"
 
+// IR ロード経路の診断出力（既定 OFF）。stderr が未ドレインのパイプの場合に
+// LoaderThread の書き込みが止まり IR ロードが失敗するため、通常ビルドでは出力しない。
+// 調査時は -DCONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS=ON で従来の出力を再現できる。
+#ifndef CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
+ #define CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS 0
+#endif
+
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOADER_THREAD)
 
 ConvolverProcessor::LoaderThread::LoaderThread(ConvolverProcessor& p, const juce::File& f, double sr, int bs, ConvolverProcessor::PhaseMode phase,
@@ -51123,8 +54241,13 @@ ConvolverProcessor::LoaderThread::~LoaderThread()
 
 void ConvolverProcessor::LoaderThread::run()
 {
-    // ★ B-6: Generation check is pending implementation in the load loop.
-    //   See REPAIR_PLAN section B-6 for the complete pattern.
+    // ★ B-6（2026-11-08 調査で更新）: ロードループ内に世代チェックは無い。
+    //   stale completion の正当性は commit 直前の通貨判定が担う —
+    //   LoadPipeline.cpp の executePendingCommit が
+    //   convolverStateGeneration.isCurrentGeneration(requestGenId) で破棄する。
+    //   ループ内の中断は externalCancellationCheck（threadShouldExit / caller の shouldCancel）
+    //   が担い、要求世代はリサンプル処理（同 :642-654）でのみ参照する。
+    //   旧コメントの参照先 REPAIR_PLAN は現行リポジトリに存在しない（2026-11-08 削除）。
 
     if (auto* provider = owner.getRcuProvider(); provider != nullptr)
         provider->getAffinityManager().applyCurrentThreadPolicy(ThreadType::HeavyBackground);
@@ -51576,6 +54699,7 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
 }
 
 // ★ WORK112 112-1: transform chain checkpoint（NonRT 観測のみ・値の変更なし）
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
 static void printChainCheckpoint(const char* tag, const juce::AudioBuffer<double>& buf, double sr)
 {
     if (buf.getNumSamples() <= 0 || buf.getNumChannels() <= 0 || sr <= 0.0)
@@ -51621,6 +54745,9 @@ static void printChainCheckpoint(const char* tag, const juce::AudioBuffer<double
         tag, n, sr, peak, rms, dc, sum2, nonfinite, subnormal,
         e[0], e[1] - e[0], e[2] - e[1], e[3] - e[2]);
 }
+#else
+static void printChainCheckpoint(const char*, const juce::AudioBuffer<double>&, double) {}
+#endif
 
 bool ConvolverProcessor::LoaderThread::doTrimStep()
 {
@@ -51703,16 +54830,21 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
     // ★ WORK109 109-1/109-2: resample 世代ペア + 実データ密度（non-zero index）の記録。
     //   Numeric trace only (NonRT LoaderThread). RT には一切出力しない。
     {
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         const double preSr = stepResult.loadedSR;
         const int preLen = stepResult.loadedIR.getNumSamples();
-        int preArg = -1;
-        if (preLen > 0 && stepResult.loadedIR.getNumChannels() > 0)
+        const int preArg = [&]() -> int
         {
+            int best = -1;
+            if (preLen <= 0 || stepResult.loadedIR.getNumChannels() <= 0)
+                return best;
             const double* d = stepResult.loadedIR.getReadPointer(0);
             double bv = 0.0;
             for (int i = 0; i < preLen; ++i)
-                if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; preArg = i; }
-        }
+                if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; best = i; }
+            return best;
+        }();
+#endif
 
         bool didResample = false;
 
@@ -51756,6 +54888,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             didResample = true;
         }
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         const int postLen = stepResult.loadedIR.getNumSamples();
         int postArg = -1;
         if (postLen > 0 && stepResult.loadedIR.getNumChannels() > 0)
@@ -51765,7 +54898,9 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             for (int i = 0; i < postLen; ++i)
                 if (std::abs(d[i]) > std::abs(bv)) { bv = d[i]; postArg = i; }
         }
+#endif
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
             "[IR_RATE_GEN] gen=%llu sourceSr=%.0f targetSr=%.0f actualSr=%.0f "
             "sourceLen=%d convertedLen=%d ratio=%.4f resampled=%s srcArgmax=%d convArgmax=%d\n",
@@ -51773,6 +54908,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             preSr, sampleRate, stepResult.loadedSR, preLen, postLen,
             static_cast<double>(postLen) / static_cast<double>(preLen > 0 ? preLen : 1),
             didResample ? "yes" : "no", preArg, postArg);
+#endif
     }
 
     if (ConvolverProcessorInternal::checkCancellation(shouldStop, nullptr)) return false;
@@ -51837,7 +54973,9 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
 
     printChainCheckpoint("D_trimfade", stepTrimmed, stepResult.loadedSR);
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
     // ★ WORK111: 末尾 fade geometry / envelope / energy（NonRT trace のみ・出力は stderr）
+    //   Part 8: 診断 OFF では走査・エネルギー計算も行わない（キャンセル応答を遅らせない）。
     if (stepResult.loadedSR > 0.0 && copySamples > 0
         && stepResult.loadedIR.getNumChannels() > 0)
     {
@@ -51846,6 +54984,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         const uint64_t genDbg =
             static_cast<unsigned long long>(owner.convolverStateGeneration.getCurrentGeneration());
 
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
             "[IR_TAIL_GEOM] gen=%llu loadedSr=%.0f loadedLen=%d targetLength=%d copySamples=%d "
             "fadeSamples=%d fadeStart=%d fadeEnd=%d fadeMs=%.4f fadeDisabled=%d\n",
@@ -51854,6 +54993,7 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             copySamples, fadeSamples, fadeStart, fadeEnd,
             1000.0 * static_cast<double>(fadeSamples) / stepResult.loadedSR,
             fadeDisabled ? 1 : 0);
+#endif
 
         const auto* pre  = stepResult.loadedIR.getReadPointer(0); // Tukey 後 / fade 前
         const auto* post = stepTrimmed.getReadPointer(0);         // fade 後
@@ -51866,10 +55006,12 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             if (i < 0 || i >= copySamples) continue;
             const double a = static_cast<double>(pre[i]);
             const double b = static_cast<double>(post[i]);
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
             std::fprintf(stderr,
                 "[IR_TAIL_ENV] i=%d tMs=%.4f afterTukey=%.8e afterFade=%.8e gain=%.6f\n",
                 i, 1000.0 * static_cast<double>(i) / stepResult.loadedSR, a, b,
                 (std::abs(a) > 1.0e-30) ? b / a : 0.0);
+#endif
         }
 
         // energy split（全帯域）+ 1-pole 100Hz LP 相当の低域 energy
@@ -51888,13 +55030,16 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
             lpTot += sy;
             if (i < fadeStart) lpPre += sy; else lpBand += sy;
         }
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
         std::fprintf(stderr,
             "[IR_TAIL_ENERGY] gen=%llu total=%.8e preFade=%.8e fadeBand=%.8e bandFrac=%.6f "
             "lp100Total=%.8e lp100Pre=%.8e lp100Band=%.8e lp100BandFrac=%.6f\n",
             static_cast<unsigned long long>(genDbg), eTot, ePre, eBand,
             (eTot > 1.0e-30) ? eBand / eTot : 0.0,
             lpTot, lpPre, lpBand, (lpTot > 1.0e-30) ? lpBand / lpTot : 0.0);
+#endif
     }
+#endif
 
 #if defined(__AVX2__)
     _mm256_zeroupper();
@@ -51969,8 +55114,10 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
     }
 
     printChainCheckpoint("E_phase", stepTrimmed, sampleRate);
+#if CONVOPEQ_ENABLE_LOAD_CHAIN_DIAGNOSTICS
     std::fprintf(stderr, "[IR_CHAIN] F_scale scaleFactor=%.8f phaseMode=%d (scale は engine 内の周波数領域で乗算)\n",
                  stepResult.scaleFactor, static_cast<int>(phaseMode));
+#endif
 
     return true;
 }
@@ -59481,6 +62628,8 @@ public:
 
     //----------------------------------------------------------
     // Mixed Phase Parameters (f1/f2)
+    //   契約: 非有限値（NaN/±Inf）は格納せず以前値を維持する（B-03）。
+    //   jlimit は NaN を素通しするため、setter 側で明示的に拒否する。
     //----------------------------------------------------------
     void setMixedTransitionStartHz(float hz);
     [[nodiscard]] float getMixedTransitionStartHz() const;
@@ -59558,6 +62707,30 @@ public:
     void clearLastError() {
         const std::lock_guard<std::mutex> lock(lastErrorMutex_);
         lastError.clear();
+    }
+
+    // ★ B-10: 直近のロードで実際に適用した位相モード（-1 = 未確定）。
+    //   最小位相変換が FFT 上限でスキップされた場合、要求値ではなく AsIs を返す。
+    [[nodiscard]] int getEffectivePhaseModeForLastLoad() const noexcept
+    {
+        return convo::consumeAtomic(effectivePhaseModeForLastLoad, std::memory_order_acquire);
+    }
+    void setEffectivePhaseModeForLastLoad (PhaseMode mode) noexcept
+    {
+        convo::publishAtomic(effectivePhaseModeForLastLoad, static_cast<int>(mode),
+                             std::memory_order_release);
+    }
+
+    // ★ B-10: 要求した位相モードと実効値が食い違ったときの警告（UI 表示用）。
+    [[nodiscard]] juce::String getLastPhaseWarning() const
+    {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        return lastPhaseWarning;
+    }
+    void setLastPhaseWarning (const juce::String& msg)
+    {
+        const std::lock_guard<std::mutex> lock(lastErrorMutex_);
+        lastPhaseWarning = msg;
     }
     // acquire: setLoadingProgress の release と HB し、ロード進捗値を取得。
     [[nodiscard]] float getLoadProgress() const { return convo::consumeAtomic(loadProgress, std::memory_order_acquire); } // acquire: setLoadingProgress の release と HB
@@ -60084,8 +63257,13 @@ private:
 
     std::atomic<std::uintptr_t> m_activeEngineBits { 0 }; // uintptr_t-backed lock-free handle
     std::atomic<bool> isLoading { false };
-    // ★ B-6: Loader validity generation。ConvolverProcessor 破棄時に fetch_add で increment。
-    std::atomic<uint64_t> loaderGeneration_ { 0 };
+    // ★ 2026-11-08: loaderGeneration_（owner-validity generation）は削除した。
+    //   加算するだけで読み出しが 1 箇所も無く、stale completion の拒否には寄与していなかった。
+    //   実際の契約は次の 2 系統で成立している:
+    //   - currency（古い結果の破棄）: convolverStateGeneration（要求開始で bump /
+    //     finalize・commit 直前で isCurrentGeneration 判定）
+    //   - owner lifetime: forceCleanup() の stopThread + callAsync の WeakReference
+    //   詳細は doc の作業報告（2026-11-08 loaderGeneration 調査）を参照。
     std::atomic<bool> isRebuilding { false };
     std::atomic<bool> irFinalized { false };
     std::atomic<bool> useIncrementalRebuild { false };
@@ -60096,6 +63274,10 @@ private:
     std::atomic<int> mixedPhaseState { 0 }; // 0=WaitingIR, 1=Optimizing, 2=Completed
     mutable std::mutex lastErrorMutex_;
     juce::String lastError;
+
+    // ★ B-10: 実効位相モードと警告（silent skip の禁止）
+    std::atomic<int> effectivePhaseModeForLastLoad { -1 };
+    juce::String lastPhaseWarning;
 
     juce::dsp::ProcessSpec currentSpec = { 48000.0, 512, 2 };
 
@@ -60522,7 +63704,8 @@ public: // Added for AudioEngine access
     bool m_lastBypassedState { false };
     bool m_bypassCrossfadeActive { false };
     // [P1-15] 内部 epoch 管理用 (Convolver 独自ドメイン)
-    convo::EpochDomain m_epochDomain;
+    // ★ domain tag (v2.9): reader 専用。退役キューは使わないため「意図的に未特定」。
+    convo::EpochDomain m_epochDomain { convo::RetireDomainId::Unknown };
     // DSP_THREAD_STATE: Audio Thread process() で使用するRCU reader。
     convo::RCUReader runtimeRcuReader { m_epochDomain };
 
@@ -61114,6 +64297,7 @@ private:
 //==============================================================================
 #include "../DeferredDeletionQueue.h"   // 先頭付近に追加
 #include "DeletionQueue.h"
+#include "../audioengine/ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定
 
 namespace convo {
 
@@ -61125,7 +64309,14 @@ void DeletionQueue::enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, D
         // 容量超過: テールのエントリを強制実行してキューを空ける
         // (安全側に倒れる前に deleter を呼び出す)
         if (deleter && ptr)
+        {
+            // ★ domain tag: レガシー DeletionQueue は本設計の対象外（到達しない）。
+            //   万一到達した場合は「ドメイン未特定」として Unknown を記録する。
+            convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                ptr, convo::isr::RetireLatencyRecorder::Path::QueueOverflow,
+                convo::RetireDomainId::Unknown);   // ★ A(D1)
             deleter(ptr);
+        }
         return;
     }
     queue[count++] = {ptr, deleter, epoch, type};
@@ -61146,7 +64337,13 @@ void DeletionQueue::reclaim(uint64_t minReaderEpoch)
         {
             // 安全に解放可能
             if (e.deleter && e.ptr)
+            {
+                // ★ domain tag: レガシー経路（対象外・到達しない）。未特定として Unknown。
+                convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                    e.ptr, convo::isr::RetireLatencyRecorder::Path::Queue,
+                    convo::RetireDomainId::Unknown);   // ★ A(D1)
                 e.deleter(e.ptr);
+            }
             // write を進めない（スロットを空ける）
         }
         else
@@ -61216,6 +64413,7 @@ private:
 #include <array>
 #include <cassert>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -61224,8 +64422,21 @@ private:
 
 #include "../DeferredDeletionQueue.h"
 #include "IEpochProvider.h"
+#include "RetireDomain.h"          // ★ domain tag (v2.9): 退役ドメインの刻印元
 #include "audioengine/AtomicAccess.h"
 #include "ThreadHash.h"
+
+#if ! defined (NDEBUG) && defined (_WIN32)
+    #include <intrin.h>   // __debugbreak（MSVC intrinsic・x86/x64/ARM/ARM64）
+
+    // windows.h を持ち込むと max/min マクロが std::numeric_limits<T>::max() を壊すため、
+    // 必要な API だけを宣言する。Windows SDK の宣言は `WINBASEAPI BOOL WINAPI IsDebuggerPresent(VOID)`
+    // であり、BOOL=int・WINAPI=__stdcall なので、型と呼出規約をそれに合わせる
+    // （kernel32 は常にリンクされる）。windows.h が先に取り込まれている場合は宣言済みなので省く。
+    #if ! defined (_WINDOWS_) && ! defined (_INC_WINDOWS)
+        extern "C" __declspec (dllimport) int __stdcall IsDebuggerPresent (void);
+    #endif
+#endif
 
 namespace convo {
 
@@ -61236,8 +64447,20 @@ public:
     static constexpr uint64_t kInactiveEpoch = std::numeric_limits<uint64_t>::max();
     static constexpr uint64_t kReservedEpoch = std::numeric_limits<uint64_t>::max() - 1;
 
-    EpochDomain() : globalEpoch(1)
+    // ★ domain tag (v2.9 §3.2): 生成側に必ず意図を書かせる（デフォルト引数なし）。
+    //   契約は B-1:
+    //     ・許可値は Unknown / EngineISR / EQ の 3 値のみ
+    //     ・Unstamped / Count / 5 以上は全ビルドで「採用しない」（Unknown に落として計数する）
+    //     ・Debug では加えて assertion（ログ + デバッガ接続時ブレーク）で検出する
+    explicit EpochDomain(RetireDomainId domain) noexcept
+        : domainId_(sanitizeDomain(domain)), globalEpoch(1)
     {
+        if (! isAssignableDomain(domain))
+        {
+            invalidDomainAssignments_.fetch_add (1u, std::memory_order_relaxed);
+            domainAssertionFailure();
+        }
+
         for (auto& slot : readers)
         {
             // release: コンストラクタ内で単一スレッドから初期化するが、
@@ -61249,9 +64472,66 @@ public:
         }
     }
 
+    // ★ domain tag: 契約の判定子（constexpr・全ビルド共通）
+    static constexpr bool isAssignableDomain(RetireDomainId domain) noexcept
+    {
+        return domain == RetireDomainId::Unknown
+            || domain == RetireDomainId::EngineISR
+            || domain == RetireDomainId::EQ;
+    }
+
+    // ★ domain tag: 不正値は決して採用しない（全ビルド）。採用値は Unknown
+    //   （集計上は providerUnknown に計上される）。
+    static constexpr RetireDomainId sanitizeDomain(RetireDomainId domain) noexcept
+    {
+        return isAssignableDomain(domain) ? domain : RetireDomainId::Unknown;
+    }
+
+    [[nodiscard]] RetireDomainId domainId() const noexcept { return domainId_; }
+
+    // ★ domain tag (v2.9 §3.1): IRetireProvider への公開
+    [[nodiscard]] RetireDomainId retireDomainId() const noexcept override { return domainId_; }
+
+    // ★ domain tag: 不正値の生成回数（診断用。JSON には出さない）
+    static std::uint32_t invalidDomainAssignments() noexcept
+    {
+        return invalidDomainAssignments_.load (std::memory_order_relaxed);
+    }
+
+    // ★ domain tag: 設計の jassertfalse に相当する Debug 検出。
+    //   EpochDomain.h は JUCE 非依存（<cassert> のみ）で、inline ctor の定義は全 TU で
+    //   同一でなければならない。そのため JUCE の jassertfalse 展開
+    //   （JUCE_LOG_CURRENT_ASSERTION → juce_isRunningUnderDebugger() のときだけブレーク）
+    //   と同じ「条件・順序・ブレーク動作」をここで直接実装する。Release では何もしない。
+    //   ただし **ログの配送先は異なる**（JUCE Logger ではなく stderr）。JUCE の実マクロを
+    //   製品 ctor で使っているわけではない。
+    static void domainAssertionFailure() noexcept
+    {
+#if ! defined (NDEBUG)
+        std::fprintf (stderr,
+                      "EpochDomain: invalid RetireDomainId (contract violation; "
+                      "assignable values are Unknown/EngineISR/EQ)\n");
+  #if defined (_WIN32)
+        // デバッガ接続時のみブレーク（JUCE の juce_isRunningUnderDebugger() と同じ条件）。
+        if (::IsDebuggerPresent() != 0)
+            __debugbreak();
+  #else
+        // 非 Windows: デバッガ判定のポータブル手段が無いため、Debug では停止する
+        // （assert と同じ挙動）。Windows API の宣言や未定義シンボルは持ち込まない。
+        assert (false && "EpochDomain: invalid RetireDomainId");
+  #endif
+#endif
+    }
+
     int registerReaderThread() noexcept override
     {
         return registerReaderThread("unnamed");
+    }
+
+    // ★ 計測: 登録元タグ（文字列版へ委譲するだけで挙動は変えない）
+    int registerReaderThreadWithTag(const char* tag) noexcept override
+    {
+        return registerReaderThread(tag);
     }
 
     // ★ C-3: タグ名付き Reader 登録
@@ -61418,6 +64698,28 @@ public:
         const uint32_t previousDepth = convo::fetchSubAtomic(slot.depth,
                                                               static_cast<uint32_t>(1),
                                                               std::memory_order_acq_rel);
+        // ★ 計測: 区画の保持時間（1ms 以上のときだけ最長値を更新）
+        if (previousDepth == 1 && readerIndex >= 0 && readerIndex < kMaxReaders)
+        {
+            const uint64_t startUs = convo::consumeAtomic(slot.residencyStartTimestampUs, std::memory_order_acquire);
+            const uint64_t nowUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (startUs != 0 && nowUs > startUs && (nowUs - startUs) >= 1000ull)
+            {
+                auto& w = holdWitness_[static_cast<size_t>(readerIndex)];
+                w.count.fetch_add(1u, std::memory_order_relaxed);
+                w.slot.store(static_cast<uint32_t>(readerIndex), std::memory_order_relaxed);
+                w.domainKey.store(reinterpret_cast<uint64_t>(this), std::memory_order_relaxed);
+                std::strncpy(w.tag, slot.ownerTag, sizeof(w.tag) - 1);
+                uint64_t expected = w.maxHoldUs.load(std::memory_order_relaxed);
+                while (nowUs - startUs > expected
+                       && ! convo::compareExchangeWeakAtomic (w.maxHoldUs, expected, nowUs - startUs,
+                                                              std::memory_order_relaxed,
+                                                              std::memory_order_relaxed))
+                {
+                }
+            }
+        }
         if (previousDepth == 0)
         {
             convo::publishAtomic(slot.depth, static_cast<uint32_t>(0), std::memory_order_release);
@@ -61663,10 +64965,61 @@ public:
         reclaimSuccessCount_.fetch_add(n, std::memory_order_relaxed);
     }
 
+    // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): 診断専用 — 退役キュー先頭 entry と epoch 安全条件。
+    //   reclaim() が削除可否に使う述語（isOlder(entry.epoch, minReaderEpoch)）と同じ式で判定する。
+    //   キューは変更しない（peekHead は POD コピーのみ）。値が取れない場合は valid=false とし、
+    //   推定値は入れない（呼出し側は unavailable と表示する）。
+    struct RetireHeadSnapshot {
+        bool     valid{false};                    // false = 先頭なし / sequence 確認失敗
+        std::uint32_t headSlotIndex{0};           // ★ C3-D: head identity の 1 要素目
+        std::uint32_t headSequence{0};            // ★ C3-D: head identity の 2 要素目
+        uint64_t headEpoch{0};                    // ★ C3-D: head identity の 3 要素目
+        uint64_t minReaderEpoch{0};               // reclaim() に渡すのと同じ値
+        uint64_t currentEpoch{0};
+        DeletionEntryType type{DeletionEntryType::Generic};
+        convo::RetireDomainId domainId{convo::RetireDomainId::Unknown};
+        uint64_t firstScanAgeMs{0};               // 0 = 未走査（firstScanTsNs==0）
+        bool     scanned{false};                  // reclaim 走査で一度でも評価されたか
+        bool     epochOlderThanMinReader{false};  // isOlder(headEpoch, minReaderEpoch)
+    };
+
+    [[nodiscard]] RetireHeadSnapshot inspectRetireHead() const noexcept
+    {
+        RetireHeadSnapshot s;
+        s.minReaderEpoch = getMinReaderEpoch();
+        s.currentEpoch = currentEpoch();
+
+        DeletionEntry e;
+        std::uint32_t slot = 0;
+        std::uint32_t seq = 0;
+        if (!deferredDeletionQueue.peekHead(e, slot, seq))
+            return s;                             // valid=false のまま（推定しない）
+
+        s.valid = true;
+        s.headSlotIndex = slot;                   // identity は 3 要素で保持する
+        s.headSequence = seq;
+        s.headEpoch = e.epoch;
+        s.type = e.type;
+        s.domainId = e.domainId;
+        s.epochOlderThanMinReader = isOlder(e.epoch, s.minReaderEpoch);
+
+        if (e.firstScanTsNs != 0)
+        {
+            s.scanned = true;
+            // DeferredDeletionQueue::steadyNowNs() と同じ steady_clock 基準。
+            const uint64_t nowNs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (nowNs > e.firstScanTsNs)
+                s.firstScanAgeMs = (nowNs - e.firstScanTsNs) / 1'000'000ull;
+        }
+        return s;
+    }
+
     // ★ P0-A/P2-A: IRetireProvider インターフェース実装（public 必須）
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept override
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch);
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, domainId_);
     }
 
     // ★ T1 (D86): telemetry type tag 付き enqueue（type を DeferredDeletionQueue に伝搬）。
@@ -61674,7 +65027,7 @@ public:
     bool enqueueRetireTyped(void* ptr, void (*deleter)(void*), uint64_t epoch,
                             DeletionEntryType type) noexcept override
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type, domainId_);
     }
 
     // ★ T1 (D86): type==World の terminal deleter 実行数（world 物理破棄数・primary 経路）。
@@ -61829,7 +65182,7 @@ private:
     [[deprecated("Use coordinator.enqueueRetire() instead.")]]
     bool enqueueRetire(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept
     {
-        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type);
+        return deferredDeletionQueue.enqueue(ptr, deleter, epoch, type, domainId_);
     }
 
     struct ReaderSlot
@@ -61853,6 +65206,50 @@ private:
     std::atomic<uint64_t> globalEpoch;
     std::array<ReaderSlot, kMaxReaders> readers;
     DeferredDeletionQueue deferredDeletionQueue;
+
+    // ★ domain tag (v2.9 §3.2): 自分のドメイン（enqueue 時に entry へ刻印する）。
+    //   宣言順は domainId_ → globalEpoch（初期化子の順序警告を出さない）。
+    RetireDomainId domainId_ { RetireDomainId::Unknown };
+
+    // ★ domain tag: 不正値の生成回数（診断用・全ビルドで観測可能）
+    inline static std::atomic<std::uint32_t> invalidDomainAssignments_ { 0 };
+
+public:
+    // ★ 計測 (2026-11-10): reader 区画の最長保持時間の証跡。
+    //   スロット単位の固定容量で、ポインタを辿らない（破棄後も安全に読める）。
+    struct HoldWitness
+    {
+        std::atomic<uint64_t> maxHoldUs{0};
+        std::atomic<uint32_t> count{0};
+        std::atomic<uint32_t> slot{0xFFFFFFFFu};
+        char tag[32]{};
+        std::atomic<uint64_t> domainKey{0};
+    };
+    static inline HoldWitness holdWitness_[kMaxReaders]{};
+
+    // ★ 計測: 保持時間の証跡を JSON として書き出す（NonRT から呼ぶこと）。
+    static void dumpHoldWitness(std::FILE* f) noexcept
+    {
+        if (f == nullptr)
+            return;
+        std::fprintf(f, "{\n  \"schema\": \"retire_reader_holds_v1\",\n");
+        std::fprintf(f, "  \"note\": \"1ms 以上の reader 区画の最長保持時間（スロット単位・固定容量）\",\n");
+        std::fprintf(f, "  \"slots\": [");
+        bool first = true;
+        for (int i = 0; i < kMaxReaders; ++i)
+        {
+            const auto& w = holdWitness_[static_cast<size_t>(i)];
+            const uint64_t h = w.maxHoldUs.load(std::memory_order_relaxed);
+            if (h == 0)
+                continue;
+            std::fprintf(f, "%s\n    {\"slot\": %d, \"tag\": \"%s\", \"maxHoldUs\": %llu, \"count\": %u}",
+                         first ? "" : ",", i, w.tag,
+                         (unsigned long long) h,
+                         w.count.load(std::memory_order_relaxed));
+            first = false;
+        }
+        std::fprintf(f, "%s]\n}\n", first ? "" : "\n  ");
+    }
 
     // ★ A-2: EBR Queue Visibility 統計カウンタ
     std::atomic<uint64_t> reclaimAttemptCount_{0};
@@ -62276,6 +65673,13 @@ public:
     /** Allocate a new reader slot. Returns slot index or -1 on failure. */
     virtual int registerReaderThread() noexcept = 0;
 
+    // ★ 計測 (2026-11-10 Owner 承認): 登録元を識別するタグ付き登録。
+    //   既定は無タグ版へ委譲する（既存呼出しの挙動は変わらない）。
+    virtual int registerReaderThreadWithTag(const char* /*tag*/) noexcept
+    {
+        return registerReaderThread();
+    }
+
     /** Try to reserve a specific reader slot. Returns true if successful.
      *
      *  V-11: this path refuses once reader registration has been closed, which is
@@ -62344,6 +65748,7 @@ public:
 #include <cstdint>
 
 #include "../DeferredDeletionQueue.h"   // ★ T1: DeletionEntryType（telemetry 識別 metadata・D86）
+#include "RetireDomain.h"               // ★ domain tag (v2.9): retireDomainId() の戻り型
 
 //==============================================================================
 // IRetireProvider.h — Retire operations abstract interface.
@@ -62381,6 +65786,15 @@ public:
 
     /** Try to reclaim retired objects. */
     virtual void tryReclaim() noexcept = 0;
+
+    // ★ domain tag (v2.9 §3.1): 退役ドメインの問い合わせ。
+    //   EpochDomain は自分のドメインを返し、ISRRetireRouter は provider_ へ委譲する。
+    //   既定は Unknown（provider が未対応の場合に「特定できない」と明示する）。
+    //   Unstamped は刻印漏れ専用なので、ここで返してはいけない。
+    [[nodiscard]] virtual RetireDomainId retireDomainId() const noexcept
+    {
+        return RetireDomainId::Unknown;
+    }
 
     // ★ P0-A: EpochDomain 固有メソッドをインターフェースに昇格
     //   ISRRetireRouter が dynamic_cast でアクセスするより Interface で宣言する方が型安全。
@@ -62605,6 +66019,7 @@ static_assert(std::is_move_constructible_v<ObserveToken>);
 #pragma once
 
 #include "IReaderEpochProvider.h"
+#include "ReaderMeasureRegistry.h"
 #include <atomic>
 #include <functional>
 #include <thread>
@@ -62637,53 +66052,64 @@ public:
     RCUReader(RCUReader&&) = delete;
     RCUReader& operator=(RCUReader&&) = delete;
 
-    void enter() noexcept
+    // ★ Gate 1 (2026-11-11): 戻り値 = 「この呼出しが保護を確立したか」。
+    //   rootEnterSucceeded_ は所有者スレッドだけが書き、thread-confined を維持する。
+    //   他スレッドの入場は nested と誤認せず、状態を一切変更せずに false を返す。
+    bool enter() noexcept
     {
-        // acq_rel: acquire → 直前の exit() の nestingDepth release を観測してネストを安全化；
-        //          release → depth > 0 を公開し、ネスト中の enter が早期 return できる。
-        const uint32_t previousDepth = convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-        if (previousDepth > 0)
+        const uint64_t my = currentThreadToken();
+
+        // 1) 所有者が既に居る場合: 同一スレッドなら nested、他スレッドなら何も変更せず失敗
+        const uint64_t owner = convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire);
+        if (owner != 0)
         {
-            // ★ ネスト: 最外層の rootEnterSucceeded_ を維持
-            return;
+            if (owner != my)
+                return false;                       // 他スレッド所有（depth も owner も触らない）
+
+            convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+            return rootEnterSucceeded_;             // nested は外側の成否を返す
         }
 
-        const uint64_t threadToken = currentThreadToken();
+        // 2) 所有者が空き: CAS で所有権を先に確保する（ここが線形化点）
         uint64_t expectedOwner = 0;
-        // CAS acq_rel/acquire: 成功時 acq_rel → ownerThreadToken を取得し新オーナーを公開；
-        //                     失敗時 acquire → 競合スレッドの最新 ownerThreadToken を観測。
         if (!convo::compareExchangeAtomic(ownerThreadToken,
                                           expectedOwner,
-                                          threadToken,
+                                          my,
                                           std::memory_order_acq_rel,
-                                          std::memory_order_acquire)
-            && expectedOwner != threadToken)
+                                          std::memory_order_acquire))
         {
-            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-            return;
+            if (expectedOwner != my)
+                return false;                       // 競合に負けた（状態は変更しない）
+
+            convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+            return rootEnterSucceeded_;
         }
+
+        // 3) 所有権を得た: depth 0→1
+        convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
 
         const int tid = acquireThreadSlot();
         if (tid >= 0)
         {
             epochProvider->enterReader(tid);
-            // ★ P1-A: 今回の enter 成功を記録（non-atomic: thread confined）
             rootEnterSucceeded_ = true;
+            measureIdx_ = convo::ReaderMeasureRegistry::claim ("RCUReader",
+                                                               static_cast<std::uint32_t> (tid), 1u,
+                                                               this, epochProvider);
+            return true;
         }
-        else
-        {
-            // ★ P1-A: slot 取得失敗 → 今回の enter 失敗を記録（Fail-Closed）
-            rootEnterSucceeded_ = false;
-            // acq_rel: スロット取得失敗時の nestingDepth 減算 — acq_rel で安全に公開。
-            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
-            uint64_t expectedOwnerOnRelease = threadToken;
-            // CAS acq_rel/acquire: ownerThreadToken を 0 に戻す；失敗時 acquire で最新値観測。
-            convo::compareExchangeAtomic(ownerThreadToken,
-                                         expectedOwnerOnRelease,
-                                         static_cast<uint64_t>(0),
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_acquire);
-        }
+
+        // 4) slot 取得失敗: owner と depth をロールバック
+        rootEnterSucceeded_ = false;
+        convo::ReaderMeasureRegistry::enterFailures_.fetch_add (1u, std::memory_order_relaxed);
+        convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+        uint64_t expectedOwnerOnRelease = my;
+        convo::compareExchangeAtomic(ownerThreadToken,
+                                     expectedOwnerOnRelease,
+                                     static_cast<uint64_t>(0),
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire);
+        return false;
     }
 
     // === 限定公開API (P0-14: EpochDomain型を露出しない) ===
@@ -62716,6 +66142,7 @@ public:
         if (previousDepth == 0)
         {
             rootEnterSucceeded_ = false;
+            convo::ReaderMeasureRegistry::underflows_.fetch_add (1u, std::memory_order_relaxed);   // ★ 計測
             // underflowガード: 0 を release で再公開し、展開 depth を修正。
             convo::publishAtomic(nestingDepth, 0, std::memory_order_release);
             return;
@@ -62728,6 +66155,12 @@ public:
 
         // ★ previousDepth == 1: 最外層 exit
         // acquire: enter() の ownerThreadToken acq_rel と HB し、所有者を観測。
+        // ★ 計測 (2026-11-11): 最外層の退出で区画を閉じる（ネストでは閉じない）
+        if (measureIdx_ >= 0)
+        {
+            convo::ReaderMeasureRegistry::close (measureIdx_);
+            measureIdx_ = -1;
+        }
         if (convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire) != currentThreadToken())
         {
             rootEnterSucceeded_ = false;  // 所有者不一致でもリセット
@@ -62798,6 +66231,7 @@ private:
     std::atomic<uint32_t> nestingDepth { 0 };
     std::atomic<uint64_t> ownerThreadToken { 0 };
     IReaderEpochProvider* epochProvider = nullptr;
+    int measureIdx_ = -1;   // ★ 計測: ReaderMeasureRegistry のレコード番号
     // ★ P1-A: per-enter 成否追跡（non-atomic: RAII thread confinement 下で安全）
     bool rootEnterSucceeded_ = false;
 };
@@ -62805,32 +66239,267 @@ private:
 class RCUReaderGuard
 {
 public:
-    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r) { reader->enter(); }
-    ~RCUReaderGuard() noexcept { if (reader) reader->exit(); }
+    // ★ Gate 1 (2026-11-11): 成否を「この呼出し」で保持する（共有フラグを読まない）。
+    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r), ok_(r.enter()) {}
+    // ★ Gate 1: 入場に失敗した guard は exit を呼ばない（depth を壊さない）
+    ~RCUReaderGuard() noexcept { if (reader && ok_) reader->exit(); }
 
     RCUReaderGuard(const RCUReaderGuard&) = delete;
     RCUReaderGuard& operator=(const RCUReaderGuard&) = delete;
 
-    RCUReaderGuard(RCUReaderGuard&& other) noexcept : reader(other.reader) { other.reader = nullptr; }
+    RCUReaderGuard(RCUReaderGuard&& other) noexcept
+        : reader(other.reader), ok_(other.ok_) { other.reader = nullptr; other.ok_ = false; }
     RCUReaderGuard& operator=(RCUReaderGuard&& other) noexcept
     {
         if (this != &other)
         {
-            if (reader) reader->exit();
+            if (reader && ok_) reader->exit();
             reader = other.reader;
+            ok_ = other.ok_;
             other.reader = nullptr;
+            other.ok_ = false;
         }
         return *this;
     }
 
-    // ★ C-7: RCU enter 成功の確認
+    // ★ C-7 + Gate 1: この guard の入場が保護を確立したか
     [[nodiscard]] bool rootEnterSucceeded() const noexcept
     {
-        return reader != nullptr && reader->rootEnterSucceeded();
+        return reader != nullptr && ok_;
     }
 
 private:
     RCUReader* reader = nullptr;
+    bool ok_ = false;
+};
+
+} // namespace convo
+
+```
+
+### 📄 `src\core\ReaderMeasureRegistry.h`
+
+```
+//==============================================================================
+// ReaderMeasureRegistry.h  (2026-11-11 Owner 限定承認)
+//
+// RCUReader と音声 reader の「最外層の入場〜退出」をインスタンス単位で記録する。
+//   - 退出済みレコードはタグ別集計へ加算してから再利用する（飽和しない）。
+//   - active 中のレコードは上書きしない。
+//   - 記録失敗・集計取りこぼしをカウンタで明示する。
+//   - すべて atomic。動的確保・mutex・ファイル出力は行わない（出力は NonRT 側）。
+// EBR の入場・退出、epoch、所有権、reclaim 判定は変更しない。
+//==============================================================================
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <chrono>
+#include <thread>
+#include <functional>
+
+#include "audioengine/AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
+
+namespace convo
+{
+
+class ReaderMeasureRegistry
+{
+public:
+    static constexpr int kRecords = 128;
+    static constexpr int kTags = 32;
+
+    struct Record
+    {
+        std::atomic<uint8_t>  state{0};          // 0=free 1=active
+        std::atomic<uint64_t> enterUs{0};
+        std::atomic<uint64_t> instKey{0};
+        std::atomic<uint64_t> provKey{0};
+        std::atomic<uint64_t> threadTag{0};
+        std::atomic<uint32_t> slot{0xFFFFFFFFu};
+        std::atomic<uint32_t> depth{0};
+        std::atomic<uint32_t> seq{0};
+        char tag[32]{};
+    };
+
+    struct Agg
+    {
+        std::atomic<uint32_t> used{0};
+        std::atomic<uint64_t> count{0};
+        std::atomic<uint64_t> maxHoldUs{0};
+        std::atomic<uint64_t> sumHoldUs{0};
+        char tag[32]{};
+    };
+
+    static inline Record recs_[kRecords]{};
+    static inline Agg aggs_[kTags]{};
+    static inline std::atomic<uint32_t> seq_{0};
+    // 診断カウンタ
+    static inline std::atomic<uint64_t> recordFailures_{0};   // 空きレコードが無い
+    static inline std::atomic<uint64_t> closed_{0};           // 正常に退出した区画
+    static inline std::atomic<uint64_t> aggMisses_{0};        // タグ表が満杯
+    static inline std::atomic<uint64_t> enterFailures_{0};    // slot 取得失敗
+    static inline std::atomic<uint64_t> underflows_{0};       // 退出の underflow
+
+    static std::uint64_t nowUs() noexcept
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    static std::uint64_t threadTag() noexcept
+    {
+        return static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    }
+
+    static int claim (const char* tag, std::uint32_t slot, std::uint32_t depth,
+                      const void* instance, const void* provider) noexcept
+    {
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (int i = 0; i < kRecords; ++i)
+            {
+                std::uint8_t expected = 0;
+                if (convo::compareExchangeAtomic (recs_[i].state, expected, 1,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed))
+                {
+                    recs_[i].enterUs.store (nowUs(), std::memory_order_relaxed);
+                    recs_[i].slot.store (slot, std::memory_order_relaxed);
+                    recs_[i].depth.store (depth, std::memory_order_relaxed);
+                    convo::publishAtomic (recs_[i].instKey, static_cast<std::uint64_t> (
+                        reinterpret_cast<std::uintptr_t> (instance)), std::memory_order_relaxed);
+                    convo::publishAtomic (recs_[i].provKey, static_cast<std::uint64_t> (
+                        reinterpret_cast<std::uintptr_t> (provider)), std::memory_order_relaxed);
+                    recs_[i].threadTag.store (threadTag(), std::memory_order_relaxed);
+                    recs_[i].seq.store (seq_.fetch_add (1u, std::memory_order_relaxed) + 1u,
+                                        std::memory_order_relaxed);
+                    std::memset (recs_[i].tag, 0, sizeof (recs_[i].tag));
+                    if (tag != nullptr)
+                        std::strncpy (recs_[i].tag, tag, sizeof (recs_[i].tag) - 1);
+                    else
+                        std::strncpy (recs_[i].tag, "untagged", sizeof (recs_[i].tag) - 1);
+                    return i;
+                }
+            }
+        }
+        recordFailures_.fetch_add (1u, std::memory_order_relaxed);
+        return -1;
+    }
+
+    static void close (int idx) noexcept
+    {
+        if (idx < 0 || idx >= kRecords)
+            return;
+
+        const std::uint64_t enter = recs_[idx].enterUs.load (std::memory_order_relaxed);
+        const std::uint64_t hold = nowUs() - enter;
+        const char* tag = recs_[idx].tag;
+
+        // タグ別集計（レコード解放前に加算する）
+        int aggIdx = -1;
+        for (int i = 0; i < kTags; ++i)
+        {
+            if (convo::consumeAtomic (aggs_[i].used, std::memory_order_acquire) == 1
+                && std::strncmp (aggs_[i].tag, tag, sizeof (aggs_[i].tag)) == 0)
+            {
+                aggIdx = i;
+                break;
+            }
+        }
+        if (aggIdx < 0)
+        {
+            for (int i = 0; i < kTags; ++i)
+            {
+                std::uint32_t expected = 0;
+                if (convo::compareExchangeAtomic (aggs_[i].used, expected, 1,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed))
+                {
+                    std::memset (aggs_[i].tag, 0, sizeof (aggs_[i].tag));
+                    std::strncpy (aggs_[i].tag, tag, sizeof (aggs_[i].tag) - 1);
+                    aggIdx = i;
+                    break;
+                }
+            }
+        }
+        if (aggIdx >= 0)
+        {
+            aggs_[aggIdx].count.fetch_add (1u, std::memory_order_relaxed);
+            aggs_[aggIdx].sumHoldUs.fetch_add (hold, std::memory_order_relaxed);
+            std::uint64_t expectedMax = aggs_[aggIdx].maxHoldUs.load (std::memory_order_relaxed);
+            while (hold > expectedMax
+                   && ! convo::compareExchangeWeakAtomic (aggs_[aggIdx].maxHoldUs, expectedMax, hold,
+                                                          std::memory_order_relaxed,
+                                                          std::memory_order_relaxed))
+            {
+            }
+        }
+        else
+        {
+            aggMisses_.fetch_add (1u, std::memory_order_relaxed);
+        }
+
+        convo::publishAtomic (recs_[idx].state, 0, std::memory_order_release);   // 再利用
+        closed_.fetch_add (1u, std::memory_order_relaxed);
+    }
+
+    // NonRT から呼ぶこと。
+    static void dump (std::FILE* f, const char* stage) noexcept
+    {
+        if (f == nullptr)
+            return;
+
+        const std::uint64_t now = nowUs();
+        std::fprintf (f, "{\n  \"schema\": \"reader_registry_v1\",\n");
+        std::fprintf (f, "  \"stage\": \"%s\",\n", stage != nullptr ? stage : "");
+        std::fprintf (f, "  \"capacity\": %d,\n", kRecords);
+        std::fprintf (f, "  \"counters\": {\"closed\": %llu, \"recordFailures\": %llu, \"aggMisses\": %llu, \"enterFailures\": %llu, \"underflows\": %llu},\n",
+                      (unsigned long long) closed_.load (std::memory_order_relaxed),
+                      (unsigned long long) recordFailures_.load (std::memory_order_relaxed),
+                      (unsigned long long) aggMisses_.load (std::memory_order_relaxed),
+                      (unsigned long long) enterFailures_.load (std::memory_order_relaxed),
+                      (unsigned long long) underflows_.load (std::memory_order_relaxed));
+
+        std::fprintf (f, "  \"exitedByTag\": [");
+        bool first = true;
+        for (int i = 0; i < kTags; ++i)
+        {
+            if (convo::consumeAtomic (aggs_[i].used, std::memory_order_acquire) != 1)
+                continue;
+            std::fprintf (f, "%s\n    {\"tag\": \"%s\", \"count\": %llu, \"maxHoldUs\": %llu, \"sumHoldUs\": %llu}",
+                          first ? "" : ",", aggs_[i].tag,
+                          (unsigned long long) aggs_[i].count.load (std::memory_order_relaxed),
+                          (unsigned long long) aggs_[i].maxHoldUs.load (std::memory_order_relaxed),
+                          (unsigned long long) aggs_[i].sumHoldUs.load (std::memory_order_relaxed));
+            first = false;
+        }
+        std::fprintf (f, "%s],\n", first ? "" : "\n  ");
+
+        std::fprintf (f, "  \"activeAtStage\": [");
+        bool firstA = true;
+        for (int i = 0; i < kRecords; ++i)
+        {
+            if (convo::consumeAtomic (recs_[i].state, std::memory_order_acquire) != 1)
+                continue;
+            const std::uint64_t enter = recs_[i].enterUs.load (std::memory_order_relaxed);
+            std::fprintf (f,
+                "%s\n    {\"tag\": \"%s\", \"slot\": %u, \"depth\": %u, \"thread\": %llu, \"instance\": \"0x%llx\", \"provider\": \"0x%llx\", \"enterUs\": %llu, \"holdUs\": %llu, \"seq\": %u}",
+                firstA ? "" : ",", recs_[i].tag,
+                recs_[i].slot.load (std::memory_order_relaxed),
+                recs_[i].depth.load (std::memory_order_relaxed),
+                (unsigned long long) recs_[i].threadTag.load (std::memory_order_relaxed),
+                (unsigned long long) recs_[i].instKey.load (std::memory_order_relaxed),
+                (unsigned long long) recs_[i].provKey.load (std::memory_order_relaxed),
+                (unsigned long long) enter,
+                (unsigned long long) (now - enter),
+                recs_[i].seq.load (std::memory_order_relaxed));
+            firstA = false;
+        }
+        std::fprintf (f, "%s]\n}\n", firstA ? "" : "\n  ");
+    }
 };
 
 } // namespace convo
@@ -62873,6 +66542,60 @@ struct RetireBoundaryTelemetry
     std::uint64_t totalTransitions = 0;
     bool boundaryActive = false;
 };
+
+} // namespace convo
+
+```
+
+### 📄 `src\core\RetireDomain.h`
+
+```
+#pragma once
+
+//==============================================================================
+// RetireDomain.h — 退役ドメインの識別子（domain tag 設計 v2.9 §2.2 / §2.3）
+//
+// 依存は <cstdint> のみに閉じる。DeferredDeletionQueue.h（entry への刻印）と
+// IRetireProvider.h（retireDomainId() の戻り型）の双方から参照されるため、
+// どちらか一方に定義するとインクルードが循環する。独立ヘッダに置く。
+//
+//   Unstamped : 刻印されていない（enqueue 時の刻印欠落＝バグ）。生成側は付けない。
+//   Unknown   : 刻印済みだがドメインを特定できない（意図的）。Unstamped と混同しない。
+//   EngineISR : AudioEngine の epoch ドメイン
+//   EQ        : EQProcessor の epoch ドメイン
+//   Count     : sentinel（配列サイズ用）。ドメイン値としては使わない。
+//==============================================================================
+
+#include <cstdint>
+
+namespace convo {
+
+enum class RetireDomainId : std::uint8_t
+{
+    Unstamped = 0,
+    Unknown   = 1,
+    EngineISR = 2,
+    EQ        = 3,
+    Count     = 4
+};
+
+// 配列サイズ用（std::size_t を持ち込まないため int で定義する）
+inline constexpr int kRetireDomainCount = static_cast<int>(RetireDomainId::Count);
+
+// JSON 出力用の名前（設計差分 §5.1 の id と一致させる）
+inline const char* retireDomainName(RetireDomainId id) noexcept
+{
+    switch (id)
+    {
+        case RetireDomainId::Unstamped: return "Unstamped";
+        case RetireDomainId::Unknown:   return "Unknown";
+        case RetireDomainId::EngineISR: return "EngineISR";
+        case RetireDomainId::EQ:        return "EQ";
+        case RetireDomainId::Count:     break;
+    }
+
+    return "Invalid";
+}
 
 } // namespace convo
 
@@ -63205,10 +66928,18 @@ private:
 ```
 #pragma once
 
+#include <cstdio>
+#include <cstring>
+#include <chrono>
+#include <atomic>
+#include <thread>
+#include <functional>
+
 #include <array>
 #include <cstdint>
 
 #include "IReaderEpochProvider.h"
+#include "audioengine/AtomicAccess.h"   // ★ atomic 直接 dot-call を廃止
 
 namespace convo
 {
@@ -63249,12 +66980,20 @@ namespace convo
 class ScopedEpochReader
 {
 public:
-    explicit ScopedEpochReader (IReaderEpochProvider& provider) noexcept
+    // ★ 計測 (2026-11-10 Owner 承認): 生成箇所を識別するタグ。
+    //   既定は nullptr（従来どおり無タグで登録する）。
+    explicit ScopedEpochReader (IReaderEpochProvider& provider,
+                                const char* tag = nullptr) noexcept
         : provider_ (&provider),
-          slot_ (acquireSlot (provider))
+          slot_ (acquireSlot (provider, tag, &depth_))
     {
         if (slot_ >= 0)
+        {
             provider_->enterReader (slot_);
+            // ★ 計測 (2026-11-11 Owner 承認): guard インスタンス単位の入場記録
+            measureIdx_ = claimMeasure (tag, static_cast<uint32_t> (slot_),
+                                        static_cast<uint32_t> (depth_), &provider);
+        }
     }
 
     ~ScopedEpochReader() { reset(); }
@@ -63264,10 +67003,13 @@ public:
 
     ScopedEpochReader (ScopedEpochReader&& other) noexcept
         : provider_ (other.provider_),
-          slot_ (other.slot_)
+          slot_ (other.slot_),
+          depth_ (other.depth_),
+          measureIdx_ (other.measureIdx_)
     {
         other.provider_ = nullptr;
         other.slot_ = -1;
+        other.measureIdx_ = -1;   // ★ 計測: 二重終了を防ぐ
     }
 
     ScopedEpochReader& operator= (ScopedEpochReader&&) = delete;
@@ -63281,6 +67023,13 @@ public:
 private:
     void reset() noexcept
     {
+        // ★ 計測: guard の退出を記録する（idx は 1 回だけ消費される）
+        if (measureIdx_ >= 0)
+        {
+            closeMeasure (measureIdx_);
+            measureIdx_ = -1;
+        }
+
         if (provider_ != nullptr && slot_ >= 0)
         {
             provider_->exitReader (slot_);
@@ -63326,13 +67075,15 @@ private:
         return nullptr;
     }
 
-    static int acquireSlot (IReaderEpochProvider& provider) noexcept
+    static int acquireSlot (IReaderEpochProvider& provider, const char* tag = nullptr,
+                            int* outDepth = nullptr) noexcept
     {
         if (auto* entry = find (provider))
         {
             if (entry->depth > 0)          // nested scope on this thread: reuse the slot
             {
                 ++entry->depth;
+                if (outDepth != nullptr) *outDepth = entry->depth;
                 return entry->slot;
             }
 
@@ -63341,6 +67092,7 @@ private:
             if (provider.reacquireReaderSlot (entry->slot))
             {
                 entry->depth = 1;
+                if (outDepth != nullptr) *outDepth = 1;
                 return entry->slot;
             }
 
@@ -63349,7 +67101,8 @@ private:
             entry->depth = 0;
         }
 
-        const int slot = provider.registerReaderThread();
+        const int slot = (tag != nullptr) ? provider.registerReaderThreadWithTag (tag)
+                                     : provider.registerReaderThread();
 
         if (slot < 0)
             return -1;   // fail-closed: registration closed or slots exhausted
@@ -63359,6 +67112,7 @@ private:
             entry->provider = &provider;
             entry->slot = slot;
             entry->depth = 1;
+            if (outDepth != nullptr) *outDepth = 1;
         }
 
         return slot;
@@ -63373,6 +67127,175 @@ private:
 
     IReaderEpochProvider* provider_ = nullptr;
     int slot_ = -1;
+    int depth_ = 0;         // ★ 計測: 入場時のネスト深さ
+    int measureIdx_ = -1;   // ★ 計測: 固定表のレコード番号
+
+public:
+    //==========================================================================
+    // ★ 計測 (2026-11-11 Owner 限定承認): guard インスタンス単位の入退場記録
+    //   固定容量・atomic のみ。動的確保・mutex・RT ログは使わない。
+    //   EBR の入場・退出・epoch・所有権・reclaim 判定には一切影響しない。
+    //==========================================================================
+    static constexpr int kMeasureSlots = 512;   // ★ 64 では 1 実行で飽和した（実測 64 件）
+
+    struct MeasureRecord
+    {
+        std::atomic<uint8_t>  state{0};          // 0=free 1=active 2=exited
+        std::atomic<uint64_t> enterUs{0};
+        std::atomic<uint64_t> exitUs{0};
+        std::atomic<uint64_t> threadTag{0};
+        std::atomic<uint64_t> providerKey{0};
+        std::atomic<uint32_t> slot{0xFFFFFFFFu};
+        std::atomic<uint32_t> depth{0};
+        std::atomic<uint32_t> seq{0};
+        char tag[32]{};
+    };
+
+    static inline MeasureRecord measure_[kMeasureSlots]{};
+    static inline std::atomic<uint32_t> measureSeq_{0};
+    static inline std::atomic<uint64_t> measureFailures_{0};   // ★ 計測: 容量不足
+
+    static std::uint64_t nowUsMeas() noexcept
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    static int claimMeasure (const char* tag, std::uint32_t slot, std::uint32_t depth,
+                             const void* provider) noexcept
+    {
+        for (int i = 0; i < kMeasureSlots; ++i)
+        {
+            std::uint8_t expected = 0;
+            if (convo::compareExchangeAtomic (measure_[i].state, expected, 1,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_relaxed))
+            {
+                measure_[i].enterUs.store (nowUsMeas(), std::memory_order_relaxed);
+                measure_[i].exitUs.store (0, std::memory_order_relaxed);
+                measure_[i].slot.store (slot, std::memory_order_relaxed);
+                measure_[i].depth.store (depth, std::memory_order_relaxed);
+                convo::publishAtomic (measure_[i].providerKey, static_cast<std::uint64_t> (
+                    reinterpret_cast<std::uintptr_t> (provider)), std::memory_order_relaxed);
+                convo::publishAtomic (measure_[i].threadTag, 
+                    static_cast<std::uint64_t> (std::hash<std::thread::id>{}(std::this_thread::get_id())),
+                    std::memory_order_relaxed);
+                measure_[i].seq.store (measureSeq_.fetch_add (1u, std::memory_order_relaxed) + 1u,
+                                       std::memory_order_relaxed);
+                std::memset (measure_[i].tag, 0, sizeof (measure_[i].tag));
+                if (tag != nullptr)
+                    std::strncpy (measure_[i].tag, tag, sizeof (measure_[i].tag) - 1);
+                else
+                    std::strncpy (measure_[i].tag, "untagged", sizeof (measure_[i].tag) - 1);
+                return i;
+            }
+        }
+        measureFailures_.fetch_add (1u, std::memory_order_relaxed);
+        return -1;
+    }
+
+    static void closeMeasure (int idx) noexcept
+    {
+        if (idx < 0 || idx >= kMeasureSlots)
+            return;
+        measure_[idx].exitUs.store (nowUsMeas(), std::memory_order_relaxed);
+        convo::publishAtomic (measure_[idx].state, 2, std::memory_order_release);
+    }
+
+    // NonRT から呼ぶこと。タグ別集計と「終了時に active な guard」を分けて出す。
+    static void dumpMeasure (std::FILE* f) noexcept
+    {
+        if (f == nullptr)
+            return;
+
+        const std::uint64_t now = nowUsMeas();
+        std::fprintf (f, "{\n  \"schema\": \"guard_instance_measure_v1\",\n");
+        std::fprintf (f, "  \"slots\": %d,\n", kMeasureSlots);
+
+        // --- タグ別集計（退出済みのみ） ---
+        std::fprintf (f, "  \"exitedByTag\": [");
+        bool firstTag = true;
+        for (int i = 0; i < kMeasureSlots; ++i)
+        {
+            const auto& r = measure_[i];
+            if (convo::consumeAtomic (r.state, std::memory_order_acquire) != 2)
+                continue;
+            const std::uint64_t hold = (r.exitUs.load (std::memory_order_relaxed)
+                                        - r.enterUs.load (std::memory_order_relaxed));
+            std::uint32_t count = 0;
+            std::uint64_t maxHold = 0, sumHold = 0;
+            for (int j = 0; j < kMeasureSlots; ++j)
+            {
+                const auto& q = measure_[j];
+                if (convo::consumeAtomic (q.state, std::memory_order_acquire) != 2)
+                    continue;
+                if (std::strncmp (q.tag, r.tag, sizeof (r.tag)) != 0)
+                    continue;
+                const std::uint64_t h = q.exitUs.load (std::memory_order_relaxed)
+                                        - q.enterUs.load (std::memory_order_relaxed);
+                ++count; sumHold += h; if (h > maxHold) maxHold = h;
+            }
+            // 同じタグは 1 回だけ出す
+            bool already = false;
+            for (int j = 0; j < i; ++j)
+            {
+                const auto& q = measure_[j];
+                if (convo::consumeAtomic (q.state, std::memory_order_acquire) == 2
+                    && std::strncmp (q.tag, r.tag, sizeof (r.tag)) == 0)
+                {
+                    already = true; break;
+                }
+            }
+            if (already)
+                continue;
+            std::fprintf (f, "%s\n    {\"tag\": \"%s\", \"count\": %u, \"maxHoldUs\": %llu, \"sumHoldUs\": %llu}",
+                          firstTag ? "" : ",", r.tag, count,
+                          (unsigned long long) maxHold, (unsigned long long) sumHold);
+            (void) hold;
+            firstTag = false;
+        }
+        std::fprintf (f, "%s],\n", firstTag ? "" : "\n  ");
+
+        // --- 終了時に active な guard ---
+        std::fprintf (f, "  \"activeAtExit\": [");
+        bool firstActive = true;
+        for (int i = 0; i < kMeasureSlots; ++i)
+        {
+            const auto& r = measure_[i];
+            if (convo::consumeAtomic (r.state, std::memory_order_acquire) != 1)
+                continue;
+            const std::uint64_t enter = r.enterUs.load (std::memory_order_relaxed);
+            std::fprintf (f,
+                "%s\n    {\"tag\": \"%s\", \"slot\": %u, \"depth\": %u, \"thread\": %llu, \"provider\": \"0x%llx\", \"enterUs\": %llu, \"holdUs\": %llu, \"seq\": %u}",
+                firstActive ? "" : ",", r.tag,
+                r.slot.load (std::memory_order_relaxed),
+                r.depth.load (std::memory_order_relaxed),
+                (unsigned long long) r.threadTag.load (std::memory_order_relaxed),
+                (unsigned long long) r.providerKey.load (std::memory_order_relaxed),
+                (unsigned long long) enter,
+                (unsigned long long) (now - enter),
+                r.seq.load (std::memory_order_relaxed));
+            firstActive = false;
+        }
+        std::fprintf (f, "%s],\n", firstActive ? "" : "\n  ");
+
+        // --- ネスト深さの分布（active のみ） ---
+        std::fprintf (f, "  \"activeDepthHistogram\": {");
+        bool firstDepth = true;
+        for (std::uint32_t d = 1; d <= 8; ++d)
+        {
+            int n = 0;
+            for (int i = 0; i < kMeasureSlots; ++i)
+                if (convo::consumeAtomic (measure_[i].state, std::memory_order_acquire) == 1
+                    && measure_[i].depth.load (std::memory_order_relaxed) == d)
+                    ++n;
+            if (n == 0)
+                continue;
+            std::fprintf (f, "%s\"%u\": %d", firstDepth ? "" : ", ", d, n);
+            firstDepth = false;
+        }
+        std::fprintf (f, "}\n}\n");
+    }
 };
 
 } // namespace convo
@@ -63523,6 +67446,8 @@ private:
 //==============================================================================
 
 #include "SnapshotCoordinator.h"
+#include "../audioengine/ISRRetireLatency.h"   // ★ C2: 要求記録（RT 安全版は使わない）
+#include "../DspNumericPolicy.h"              // ★ C2: isAudioThread() による Non-RT 契約の検査
 
 #include <cassert>  // ★ BUG-015/027 (work88): store full 検出用
 
@@ -63547,6 +67472,9 @@ namespace convo {
 void SnapshotCoordinator::quarantineRetireSink(void* ptr, void (*deleter)(void*),
                                                uint64_t epoch, const char* reason) noexcept
 {
+    // ★ 設計 v2: この関数は startFade / completeFade の失敗時からのみ呼ばれる。
+    //   両経路は呼出し前に recordRequest 済みのため、ここでは記録を追加しない。
+    //   将来この関数を直接呼ぶ経路を追加する場合は、呼出元で先に記録すること。
     if (m_retireSink == nullptr || ptr == nullptr || deleter == nullptr)
         return;
     // Stage 1: Q（RetireQuarantineStore）。格納成功で ownership 移転成立。
@@ -63592,6 +67520,11 @@ void SnapshotCoordinator::startFade(GlobalSnapshot* target, int fadeSamples) noe
 	if (oldTarget) {
 		const uint64_t retireEpoch = m_epochProvider->currentEpoch();
 		// [work37 Phase 1.2] enqueueWithRetry を使用（startFade は NonRT Timer からのみ）
+bool snapshotRequestCreated = false;
+			const auto snapshotRequestId = convo::isr::RetireLatencyRecorder::instance().recordRequest (
+				oldTarget, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu, &snapshotRequestCreated);
+			(void) snapshotRequestId;
+			(void) snapshotRequestCreated;
 		const auto result = enqueueWithRetry(*m_epochProvider, oldTarget, snapshotDeleter, retireEpoch);
 		if (!result) {
 			// ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）
@@ -63618,6 +67551,18 @@ bool SnapshotCoordinator::tryCompleteFade() noexcept
 
 void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 {
+	// ★ C2 (2026-11-10, Owner 承認): 本 API は Non-RT 専用。
+	//   RT から呼ばれた場合は契約違反として検出し、状態を一切変更せずに返す。
+	//   target / fade 状態 / 所有権 / 要求記録のいずれも触らない（後続の Non-RT 呼出しが
+	//   同じ前提で通常どおり退役させる）。
+	if (convo::numeric_policy::isAudioThread())
+	{
+		// ★ C2: 違反は全構成で記録する（assertion より前に加算する）。
+		convo::fetchAddAtomic (SnapshotCoordinator::s_rtViolationCount, std::uint64_t{1}, std::memory_order_release);
+		jassert (false && "SnapshotCoordinator::resetFadeStateAndRetireTarget is Non-RT only");
+		return;
+	}
+
 	constexpr auto snapshotDeleter = [](void* ptr) noexcept
 	{
 		SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr));
@@ -63627,7 +67572,17 @@ void SnapshotCoordinator::resetFadeStateAndRetireTarget() noexcept
 	if (target)
 	{
 		const uint64_t retireEpoch = m_epochProvider->publishEpoch();
-		m_epochProvider->enqueueRetire(target, snapshotDeleter, retireEpoch);
+
+		// ★ C2: 移送 1 回につき要求を 1 回だけ記録する。失敗しても取り消さない。
+		//   格納できなかった場合は quarantineRetireSink が Q→E→T で必ず受領し、
+		//   完了フックが同じ object で対応する。
+		(void) convo::isr::RetireLatencyRecorder::instance().recordRequest (
+			target, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
+
+		const bool resetStored = m_epochProvider->enqueueRetire(target, snapshotDeleter, retireEpoch);
+
+		if (! resetStored)
+			quarantineRetireSink(target, snapshotDeleter, retireEpoch, "resetFadeStateAndRetireTarget:queueFull");
 	}
 
 	m_fade.resetToIdle();
@@ -63649,6 +67604,11 @@ void SnapshotCoordinator::completeFade() noexcept
 	if (old)
 	{
 		// [work37 Phase 1.2] enqueueWithRetry を使用（completeFade は NonRT）
+bool snapshotRequestCreated = false;
+		const auto snapshotRequestId = convo::isr::RetireLatencyRecorder::instance().recordRequest (
+			old, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu, &snapshotRequestCreated);
+		(void) snapshotRequestId;
+		(void) snapshotRequestCreated;
 		const auto result = enqueueWithRetry(*m_epochProvider, old, snapshotDeleter, retireEpoch);
 		if (!result) {
 			// ★ BUG-015/027 (work88): 退避ストアへ移送（directDelete しない）
@@ -63683,6 +67643,8 @@ void SnapshotCoordinator::completeFade() noexcept
 #include "IEpochProvider.h"
 #include "SnapshotFactory.h"
 #include "audioengine/ISRAuthorityClass.h"
+#include "../audioengine/ISRRetireLatency.h"   // ★ C5: retireCurrentAndTarget の要求記録
+#include "audioengine/AtomicAccess.h"    // ★ atomic 直接 dot-call を廃止
 
 namespace convo {
 namespace isr {
@@ -63799,10 +67761,20 @@ public:
         return m_slots.loadCurrent(std::memory_order_acquire);
     }
 
+    // ★ C2: RT 契約違反（RT からの resetFadeStateAndRetireTarget 呼出し）の回数。
+    //   プロセス単位の診断値。エンジン非依存で読めるよう static にしている。
+    static inline std::atomic<std::uint64_t> s_rtViolationCount { 0 };
+    [[nodiscard]] static std::uint64_t rtViolationCount() noexcept
+    {
+        return convo::consumeAtomic (s_rtViolationCount, std::memory_order_acquire);
+    }
+
     // ★ BUG-015/027: 退避ストアへの移送先 Router（AudioEngine.CtorDtor.cpp で setRetireSink 設定）
     void setRetireSink(convo::isr::ISRRetireRouter* sink) noexcept { m_retireSink = sink; }
 
 private:
+    // ★ C2 (2026-11-10, Owner 承認): 本 API は Non-RT 専用。
+    //   RT から呼ばれた場合は状態を一切変更せずに返す（違反は m_rtViolationCount で検出）。
     void resetFadeStateAndRetireTarget() noexcept;
     void completeFade() noexcept;
 
@@ -63815,7 +67787,8 @@ private:
 
     // [work37 Phase 1.2] IEpochProvider::enqueueRetire + tryReclaim 再試行の static ヘルパー。
     //   条件: Non-RT スレッドからのみ呼び出し可能。
-    //   resetFadeStateAndRetireTarget(L67) は RT(updateFade) から呼ばれ得るため除外。
+    //   resetFadeStateAndRetireTarget は Non-RT 専用（RT 呼出しは同関数内で検出して即 return）
+    //   のため、このヘルパーの利用対象に含めてよい。
     static bool enqueueWithRetry(convo::IEpochProvider& provider,
                                   void* ptr, void (*deleter)(void*),
                                   uint64_t epoch) noexcept {
@@ -63841,11 +67814,18 @@ private:
         const uint64_t retireEpoch = m_epochProvider->publishEpoch();
         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
         if (snap) {
+            // ★ C5 (2026-11-10): 退役の直前に要求を記録する（完了フックと同じ object で対応）。
+            //   格納失敗時は quarantineRetireSink が Q→E→T で必ず受領するため取り消さない。
+            convo::isr::RetireLatencyRecorder::instance().recordRequest (
+                snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
             if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
         }
         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
         if (snap) {
+            // ★ C5 (2026-11-10): target も同じ規則で記録する。
+            convo::isr::RetireLatencyRecorder::instance().recordRequest (
+                snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
             if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
         }
@@ -64384,7 +68364,7 @@ public:
             snap,
             [](void* ptr) { SnapshotFactory::destroy(static_cast<GlobalSnapshot*>(ptr)); },
             epoch,
-            DeletionEntryType::Generic);
+            DeletionEntryType::Generic, convo::RetireDomainId::Unknown);
     }
 
     /// [P1-21] epoch-free API: minReaderEpoch を直接受け取る
@@ -66372,8 +70352,12 @@ private:
 
 #pragma once
 
+#include "audioengine/ISRRetireLatency.h"   // ★ A(D1): 退役要求→解放完了の測定
+#include "core/RetireDomain.h"              // ★ domain tag (v2.9): entry への刻印
+
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <type_traits>
 
@@ -66403,8 +70387,15 @@ struct DeletionEntry {
     void (*deleter)(void*) = nullptr;
     uint64_t epoch = 0;
     DeletionEntryType type = DeletionEntryType::Generic;
+    // ★ domain tag (v2.9 §2.1): enqueue 時に provider が刻印し、以降は変更しない。
+    //   既定値 Unstamped は「刻印漏れ」を意味する（生成側は絶対に付けない）。
+    convo::RetireDomainId domainId { convo::RetireDomainId::Unstamped };
     uint64_t publicationSequenceId{0};  // ★ P2-2: 出版-退役の因果追跡用
     uint64_t generation{0};             // ★ P2-2: generation 追跡
+    // ★ 段階③ (2026-11-11, Owner 承認): 最初にreclaim走査で評価された時刻（ns・0 = 未走査）
+    //   producer（enqueue）が 0 で初期化し、consumer（reclaim）が最初に 1 回だけ書く。
+    //   seq の publish 後にのみ書かれるため、データ競合は無い。
+    uint64_t firstScanTsNs{0};
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     size_t objectBytes{0};  // ★ work70: Retire 対象のオブジェクトバイト数（sizeof、診断のみ）
 #endif
@@ -66415,6 +70406,16 @@ static_assert(std::is_trivially_copyable_v<DeletionEntry>,
     "DeletionEntry must be trivially copyable for lock-free queue operations");
 static_assert(std::is_trivially_destructible_v<DeletionEntry>,
     "DeletionEntry must be trivially destructible");
+// ★ domain tag (v2.9 §2.1): 刻印の型と、サイズ・アラインメントを構成別に固定する。
+//   変更前の実測（2026-11-11）: 診断 OFF = 56 / 8、診断 ON = 64 / 8。
+//   domainId（1 バイト）は type の後ろのパディングに吸収され、サイズは変わらない。
+static_assert(sizeof(convo::RetireDomainId) == 1, "convo::RetireDomainId must be 1 byte");
+static_assert(alignof(DeletionEntry) == 8, "DeletionEntry alignment changed");
+#if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+static_assert(sizeof(DeletionEntry) == 64, "DeletionEntry size changed (diagnostics ON)");
+#else
+static_assert(sizeof(DeletionEntry) == 56, "DeletionEntry size changed (diagnostics OFF)");
+#endif
 static_assert(std::atomic<size_t>::is_always_lock_free,
     "std::atomic<size_t> must be lock-free for real-time safety");
 static_assert(std::atomic<uint64_t>::is_always_lock_free,
@@ -66436,18 +70437,22 @@ public:
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
-    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch) noexcept {
-        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic, 0, 0);
+    // ★ domain tag (v2.9 §3.2): domain は必須引数（既定引数を設けない）。
+    //   呼び出し側が必ず意図を書くため、刻印漏れはコンパイルで検出される。
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, convo::RetireDomainId domain) noexcept {
+        return enqueue(ptr, deleter, epoch, DeletionEntryType::Generic, 0, 0, domain);
     }
 
     // Audio Thread から呼ばれる。ロックフリー。
-    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type) noexcept {
-        return enqueue(ptr, deleter, epoch, type, 0, 0);
+    bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
+                 convo::RetireDomainId domain) noexcept {
+        return enqueue(ptr, deleter, epoch, type, 0, 0, domain);
     }
 
     // ★ P2-2: publicationSequenceId + generation 付き enqueue
     bool enqueue(void* ptr, void (*deleter)(void*), uint64_t epoch, DeletionEntryType type,
-                 uint64_t publicationSequenceId, uint64_t generation) noexcept {
+                 uint64_t publicationSequenceId, uint64_t generation,
+                 convo::RetireDomainId domain) noexcept {
         uint32_t pos = convo::consumeAtomic(enqueuePos, std::memory_order_acquire); // acquire: 前回 enqueue の CAS acq_rel と HB し最新の enqueuePos を観測
         while (true) {
             auto& seq_atom = sequences[pos & kMask];
@@ -66466,8 +70471,10 @@ public:
                     entry.deleter = deleter;
                     entry.epoch = epoch;
                     entry.type = type;
+                    entry.domainId = domain;   // ★ domain tag: enqueue 時に刻印（以降不変）
                     entry.publicationSequenceId = publicationSequenceId;
                     entry.generation = generation;
+                    entry.firstScanTsNs = 0;   // ★ 段階③: スロット再利用時の残留を防ぐ
                     convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release); // release: dequeue の seq acquire と HB しエントリ書き込み完了を公知
                     return true;
                 }
@@ -66500,6 +70507,10 @@ public:
             }
 
             auto& entry = ringBuffer[scanPos & kMask];
+            // ★ 段階③: この entry が最初にreclaim走査で評価された時刻を一度だけ記録する。
+            //   consumer（この関数）だけが書くため CAS は不要（seq の acquire 後）。
+            if (entry.firstScanTsNs == 0)
+                entry.firstScanTsNs = steadyNowNs();
             bool canDelete = false;
 
             if (isOlder(entry.epoch, minReaderEpoch)) {
@@ -66515,6 +70526,11 @@ public:
                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して再試行
                     if (entry.deleter && entry.ptr) {
                         const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
+                        convo::isr::RetireLatencyRecorder::instance().recordSafe (entry.ptr);   // ★ A(D1): epoch 安全到達
+                        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                            entry.ptr, convo::isr::RetireLatencyRecorder::Path::Queue,
+                            entry.domainId,   // ★ domain tag: entry の刻印をそのまま記録
+                            entry.firstScanTsNs);   // ★ A(D1) + 段階③: 初回走査時刻
                         entry.deleter(entry.ptr);
                         // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（release observation・案 B）。
                         //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
@@ -66567,6 +70583,10 @@ public:
                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して retry
                     if (entry.deleter && entry.ptr) {
                         const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
+                        convo::isr::RetireLatencyRecorder::instance().recordComplete (
+                            entry.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll,
+                            entry.domainId,   // ★ domain tag: entry の刻印をそのまま記録
+                            entry.firstScanTsNs);   // ★ A(D1)
                         entry.deleter(entry.ptr);
                         // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（shutdown drain 含む）。
                         if (entryType == DeletionEntryType::World)
@@ -66594,6 +70614,42 @@ public:
         const uint32_t enq = convo::consumeAtomic(enqueuePos, std::memory_order_acquire);
         const uint32_t deq = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
         return static_cast<uint32_t>(enq - deq);
+    }
+
+    // ★ AC_DIAG (2026-11-13, Owner 承認 A/C): 先頭 entry の読み取り専用スナップショット。
+    //   キューを変更しない（dequeue しない・CAS しない・ロックしない）。POD のコピーのみ。
+    //
+    //   整合性: Vyukov の bounded MPMC では「slot の seq == pos + 1」が
+    //   「producer が書き込みを終えて publish 済み」を意味する（reclaim() の Empty 判定と同じ式）。
+    //   コピー中に slot が解放→再利用されると seq が変わるため、コピー後に seq と dequeuePos を
+    //   読み直し、変化していれば false（＝推定しない）を返す。ABA は 4096 回の周回が必要で、
+    //   shutdown 時（producer join 済み・consumer は 1 本）には成立しない。
+    //
+    //   ★ C3-D (2026-11-13, Owner 承認): head identity の 3 要素を out 引数で返す。
+    //     identity = (slotIndex, sequence, epoch)。slotIndex と sequence は「同じ物理 entry か」の
+    //     判定に使う（epoch だけでは同一性を保証できない）。**失敗時は out 引数を一切書かない**
+    //     （推定値を返さない契約）。epoch/type/domain で identity を代用してはならない。
+    [[nodiscard]] bool peekHead(DeletionEntry& out,
+                                uint32_t& slotIndex,
+                                uint32_t& sequence) const noexcept
+    {
+        const uint32_t pos = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
+        const uint32_t idx = pos & kMask;
+        const uint32_t seqBefore = convo::consumeAtomic(sequences[idx], std::memory_order_acquire);
+        if (static_cast<int32_t>(static_cast<uint32_t>(seqBefore - (pos + 1))) != 0)
+            return false;                       // 空、または未 publish
+
+        const DeletionEntry snapshot = ringBuffer[idx];   // POD コピー（ポインタは辿らない）
+
+        const uint32_t seqAfter = convo::consumeAtomic(sequences[idx], std::memory_order_acquire);
+        const uint32_t posAfter = convo::consumeAtomic(dequeuePos, std::memory_order_acquire);
+        if (seqAfter != seqBefore || posAfter != pos)
+            return false;                       // コピー中に上書き・破棄された → 値を出さない
+
+        out = snapshot;
+        slotIndex = idx;
+        sequence = seqBefore;
+        return true;
     }
 
     // ★ P1-7: 最大滞留時間 (us) 追跡
@@ -66630,6 +70686,14 @@ private:
     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
     {
         return static_cast<int64_t>(a - b) < 0;
+    }
+
+    // ★ 段階③: RetireLatencyRecorder::nowNs() と同じ時計（steady_clock）。
+    //   firstScanTs と enqueueTs / safeTs を同一基準で比較するため必須。
+    static inline uint64_t steadyNowNs() noexcept
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
     static constexpr uint32_t kQueueSize = 4096;
@@ -68370,8 +72434,12 @@ struct ScopedDftiDescriptor
 
 // ============================================================================
 // AlignedAllocator abstraction — work72
-// JUCE_DSP_USE_INTEL_MKL が定義されている場合は MKL allocator (mkl_malloc/mkl_free)
-// 定義されていない場合はシステム allocator (_aligned_malloc/_aligned_free on Windows)
+// JUCE_DSP_USE_INTEL_MKL が 1 の場合は MKL allocator (mkl_malloc/mkl_free)
+// それ以外はシステム allocator (_aligned_malloc/_aligned_free on Windows)
+// ★ 2026-11-08: 判定を「defined かどうか」から「値が 1 かどうか」へ修正。
+//   juce_dsp.h は未定義時に `#define JUCE_DSP_USE_INTEL_MKL 0` を行うため、
+//   `defined(...)` だけを見ると juce_dsp.h を先に include した TU だけが MKL 経路を選び、
+//   同じターゲット内で allocator が食い違う（inline 関数の ODR 違反 → aligned_free で AV）。
 // ============================================================================
 
 namespace convo {
@@ -68403,8 +72471,8 @@ inline void system_aligned_free(void* ptr) noexcept
 } // namespace convo
 
 // ---- Unified interface ----
-// JUCE_DSP_USE_INTEL_MKL が定義されていれば MKL を使用、そうでなければ System allocator
-#if defined(JUCE_DSP_USE_INTEL_MKL)
+// JUCE_DSP_USE_INTEL_MKL が 1 の場合は MKL を使用、そうでなければ System allocator
+#if defined(JUCE_DSP_USE_INTEL_MKL) && JUCE_DSP_USE_INTEL_MKL
     #include <mkl.h>
     #define CONVOPEQ_ALIGNED_MALLOC(size, align) mkl_malloc((size), (align))
     #define CONVOPEQ_ALIGNED_FREE(ptr)           mkl_free(ptr)
@@ -70726,7 +74794,7 @@ void EQProcessor::updateBandNode(int band)
     // (createBandNode) and the retire of the node it replaces.
     // R-46: m_epochDomain は unique_ptr。ScopedEpochReader は provider 参照を取るため
     //       間接参照して渡す（EQProcessor.h:432 と同じ形。意味の変更なし）。
-    const convo::ScopedEpochReader readGuard (*m_epochDomain);
+    const convo::ScopedEpochReader readGuard (*m_epochDomain, "Coefficients:70");
     if (! readGuard.active()) return;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -71370,17 +75438,101 @@ bool EQProcessor::enqueueDeferredDeleteWithFallback(void* ptr,
 }
 // [P1-14] 保留中の advanceEpoch を一括実行.
 // パラメータ変更毎の advanceEpoch を遅延させ、本関数で1回に集約する.
-void EQProcessor::flushPendingEpochAdvance() noexcept
+void EQProcessor::flushPendingEpochAdvance(PublishReason reason) noexcept
 {
+
     if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
     {
         m_epochDomain->publishEpoch();
+        // ★ 段階①: publish 理由別カウント（診断のみ。挙動は従来どおり）
+        countPublishReason(reason);
         // ★ STG-11-D1: 定期的 reclaim driver（NonRT 専用）。
-        //   呼び出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
+        //   呼出し元は releaseResources / prepareToPlay（いずれも NonRT）のみ。
         //   epoch 前進後に member router の D + Q + E + T を epoch-gated drain する。
         //   新規 timer / thread / authority は追加しない。RT からは呼ばない。
         m_ownedRetireRouter.tryReclaim();
     }
+}
+
+// ★ 段階① (2026-11-11, Owner 承認): EQ ドメイン reclaim ドライバ
+//   呼出し元: AudioEngine::timerCallback（100 ms・Message Thread・Non-RT）
+//   不変条件:
+//     1) epoch を前進させるのは m_epochAdvancePending が true のときだけ
+//        （滞留しているという理由だけでは前進させない）
+//     2) pending が false でも滞留があれば reclaim のみ実行する
+//     3) 滞留判定は lock-free API のみ（mutex を取る residentCount 系は使わない）
+//     4) Message Thread 以外から呼ばれたら何もせず拒否する（fail-safe）
+void EQProcessor::driveRetireReclaimNonRt() noexcept
+{
+    auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+    const bool onMessageThread = (messageManager != nullptr)
+                                 && messageManager->isThisTheMessageThread();
+    jassert(onMessageThread);          // Owner 条件: Message Thread 固有の assertion
+    if (! onMessageThread)
+    {
+        convo::fetchAddAtomic(m_driverOffThreadRejects, std::uint32_t{1}, std::memory_order_relaxed);
+        return;
+    }
+
+    // (1) pending あり: epoch 前進 + reclaim（publish 理由 = timerPending）
+    if (convo::exchangeAtomic(m_epochAdvancePending, false, std::memory_order_acq_rel))
+    {
+        m_epochDomain->publishEpoch();
+        countPublishReason(PublishReason::TimerPending);
+        m_ownedRetireRouter.tryReclaim();
+        return;
+    }
+
+    // (2) pending なし・滞留あり: reclaim のみ（epoch は前進させない）
+    //     判定は D キュー（pendingRetireCount）と Q+E+T（residentCountAtomic）の
+    //     atomic 合算のみで、mutex を取らない。
+    if (m_ownedRetireRouter.pendingRetireCount() > 0
+        || m_ownedRetireRouter.residentCountAtomic() > 0)
+    {
+        convo::fetchAddAtomic(m_reclaimOnlyRuns, std::uint32_t{1}, std::memory_order_relaxed);
+        m_ownedRetireRouter.tryReclaim();
+        return;
+    }
+
+    // (3) pending なし・滞留なし: 何もしない（不要な reclaim を起こさない）
+    convo::fetchAddAtomic(m_driverIdleTicks, std::uint32_t{1}, std::memory_order_relaxed);
+}
+
+void EQProcessor::countPublishReason(PublishReason reason) noexcept
+{
+    switch (reason)
+    {
+        case PublishReason::TimerPending:
+            convo::fetchAddAtomic(m_publishTimerPendingCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+        case PublishReason::Prepare:
+            convo::fetchAddAtomic(m_publishPrepareCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+        case PublishReason::Release:
+            convo::fetchAddAtomic(m_publishReleaseCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+        case PublishReason::Explicit:
+        default:
+            // ★ 明示的な直接呼出し（上記以外）。既存区分へ暗黙に加算しない。
+            convo::fetchAddAtomic(m_publishExplicitCount, std::uint32_t{1}, std::memory_order_relaxed);
+            break;
+    }
+}
+
+EQProcessor::RetireDriverStats EQProcessor::retireDriverStats() const noexcept
+{
+    RetireDriverStats s;
+    s.publishTimerPending = convo::consumeAtomic(m_publishTimerPendingCount, std::memory_order_acquire);
+    s.publishPrepare      = convo::consumeAtomic(m_publishPrepareCount, std::memory_order_acquire);
+    s.publishRelease      = convo::consumeAtomic(m_publishReleaseCount, std::memory_order_acquire);
+    s.publishExplicit     = convo::consumeAtomic(m_publishExplicitCount, std::memory_order_acquire);
+    s.reclaimOnlyRuns     = convo::consumeAtomic(m_reclaimOnlyRuns, std::memory_order_acquire);
+    s.idleTicks           = convo::consumeAtomic(m_driverIdleTicks, std::memory_order_acquire);
+    s.offThreadRejects    = convo::consumeAtomic(m_driverOffThreadRejects, std::memory_order_acquire);
+    s.currentEpoch        = m_epochDomain->currentEpoch();
+    s.pendingRetire       = m_ownedRetireRouter.pendingRetireCount();
+    s.resident            = m_ownedRetireRouter.residentCountAtomic();
+    return s;
 }
 // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放
 //   Runtime 停止シーケンス完了後（Audio Thread 停止 + Coordinator 停止）にのみ使用すること。
@@ -71518,7 +75670,8 @@ void EQProcessor::releaseResources()
     parallelBufferCapacity = 0;
     structureXfadeBufferCapacity = 0;
     // [P1-14] 保留中の advanceEpoch を一括実行
-    flushPendingEpochAdvance();
+    // ★ 段階① v2: publish 理由を引数で明示（releaseResources 経由）
+    flushPendingEpochAdvance(PublishReason::Release);
     juce::Logger::writeToLog("[DIAG EQProcessor] releaseResources: end");
 }
 
@@ -71588,7 +75741,7 @@ void EQProcessor::reset()
     //   （P-D2-1: 活性 Read 0 件 / DESIGN_R4_D2D3 §1.1・§1.6）。
 
     // A-closure (reader safety): reader slot held across the load + dereference.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:301");
     if (readGuard.active())
     {
         auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -71842,7 +75995,7 @@ juce::ValueTree EQProcessor::getState() const
 {
     // A-closure (reader safety): hold an EBR reader slot BEFORE loading the published
     // state, so a concurrent unlink+retire+reclaim cannot free it mid-read.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:555");
     if (! readGuard.active())
         return juce::ValueTree ("EQ");   // fail-closed: no protection -> no dereference
 
@@ -71994,7 +76147,7 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
 
     // A-closure (reader safety): the reader slot covers every state dereference below
     // (state->totalGainDb and createBandNode(i, *loopState)).
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:707");
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
 
@@ -72077,7 +76230,8 @@ void EQProcessor::prepareToPlay(double sampleRate, int newMaxInternalBlockSize)
     }
 
     // [P1-14] 保留中の advanceEpoch を一括実行
-    flushPendingEpochAdvance();
+    // ★ 段階① v2: publish 理由を引数で明示（prepareToPlay 経由）
+    flushPendingEpochAdvance(PublishReason::Prepare);
 
     sendChangeMessage();
 }
@@ -72112,7 +76266,7 @@ EQProcessor::EQState* EQProcessor::getEQState() const
 float EQProcessor::getTotalGain() const
 {
     // A-closure (reader safety): reader slot held across load + dereference.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:825");
     if (! readGuard.active()) return 0.0f;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -72124,7 +76278,7 @@ EQBandType EQProcessor::getBandType(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQBandType::Peaking;
 
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:837");
     if (! readGuard.active()) return EQBandType::Peaking;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -72136,7 +76290,7 @@ EQChannelMode EQProcessor::getBandChannelMode(int band) const
 {
     if (band < 0 || band >= NUM_BANDS) return EQChannelMode::Stereo;
 
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:849");
     if (! readGuard.active()) return EQChannelMode::Stereo;
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -72154,7 +76308,7 @@ EQBandParams EQProcessor::getBandParams(int band) const
     if (band < 0 || band >= NUM_BANDS) return {};
 
     // A-closure (reader safety): reader slot held across load + dereference.
-    const auto readGuard = acquireReadGuard();
+    const auto readGuard = acquireReadGuard("Core:867");
     if (! readGuard.active()) return {};
 
     auto state = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
@@ -72386,6 +76540,12 @@ public:
         //----------------------------------------------------------
     void prepareToPlay(double sampleRate, int newMaxInternalBlockSize);
 
+    // ★ Gate 1: RCU 入場に失敗して状態参照をスキップした回数（診断用）
+    [[nodiscard]] std::uint32_t unprotectedReadCount() const noexcept
+    {
+        return unprotectedReadCount_.load(std::memory_order_relaxed);
+    }
+
     //----------------------------------------------------------
     // process: オーディオスレッドから呼ばれる
     // ロック・new・I/O・待機（IR再ロード等）禁止
@@ -72395,6 +76555,43 @@ public:
                  const convo::EQParameters& eqParams,
                  const EQCoeffCache* coeffCache);
     void releaseResources();
+
+    //----------------------------------------------------------
+    // ★ 段階① (2026-11-11, Owner 承認): EQ ドメイン reclaim ドライバ
+    //   - 呼出し元は AudioEngine::timerCallback（100 ms 周期）のみ。
+    //   - **Message Thread 専用**。Audio Thread から呼ばない（呼ばれたら何もせず拒否する）。
+    //   - `m_epochAdvancePending` が true のときだけ epoch を前進させる。
+    //   - pending が false でも、D/Q/E/T に滞留があれば reclaim のみ実行する。
+    //   - 滞留判定は lock-free API（pendingRetireCount / residentCountAtomic）のみ。
+    //   - 新規 timer / thread / authority は追加しない。既存 flush の挙動は変えない。
+    //----------------------------------------------------------
+    // ★ 段階① v2 (2026-11-11, Owner 承認「案 2」): publish 理由は**引数で明示**する。
+    //   デフォルト引数は設けない（指定漏れをコンパイルで検出する）。タグ共有は廃止。
+    enum class PublishReason : std::uint8_t
+    {
+        Prepare      = 0,   // prepareToPlay による呼出し
+        Release      = 1,   // releaseResources による呼出し（終了処理を意味しない）
+        TimerPending = 2,   // タイマードライバが pending を消費（flush は呼ばない）
+        Explicit     = 3    // 上記以外の明示的な直接呼出し
+    };
+
+    void driveRetireReclaimNonRt() noexcept;
+
+    // ドライバの診断スナップショット（読み取り専用・Message Thread 専用）。
+    struct RetireDriverStats
+    {
+        std::uint32_t publishTimerPending = 0;   // publish 理由: タイマー経由の pending 消費
+        std::uint32_t publishPrepare      = 0;   // publish 理由: prepareToPlay 経由
+        std::uint32_t publishRelease      = 0;   // publish 理由: releaseResources 経由
+        std::uint32_t publishExplicit     = 0;   // publish 理由: 明示的な直接呼出し
+        std::uint32_t reclaimOnlyRuns     = 0;   // pending なし・滞留ありで reclaim のみ実行
+        std::uint32_t idleTicks           = 0;   // pending なし・滞留なし（何もしない）
+        std::uint32_t offThreadRejects    = 0;   // Message Thread 以外から呼ばれて拒否した回数
+        std::uint64_t currentEpoch        = 0;   // 現在の EQ ドメイン epoch
+        std::uint32_t pendingRetire       = 0;   // D キュー滞留（lock-free）
+        std::uint32_t resident            = 0;   // Q+E+T 滞留（lock-free）
+    };
+    [[nodiscard]] RetireDriverStats retireDriverStats() const noexcept;
 
     // [WORK113-17 Phase 2-1] NonRT: World 投影の totalGainDb を既存 publish 機構へ反映する。
     //   （INV-EQ-GAIN-001/002/004/005。dB→linear 変換は本関数内＝NonRT のみ。
@@ -72628,12 +76825,12 @@ public:
     //   guard が slot を保持している間は retireEpoch < minReaderEpoch が成立
     //   しないため、当該オブジェクトは解放されない。
     //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
-    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
+    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard(const char* tag = nullptr) const noexcept
     {
         // The epoch domain is a synchronization primitive: entering a reader slot does not
         // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
         // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
-        return convo::ScopedEpochReader (*m_epochDomain);
+        return convo::ScopedEpochReader (*m_epochDomain, tag);
     }
     bool getAndClearPendingAGCChange() noexcept
     {
@@ -72745,7 +76942,8 @@ private:
     //   unique_ptr でも *ptr は非 const 参照を返すため、mutable (LINT-AE-011) も
     //   const_cast (LINT-AE-013) も使わずに済む。router より前に宣言し、
     //   初期化順で *m_epochDomain が router の参照先として有効になるようにする。
-    std::unique_ptr<convo::EpochDomain> m_epochDomain { std::make_unique<convo::EpochDomain>() };
+    // ★ domain tag (v2.9): EQ の epoch ドメイン
+    std::unique_ptr<convo::EpochDomain> m_epochDomain { std::make_unique<convo::EpochDomain>(convo::RetireDomainId::EQ) };
     // ★ STG-11-D1 (Candidate B): EQ-owned retire router, bound to *m_epochDomain
     //   従来の stack-local router は関数 return で Q/E/T の ownership を失った。
     //   member lifetime により drain / destruction まで保持する。
@@ -72755,12 +76953,29 @@ private:
     // [P1-14] 遅延epoch進捗フラグ: パラメータ変更毎に advanceEpoch を呼ばず,
     //         フラグを立てて flushPendingEpochAdvance() で一括進捗する.
     std::atomic<bool> m_epochAdvancePending { false };
+    // ★ 段階① (2026-11-11, Owner 承認): publish 理由と理由別カウンタ（診断・Message Thread 専用）。
+    //   Audio Thread は触らない。カウンタは uint32 atomic（lock-free は static_assert 済み）。
+    std::atomic<std::uint32_t> m_publishTimerPendingCount { 0 };
+    std::atomic<std::uint32_t> m_publishPrepareCount { 0 };
+    std::atomic<std::uint32_t> m_publishReleaseCount { 0 };
+    std::atomic<std::uint32_t> m_publishExplicitCount { 0 };
+    std::atomic<std::uint32_t> m_reclaimOnlyRuns { 0 };
+    std::atomic<std::uint32_t> m_driverIdleTicks { 0 };
+    std::atomic<std::uint32_t> m_driverOffThreadRejects { 0 };
     convo::isr::RuntimeIntentCoordinator* m_retireCoordinator{nullptr};
     // [work21] ISRRetireRouter: unified retire API (Phase-C)
     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
+    // ★ Gate 1 (2026-11-11, Owner 承認): テスト専用アクセス（製品 API は追加しない）
+    friend struct EQProcessorGate1TestAccess;
+
     convo::RCUReader rcuReader { *m_epochDomain };
+    std::atomic<std::uint32_t> unprotectedReadCount_ { 0 };   // ★ Gate 1 診断
+    // ★ Gate 1: RT（Audio Thread）から fetch_add するため、lock-free であることを
+    //   実行時ではなくコンパイル時に保証する（「atomic だから lock-free」とはみなさない）。
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
+                  "Gate1: unprotectedReadCount_ must be lock-free for RT use");
     // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
     std::atomic<uint64_t> m_retireDropCount{0};
 
@@ -72773,8 +76988,10 @@ private:
     // ★ [work85 T7] Shutdown 専用: Epoch 経由せず即時解放（Runtime 停止完了後のみ）
     void retireImmediateDuringShutdown(EQState* state) noexcept;
     void retireImmediateDuringShutdown(BandNode* node) noexcept;
-    // [P1-14] 保留中の advanceEpoch を一括実行
-    void flushPendingEpochAdvance() noexcept;
+    // [P1-14] 保留中の advanceEpoch を一括実行（理由必須・デフォルト引数なし）
+    void flushPendingEpochAdvance(PublishReason reason) noexcept;
+
+    void countPublishReason(PublishReason reason) noexcept;
 
     // ── 状態リセット要求 (Message Thread publish / Audio Thread consume-only) ──
     // high 32-bit: serial, low 32-bit: mask
@@ -73938,7 +78155,17 @@ bool EQProcessor::isAudioBlockSilent(const juce::dsp::AudioBlock<double>& block,
 void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 {
     convo::RCUReaderGuard guard(rcuReader);
-    const auto* stateSnapshot = loadCurrentState(std::memory_order_acquire); // acquire: exchangeCurrentState/publishCurrentState の release/acq_rel と HB
+    // ★ Gate 1 (2026-11-11, Owner 承認): RCU 入場に失敗した場合は epoch 保護が無いため、
+    //   退役対象（currentStateBits の指す EQState）を一切参照しない。
+    //   既存コードは stateSnapshot == nullptr を「状態未公開」として扱えるため、
+    //   ニュートラル設定のフォールバックを新設せず、同じ nullptr 経路に倒す。
+    const bool protectedRead = guard.rootEnterSucceeded();
+    if (! protectedRead)
+        unprotectedReadCount_.fetch_add (1u, std::memory_order_relaxed);
+
+    const auto* stateSnapshot = protectedRead
+        ? loadCurrentState(std::memory_order_acquire)
+        : nullptr;
     // Audio Thread 入口で MXCSR の FTZ/DAZ を関数スコープで保証する。
     // 呼び出し元設定に依存せず、EQ 単体でもデノーマル起因の負荷増大を防ぐ。
     juce::ScopedNoDenormals noDenormals;
@@ -74107,13 +78334,19 @@ void EQProcessor::process(juce::dsp::AudioBlock<double>& block)
 
     // Note: bandNodeBits[] stores non-owning handles. We assume resolved nodes are valid during this block.
     // because deletion is deferred by EBR (reader epoch mechanism).
-    for (int i = 0; i < NUM_BANDS; ++i)
+    // ★ Gate 1 (2026-11-11): 入場に失敗した場合は EBR 保護が無い。BandNode も退役対象
+    //   （setter 毎に retireBandNodeDeferred で遅延解放される）なので、ポインタを取得しない。
+    //   取得しなければ deref（node->active / node->coeffs / node->mode）も起こらない。
+    if (protectedRead)
     {
-        auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode の release/acq_rel と HB
-        if (node && node->active)
+        for (int i = 0; i < NUM_BANDS; ++i)
         {
-            activeBands[numActiveBands] = { node, i };
-            numActiveBands++;
+            auto* node = loadBandNode(i, std::memory_order_acquire); // acquire: exchangeBandNode/publishBandNode の release/acq_rel と HB
+            if (node && node->active)
+            {
+                activeBands[numActiveBands] = { node, i };
+                numActiveBands++;
+            }
         }
     }
 
@@ -83389,6 +87622,16 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     if (impulse == nullptr || irLen <= 0 || blockSize <= 0)
         return false;
 
+    // Part 8: 対応上限（64〜32768）を超えるブロック長は性能保証外。幾何は常に健全に保つが、
+    //   NonRT のこの関数でのみ 1 回警告する（Add/Get の RT 経路にはログも分岐も追加しない）。
+    if (blockSize > kMaxSupportedBlockSize
+        && !m_blockSizeWarned.exchange(true, std::memory_order_relaxed))
+    {
+        juce::Logger::writeToLog("MKLNonUniformConvolver: blockSize " + juce::String(blockSize)
+            + " exceeds the supported maximum (" + juce::String(kMaxSupportedBlockSize)
+            + "). Geometry stays valid; performance is not qualified.");
+    }
+
 #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
     const uint64_t diagSeq   = globalDiagSeq.fetch_add(1, std::memory_order_relaxed) + kDiagSeqFirstRuntime;
     const uint64_t beforeMkl = convo::diag::allocatedBytes();
@@ -83415,9 +87658,12 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // - Layer Tail Contouring: enforce robust lower bounds and shape layer gains for contour clarity.
     if (!tailEnabled)
     {
-        tailStrength = 0.0;
-        layer1Gain = 0.0;
-        layer2Gain = 0.0;
+        // Part 8 F: Bypass は「テール整形をしない」であり「層を切る」ではない。
+        //   層は等倍で維持し、L0 被覆も tail 側と同じ 0.12 秒下限に揃える。
+        tailStartSec = juce::jlimit(0.01, 0.80, std::max(tailStartSec, 0.12));
+        tailStrength = 1.0;
+        layer1Gain = 1.0;
+        layer2Gain = 1.0;
     }
     else if (tailMode == 0)
     {
@@ -83449,8 +87695,8 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         layer2Gain = 0.0;
     }
 
-    m_tailEnabled = tailEnabled;
-    m_tailStrength = tailEnabled ? tailStrength : 0.0;
+    m_tailEnabled = true; // Part 8 F: L1/L2 の出力を常に加算する（Bypass はゲイン 1.0）
+    m_tailStrength = tailStrength;
     m_maxBlockSize = blockSize;
     m_tailLayerGain[0] = 1.0;
     m_tailLayerGain[1] = layer1Gain;
@@ -83509,8 +87755,6 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     // レイヤー構成決定 (Non-Uniform Partitioned Convolution)
     // ────────────────────────────────────────────────
     const int l0Part = juce::nextPowerOfTwo(std::max(blockSize, 64));
-    const int l1Part = l0Part * tailL1L2Mult;
-    const int l2Part = l1Part * tailL1L2Mult;
 
     // ★ SR-02 (S-1): l0MaxLen は秒ベース上限式へ（doc/work96 契約凍結 2026-09-14）。
     //   l0LenByTailStart = mode clamp 後の実効 tailStartSec（:630-670）のサンプル数。
@@ -83519,6 +87763,15 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   floor 32 により低 SR の全既構成は現行幾何とビット一致（48k/bs64 の MT-NUPC
     //   構成は required=90 の意図的例外 — work57 期待値表を同一サイクルで更新）。
     const int l0LenByTailStart = static_cast<int>(std::llround(tailStartSec * sampleRateForTail));
+
+    // ★ Part 8 H/I: L1 のパート長は L0 の保持長を超えないこと、かつ倍率は 4 以下に制限する。
+    //   倍率 8（block 512 で 4096）では 13 分割以上の IR で先頭パーティションが欠落する（実測）。
+    int l1Mult = 1;
+    while (l1Mult * 2 <= tailL1L2Mult && l1Mult * 2 <= 4
+           && l1Mult * 2 * l0Part <= std::max(l0Part, l0LenByTailStart))
+        l1Mult *= 2;
+    const int l1Part = l0Part * l1Mult;
+    const int l2Part = l1Part * tailL1L2Mult;
 
     // ★ I5 保証（B13 gate: o_L % B == 0 / P % B == 0）: llround による partSize 非整除を
     //   production 側で排除する（air 48k: 0.085×48000=4080 は 512 の倍数でなく o_L=4080 →
@@ -83529,10 +87782,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     //   pow2 切り上げは行わない（契約: partSize 倍数のみ — work96 §3 / 不要な 2× 膨張の回避）。
     const int l0CoverageAligned =
         ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
-    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, tailEnabled);
+    const int l0MaxParts = computeL0MaxParts(l0Part, l0CoverageAligned, true);
     const int l0MaxLen = l0MaxParts * l0Part;
     const int l0LenTarget = juce::jlimit(l0Part, l0MaxLen, l0CoverageAligned);
-    const int l0Len = std::min(irLen, tailEnabled ? l0LenTarget : l0MaxLen);
+    // Part 8 F: tail 無効（Bypass）でも L0 + L1 + L2 で IR 全体を覆う。
+    const int l0Len = std::min(irLen, l0LenTarget);
 
     // ★ SR-02 (S-4): 拡大 / cap 発動の可視化（NonRT ログのみ。RT 側ログは禁止）。
     //   ※ juce::String::formatted の %s は引数をワイド文字列として解釈するため（B13-GATE と同注記）、
@@ -83551,10 +87805,10 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     }
 
     const int l1Offset = l0Len;
-    const int l1Len    = tailEnabled ? std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)) : 0;
+    const int l1Len    = std::max(0, std::min(irLen - l0Len, kL1MaxParts * l1Part)); // Part 8 F
 
     const int l2Offset = l0Len + l1Len;
-    const int l2Len    = tailEnabled ? std::max(0, irLen - l0Len - l1Len) : 0;
+    const int l2Len    = std::max(0, irLen - l0Len - l1Len); // Part 8 F
 
     struct LayerCfg { int offset; int len; int partSize; bool immediate; };
     const LayerCfg cfgs[kNumLayers] = {
@@ -84769,6 +89023,7 @@ void MKLNonUniformConvolver::Reset()
 
 } // namespace convo
 
+
 ```
 
 ### 📄 `src\MKLNonUniformConvolver.h`
@@ -84979,15 +89234,18 @@ public:
     // ★ SR-02 (S-1) — L0 coverage 上限式（doc/work96 契約凍結 2026-09-14）
     //   純関数（NonRT）。SetImpulse / 境界テスト / UI 表示の単一権威。
     //
-    //   l0MaxParts = tailEnabled ? clamp(ceil(coverageSamples / l0Part), 32, 256) : 32
+    //   l0MaxParts = clamp(ceil(coverageSamples / l0Part), 32, 256)
     //     - floor 32 = 現行幾何（kL0MaxParts）。required ≤ 32 の全構成は現行とビット一致。
     //     - hard cap 256 = RT ceiling（processLayerBlock の partition-ops 線形成長に対する
     //       実測保証: work96 §2.2 / T-SR02-6 wall-clock 契約）。
-    //     - tailEnabled=false (Bypass) は tailStart 非依存で現行不変。
+    //     - Part 8 F: tailEnabled=false（Bypass）も同じ被覆計算を使う（L0 + L1 + L2 で IR 全体）。
     //   int 演算のみ（double 丸みに依存しない）。pow2 切り上げは禁止（最大 2× 膨張、不採用）。
     //----------------------------------------------------------
     static constexpr int kL0PartsFloor = 32;
     static constexpr int kL0PartsHardCap = 256;
+    // Part 8: 実測で受入済みのブロック長上限（64〜32768）。上限超でも幾何は健全に保ち、
+    //   SetImpulse（NonRT）で 1 回だけ警告する（RT 経路には何も追加しない）。
+    static constexpr int kMaxSupportedBlockSize = 32768;
     [[nodiscard]] static int computeL0MaxParts(int l0Part, int coverageSamples, bool tailEnabled) noexcept;
 
     //----------------------------------------------------------
@@ -85309,6 +89567,7 @@ private:
 
     std::atomic<bool> m_ready { false };
     bool    m_tailEnabled = true;
+    std::atomic<bool> m_blockSizeWarned { false }; // Part 8: 上限超過の警告をインスタンス 1 回に制限
     int     m_maxBlockSize = 0;  // ★ B13: コールバックブロックサイズ (EnsureCapacity 算出用)
     double  m_tailStrength = 1.0;
     double  m_tailLayerGain[kNumLayers] { 1.0, 1.0, 1.0 };
@@ -85337,6 +89596,7 @@ private:
 #endif
 
 } // namespace convo
+
 
 ```
 
@@ -104894,6 +109154,13 @@ namespace
 constexpr int kBlockSize = 8192;     // 全検証共通の 1 ブロック入力数
 constexpr double kDcTol = 1.0e-9;    // DC 期待値の float 許容（bitwise 比較とは別系統）
 
+// Part 8 E: production は補正済み利得規約（既定 ON）。OFF ビルドでは従来値を検証する。
+#if defined(CONVOPEQ_CORRECT_POLYPHASE_GAIN) && (CONVOPEQ_CORRECT_POLYPHASE_GAIN)
+constexpr bool kProdCorrected = true;
+#else
+constexpr bool kProdCorrected = false;
+#endif
+
 // ── deterministic PRNG（seed 固定・libm 不使用 → ビルド構成非依存） ─────────
 struct DeterministicPRNG
 {
@@ -104960,10 +109227,10 @@ void emitBuildIdBlock()
     std::printf("  snapshot_identity : (runner: build_identity_gate.py --emit-build-id)\n");
     std::printf("  git_head          : (runner 補完)\n");
     std::printf("  working_tree      : (runner 補完)\n");
-#ifdef CONVOPEQ_CORRECT_POLYPHASE_GAIN
-    std::printf("  production_flag   : 1 (UNEXPECTED — Phase 0 契約違反: R15-2)\n");
+#if defined(CONVOPEQ_CORRECT_POLYPHASE_GAIN) && (CONVOPEQ_CORRECT_POLYPHASE_GAIN)
+    std::printf("  production_flag   : 1 (production default: corrected gain convention, Part 8 E)\n");
 #else
-    std::printf("  production_flag   : undefined/off (macro absent in this TU / Phase 0 R15-2)\n");
+    std::printf("  production_flag   : undefined/off (legacy gain convention; build with -DCONVOPEQ_CORRECT_POLYPHASE_GAIN=ON)\n");
 #endif
     std::printf("  shadow_candidate  : %d (CONVOPEQ_POLYPHASE_REF_CANDIDATE)\n",
                 CONVOPEQ_POLYPHASE_REF_CANDIDATE);
@@ -105287,7 +109554,7 @@ void runPhase0Tests()
         for (const auto& lc : lats)
         {
             CustomInputOversampler prod;
-            Shadow base{ false };
+            Shadow base{ kProdCorrected };
             Shadow cand{ true };
             if (lc.single)
             {
@@ -105336,7 +109603,7 @@ void runPhase0Tests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         base.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
@@ -105348,8 +109615,9 @@ void runPhase0Tests()
         cand.reset();
         runShadowRoundTrip(cand, inP, kBlockSize, cUpP, cDnP, c.ratio);
         const int stages = (c.ratio == 8) ? 3 : ((c.ratio == 4) ? 2 : 1);
-        double expect = 1.0;
-        for (int i = 0; i < stages; ++i) expect *= 0.75;
+        double expectLegacy = 1.0;
+        for (int i = 0; i < stages; ++i) expectLegacy *= 0.75;
+        const double expect = kProdCorrected ? 1.0 : expectLegacy;
         const double dcBase = steadyMean(bDn[0].data(), bDn[0].size());
         const double dcCand = steadyMean(cDn[0].data(), cDn[0].size());
         const bool ok = r.first
@@ -105407,7 +109675,8 @@ void runPhase0Tests()
             }
             const double ripple = rMax - rMin;
 
-            const double devTerm = 20.0 * rc.N * std::log10(4.0 / 3.0);
+            // 補正規約では production と candidate が同一の応答になる（devTerm は旧規約の差のみ）。
+            const double devTerm = kProdCorrected ? 0.0 : 20.0 * rc.N * std::log10(4.0 / 3.0);
             static constexpr double devPts[] = { 50.0, 1000.0, 10000.0, 48000.0, 86400.0, 94080.0 };
             double maxDev = 0.0;
             for (double fq : devPts)
@@ -105518,8 +109787,10 @@ void runPhase0Tests()
                 const double iC = dftMag(cUp[0].data(), 2 * kBlockSize, (1.0 - fh) / 2.0);
                 const double d1C = 20.0 * std::log10(iC / (tC + 1.0e-300));
 
-                if (fh <= 0.30 + 1.0e-12
-                    && std::fabs(d1B - (-9.542425)) > 0.01)
+                std::printf("  [record] E-1 d1B %d/%.0f fh=%.2f d1B=%.6f d1C=%.6f\n", dTaps, dAtten, fh, d1B, d1C);
+                // 補正規約では up 段の image はフィルタ減衰で決まる（旧値 −9.542425 は 0.75 規約の参照）。
+                // 受入は「旧参照より悪化しない」こと（≤ −9.442 dB）。
+                if (fh <= 0.30 + 1.0e-12 && d1B > -9.442)
                 {
                     e1Ok = false;
                     detail = fmt("E-1 %d/%.0f f̂=%.2f d1B=%.6f", dTaps, dAtten, fh, d1B);
@@ -105535,7 +109806,7 @@ void runPhase0Tests()
                 }
             }
         }
-        report("P0-E E-1 base D1 −9.542425 ±0.01 @f̂≤0.30 (prod 31/127/511 ×4 f̂)", e1Ok, detail);
+        report("P0-E E-1 production D1 ≤ −9.442 @f̂≤0.30 (corrected convention; legacy reference −9.542425)", e1Ok, detail);
         report("P0-E E-1c cand D1 ≤ −9.442 @f̂≤0.35 (shadow 31/127/511 ×5 f̂)", e1cOk,
                fmt("min margin=%.1f dB", minMarginC));
         std::printf("  [record] E-1b cand D1 は rect / Hann+trim8 併記（手法感度帯・gate 不使用）\n");
@@ -105592,7 +109863,7 @@ void runPhase0Tests()
     // ═══ T17: P0-I SoftClip local OS per-phase attribution（R17-1 完全契約） ═══
     {
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepareSingleStage(31, 90.0, kBlockSize);
         base.prepareSingleStageModel(31, 90.0, kBlockSize);
@@ -105612,11 +109883,11 @@ void runPhase0Tests()
             runShadowRoundTrip(cand, inP, kBlockSize, cUpP, cDnP, 2);
             const double dcB = steadyMean(bDn[0].data(), bDn[0].size());
             const double dcC = steadyMean(cDn[0].data(), cDn[0].size());
-            // A=0.5 入力に対する利得比で gate（base 0.75 / cand 1.0）
+            // A=0.5 入力に対する利得比で gate（補正 ON: 1.0 / OFF: 従来 0.75）
             const bool ok = r.first
-                         && std::fabs(dcB / 0.5 - 0.75) <= 1.0e-6
+                         && std::fabs(dcB / 0.5 - (kProdCorrected ? 1.0 : 0.75)) <= 1.0e-6
                          && std::fabs(dcC / 0.5 - 1.0) <= 1.0e-6;
-            report("P0-I I-a OS-only DC (SoftClip 無効・A=0.5): base 0.75 / cand 1.0 ±1e-6", ok,
+            report("P0-I I-a OS-only DC (SoftClip 無効・A=0.5): base = corrected ? 1.0 : 0.75 / cand 1.0 ±1e-6", ok,
                    fmt("dcB=%.12f dcC=%.12f", dcB, dcC));
         }
 
@@ -105679,15 +109950,15 @@ void runPhase0Tests()
                 const int pc = 2 * i + cPar;
                 const int pv = 2 * i + vPar;
 
-                // I-0: conv 位相 bitwise 一致 / center 位相 bitwise 2×（denorm 帯例外）
+                // I-0: conv 位相 bitwise 一致 / center 位相も一致（補正規約の採用後は base も candidate と同じ）
                 if (std::bit_cast<std::uint64_t>(cUp[0][pv]) != std::bit_cast<std::uint64_t>(bUp[0][pv]))
                 { c1Ok = false; detail = fmt("I-0 conv mismatch @%d", pv); break; }
 
                 const double xbc = bUp[0][pc];
                 const double xcc = cUp[0][pc];
                 if (std::fabs(xbc) >= 2.0e-20
-                    && std::bit_cast<std::uint64_t>(xcc) != std::bit_cast<std::uint64_t>(2.0 * xbc))
-                { c1Ok = false; detail = fmt("I-0 center not 2x @%d", pc); break; }
+                    && std::bit_cast<std::uint64_t>(xcc) != std::bit_cast<std::uint64_t>(xbc))
+                { c1Ok = false; detail = fmt("I-0 center mismatch @%d", pc); break; }
 
                 const double e1B = std::fabs(xbc) >= (kP0iOp.threshold - kP0iOp.knee);
                 const double e1C = std::fabs(xcc) >= (kP0iOp.threshold - kP0iOp.knee);
@@ -105696,9 +109967,9 @@ void runPhase0Tests()
                 // (c3): candidate のみの event は envelope |x_b| ≥ θ_evt/2
                 if (e1C && !e1B && std::fabs(xbc) < 0.5 * (kP0iOp.threshold - kP0iOp.knee))
                 { c3Ok = false; detail = fmt("c3 envelope violated @%d (|xb|=%.3g)", pc, xbc); break; }
-                // (c4): candidate center 出力 = F(2·x_b)（点wise 参照と bitwise 一致）
+                // (c4): center 出力 = F(x_center)（補正規約では center は 2 倍済みの production 値が基準）
                 if (std::bit_cast<std::uint64_t>(yc[pc])
-                    != std::bit_cast<std::uint64_t>(musicalSoftClipRef(2.0 * xbc, kP0iOp)))
+                    != std::bit_cast<std::uint64_t>(musicalSoftClipRef(xcc, kP0iOp)))
                 { c4Ok = false; detail = fmt("c4 pointwise mismatch @%d", pc); break; }
 
                 // (c1) conv 位相出力 bitwise 一致
@@ -105869,7 +110140,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         shadow.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
         prod.reset(); shadow.reset();
@@ -105891,7 +110162,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         base.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
@@ -105904,8 +110175,9 @@ int runAllTests()
         const auto r = compareRoundTrip(prod, base, inPtrs, kBlockSize,
                                         prodUpP, prodDnP, shadowUpP, shadowDnP);
         const int stages = (c.ratio == 8) ? 3 : ((c.ratio == 4) ? 2 : 1);
-        double expect = 1.0;
-        for (int i = 0; i < stages; ++i) expect *= 0.75;
+        double expectLegacy = 1.0;
+        for (int i = 0; i < stages; ++i) expectLegacy *= 0.75;
+        const double expect = kProdCorrected ? 1.0 : expectLegacy;
         const double dcBase = steadyMean(prodDn[0].data(), prodDn[0].size());
 
         // candidate は予測系（R12-8）: production を触らず shadow cand のみ再実行
@@ -105923,7 +110195,7 @@ int runAllTests()
     {
         // 単段 S1 (31/90): h_rt = 2·(conv⋆conv) + 0.25·δ[15]
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         Shadow cand{ true };
         prod.prepareSingleStage(31, 90.0, kBlockSize);
         base.prepareSingleStageModel(31, 90.0, kBlockSize);
@@ -105970,21 +110242,22 @@ int runAllTests()
             if (k >= 0 && k < static_cast<std::ptrdiff_t>(s1.convCoeffs.size()))
                 cc15 += s1.convCoeffs[r] * s1.convCoeffs[static_cast<std::size_t>(k)];
         }
-        const double expectPeak = 2.0 * cc15 + 0.25;
+        // 補正時は center 枝が 2 倍になるため δ 項は 0.5（従来 0.25）。
+        const double expectPeak = 2.0 * cc15 + (kProdCorrected ? 0.5 : 0.25);
 
         const bool ok = r.first
                      && peakIdx == w + 15
                      && std::fabs(prodDn[0][w + 15] - expectPeak) <= kDcTol
-                     && std::fabs(sumBase - 0.75) <= kDcTol
+                     && std::fabs(sumBase - (kProdCorrected ? 1.0 : 0.75)) <= kDcTol
                      && std::fabs(sumCand - 1.0) <= kDcTol;
-        report("R17-4(D) impulse warm-start S1(31/90): h_rt=2·(conv⋆conv)+0.25δ[15] / Σ≈0.75 / cand Σ≈1.0 / bitwise",
+        report("R17-4(D) impulse warm-start S1(31/90): h_rt=2·(conv⋆conv)+0.25δ[15] / Σ≈1.0 (corrected) / legacy 0.75 / bitwise",
                ok, fmt("peak@%d expectPeak=%.12f sumBase=%.12f sumCand=%.12f | %s",
                        peakIdx - w, expectPeak, sumBase, sumCand, r.second.c_str()));
     }
     {
-        // IIR3 r=8: Σh_rt = 0.75³ / peak ∈ [floor(290.25), floor+1]
+        // IIR3 r=8: Σh_rt = 1.0（補正）/ 従来 0.75³ / peak ∈ [floor(290.25), floor+1]
         CustomInputOversampler prod;
-        Shadow base{ false };
+        Shadow base{ kProdCorrected };
         prod.prepare(kBlockSize, 8, CustomInputOversampler::Preset::IIRLike);
         base.prepare(kBlockSize, 8, Shadow::Preset::IIRLike);
         prod.reset(); base.reset();
@@ -106010,9 +110283,9 @@ int runAllTests()
             }
         }
         const bool ok = r.first
-                     && std::fabs(sum - 0.421875) <= kDcTol
+                     && std::fabs(sum - (kProdCorrected ? 1.0 : 0.421875)) <= kDcTol
                      && peakIdx >= w + 290 && peakIdx <= w + 291;
-        report("R17-4(D) impulse warm-start IIR3 r=8: Σ≈0.75³ / peak∈[290,291] / bitwise",
+        report("R17-4(D) impulse warm-start IIR3 r=8: Σ≈1.0 (corrected) / legacy 0.75³ / peak∈[290,291] / bitwise",
                ok, fmt("peak offset=%d sum=%.12f", peakIdx - w, sum));
     }
 
@@ -106020,7 +110293,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         shadow.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
 
@@ -106143,7 +110416,7 @@ int runAllTests()
     for (const auto& c : kConfigs)
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepare(kBlockSize, c.ratio, c.preset);
         shadow.prepare(kBlockSize, c.ratio, toShadowPreset(c.preset));
 
@@ -106183,7 +110456,7 @@ int runAllTests()
     // ── scalar↔scalar 経路: 3-tap synthetic stage（convCount=2 → 両側 scalar 経路） ──
     {
         CustomInputOversampler prod;
-        Shadow shadow{ false };
+        Shadow shadow{ kProdCorrected };
         prod.prepareSingleStage(3, 90.0, kBlockSize);
         shadow.prepareSingleStageModel(3, 90.0, kBlockSize);
         prod.reset(); shadow.reset();
@@ -106229,6 +110502,8 @@ int main()
     std::printf("=== summary: PASS=%zu FAIL=%zu ===\n", g_pass, g_fail);
     return rc;
 }
+
+
 
 ```
 
@@ -106318,6 +110593,8 @@ int runRtMeasureRingTests();
 // STG11EQRetireTests.cpp (★ STG-11-D1 / Candidate B: EQ-owned router lifetime 終端回帰)
 // STG11D12StateIntegerGuardTests.cpp (★ STG-11-D12-1/-3/-4: ditherBitDepth setter guard / UI set / validator set)
 int runSTG11D12StateIntegerGuardTests();
+// 2026-11-08: D12-6（FrozenRuntimeWorld の release 順序）だけを実行する限定入口。
+int runSTG11D12FrozenWorldOnly();
 // STG11D12NoiseShaperEnumGuardTests.cpp (★ STG-11-D12-2: noiseShaperType setter guard + publish 回復回帰)
 int runSTG11D12NoiseShaperEnumGuardTests();
 int runSTG11D11TotalGainFiniteTests();
@@ -107756,6 +112033,15 @@ int main(int argc, char* argv[])
     // ★ A2 -> A3-a: 二重解放（V1）と誤状態処理（V2）の検証（opt-in）。
     if (std::getenv("A2A3A_TEST") != nullptr)
         return runA2A3aQuarantineTests();
+
+    // ★ 2026-11-08: D12（FrozenRuntimeWorld の release 順序を含む）だけを実行する。
+    //   既定スイートが環境依存の測定区間で停止する場合の限定実行用（opt-in）。
+    if (std::getenv("CONVOPEQ_STG11D12_ONLY") != nullptr)
+        return runSTG11D12StateIntegerGuardTests();
+
+    // ★ 2026-11-08: engine を起動しない D12-6 だけを実行する限定入口（opt-in）。
+    if (std::getenv("CONVOPEQ_D12_FROZEN_ONLY") != nullptr)
+        return runSTG11D12FrozenWorldOnly();
 
     // Work91 §7-3: --soak で長時間（高負荷）シナリオ（S1/S2b/S3/S4/S5）を実行。
     // デフォルト（ctest 用）は下の 4 シナリオのみ = 短時間で green。
@@ -110364,6 +114650,7 @@ int runSTG11D12NoiseShaperEnumGuardTests()
 #include <filesystem>
 
 #include "audioengine/AudioEngine.h"
+#include "audioengine/FrozenRuntimeWorld.h"
 #include "audioengine/RuntimePublicationValidator.h"
 #include "AudioEngineHarness.h"
 
@@ -110728,6 +115015,33 @@ bool checkD12T4UiBitDepthListStaysInSet()
     return world;
 }
 
+// ── D12-6 helper: aligned allocation 版 ──
+//   FrozenRuntimeWorld は aligned_unique_ptr<RuntimeState> を保持し、AlignedObjectDeleter が
+//   aligned_free を呼ぶ。std::make_unique 由来のポインタを渡すと allocator が食い違うため、
+//   Builder と同じ aligned_make_unique 経路（createForBuilder）で作る。
+[[nodiscard]] convo::aligned_unique_ptr<RuntimeState>
+makeMinimalValidWorldAligned(int ditherBitDepth)
+{
+    auto world = RuntimeState::createForBuilder(RuntimeState::BuilderToken{});
+    world->assertMutable();
+    world->generation = 1;
+    world->topology.runtimeUuid = 100;
+    world->generationSemantic.activationEpoch = 100;
+    world->generationSemantic.runtimeGeneration = 1;
+    world->publication.sequenceId = 1;
+    world->execution.transitionActive = false;
+    world->execution.transitionPolicy = 0;
+    world->routing.processingOrder = 0;
+    world->execution.crossfadeStartDelayBlocks = 0;
+    world->execution.crossfadeDryHoldSamples = 0;
+    world->overlap.fadeTimeSec = 0.0;
+    world->overlap.useDryAsOld = false;
+    world->resource.oversamplingFactor = 1;
+    world->resource.noiseShaperType = 0;
+    world->resource.ditherBitDepth = ditherBitDepth;
+    return world;
+}
+
 bool checkD12T5ValidatorResourceContract()
 {
     iso::audio_engine::RuntimePublicationValidator validator;
@@ -110776,10 +115090,104 @@ bool checkD12T5ValidatorResourceContract()
 
 } // namespace
 
-int runSTG11D12StateIntegerGuardTests()
+// ── D12-6: FrozenRuntimeWorld の release 順序（seal は publish transaction 側）──
+//   実経路では release 時点の world は未 seal で、seal は publish transaction の中で行われる。
+//   releaseState() に seal を要求すると正当な publish が落ちる（2026-11-08 実測 / D12-1-C）。
+//   ここでは「未 seal でも所有権が移る」「移譲後の seal が効く」「二重 seal は冪等」を固定し、
+//   将来 release に前提条件を足す変更を回帰として検出する。
+[[nodiscard]] bool checkD12T6FrozenWorldReleaseOrder()
 {
     bool ok = true;
 
+    // (1) 未 seal のまま release できる（実経路の順序）
+    {
+        auto world = makeMinimalValidWorldAligned(16);
+        convo::FrozenRuntimeWorld frozen(std::move(world));
+        if (frozen.getRaw()->isSealedRecursively())
+        {
+            std::fprintf(stderr, "D12-6: precondition world is unexpectedly sealed\n");
+            ok = false;
+        }
+
+        RuntimeState* raw = frozen.releaseState();
+        if (raw == nullptr)
+        {
+            std::fprintf(stderr,
+                         "D12-6: unsealed world was not released (publish-order regression)\n");
+            ok = false;
+        }
+        else
+        {
+            if (frozen.isValid())
+            {
+                std::fprintf(stderr, "D12-6: wrapper still owns the released world\n");
+                ok = false;
+            }
+            // 実経路: publish transaction が seal する
+            raw->sealRecursively();
+            if (!raw->isSealedRecursively())
+            {
+                std::fprintf(stderr, "D12-6: seal after release failed\n");
+                ok = false;
+            }
+            convo::aligned_unique_ptr<RuntimeState> owner(raw);   // 呼出側が解放する
+        }
+    }
+
+    // (2) seal 済みでも release でき、seal 状態は移譲後も保たれる
+    {
+        auto world = makeMinimalValidWorldAligned(16);
+        world->sealRecursively();
+        convo::FrozenRuntimeWorld frozen(std::move(world));
+        RuntimeState* raw = frozen.releaseState();
+        if (raw == nullptr)
+        {
+            std::fprintf(stderr, "D12-6: sealed world was not released\n");
+            ok = false;
+        }
+        else
+        {
+            if (!raw->isSealedRecursively())
+            {
+                std::fprintf(stderr, "D12-6: released world lost its seal\n");
+                ok = false;
+            }
+            convo::aligned_unique_ptr<RuntimeState> owner(raw);
+        }
+    }
+
+    // (3) seal は冪等（Builder freeze 後の二重 seal が release を壊さない）
+    {
+        auto world = makeMinimalValidWorldAligned(24);
+        world->freeze();
+        world->sealRecursively();
+        convo::FrozenRuntimeWorld frozen(std::move(world));
+        RuntimeState* raw = frozen.releaseState();
+        if (raw == nullptr)
+        {
+            std::fprintf(stderr, "D12-6: double-sealed world was not released\n");
+            ok = false;
+        }
+        else
+        {
+            // 二重 seal が seal を落としていないこと（commit 側の検証を通る前提）
+            if (!raw->isSealedRecursively())
+            {
+                std::fprintf(stderr, "D12-6: double-sealed world lost its seal\n");
+                ok = false;
+            }
+            convo::aligned_unique_ptr<RuntimeState> owner(raw);
+        }
+    }
+
+    if (ok)
+        std::printf("STG11D12StateIntegerGuardTests: D12-6 PASS (release order / seal at commit)\n");
+    return ok;
+}
+
+int runSTG11D12StateIntegerGuardTests()
+{
+    bool ok = true;
     if (!checkD12T1InvalidDitherRejected())
     {
         std::fprintf(stderr, "FAIL: D12-1-A invalid dither rejected\n");
@@ -110805,9 +115213,25 @@ int runSTG11D12StateIntegerGuardTests()
         std::fprintf(stderr, "FAIL: D12-4 validator resource contract\n");
         ok = false;
     }
+    if (!checkD12T6FrozenWorldReleaseOrder())
+    {
+        std::fprintf(stderr, "FAIL: D12-6 FrozenRuntimeWorld release order\n");
+        ok = false;
+    }
 
     if (ok)
-        std::printf("STG11D12StateIntegerGuardTests: PASS (D12-1-A/D12-1-B/D12-1-C/D12-3/D12-4)\n");
+        std::printf("STG11D12StateIntegerGuardTests: PASS (D12-1-A/D12-1-B/D12-1-C/D12-3/D12-4/D12-6)\n");
+    return ok ? 0 : 1;
+}
+
+// ── 2026-11-08: D12-6 だけを実行する（engine 非依存）。
+//   既定スイートや D12-1〜D12-4（engine を起動する）が環境依存で停止する場合の
+//   限定検証用。FrozenRuntimeWorld の release 順序だけを確認する。
+int runSTG11D12FrozenWorldOnly()
+{
+    const bool ok = checkD12T6FrozenWorldReleaseOrder();
+    std::printf("STG11D12FrozenWorldOnly: %s\n", ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
     return ok ? 0 : 1;
 }
 
@@ -114846,6 +119270,7 @@ int runSTG11D9TailFiniteTests()
 #include "eqprocessor/EQProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "core/EpochDomain.h"
+#include "audioengine/ISRRetireLatency.h"
 #include "audioengine/ISRRetireRouter.h"
 #include "audioengine/ISRRuntimePublicationCoordinator.h"
 
@@ -115126,8 +119551,8 @@ static bool checkTD14aRouterBoundToPrivateDomain()
 // =============================================================================
 static bool checkTD14bReclaimGatedOnlyOnBoundProvider()
 {
-    convo::EpochDomain eqLike;
-    convo::EpochDomain foreign;
+    convo::EpochDomain eqLike(convo::RetireDomainId::Unknown);
+    convo::EpochDomain foreign(convo::RetireDomainId::Unknown);
     convo::isr::ISRRetireRouter router(eqLike);
     TD11Tracker tracker;
 
@@ -115481,6 +119906,660 @@ static bool checkUnwrapContract()
     return ok;
 }
 
+// =============================================================================
+// ★ Gate 1 (2026-11-11, Owner 承認): RCU 入場失敗時に退役対象を参照しないことの検証
+//   (a) 入場成功: 状態参照は従来どおり（unprotectedReadCount は 0 のまま）
+//   (b) 入場失敗: currentStateBits を読まない（カウンタ +1・出力は「状態未公開」の挙動）
+//   (c) reclaim 完了: 解放済みの退役対象を参照しない（ASan ビルドで UAF 無し）
+//   EQProcessor の private へはテスト専用 friend（製品 API は追加しない）で到達する。
+// =============================================================================
+struct EQProcessorGate1TestAccess
+{
+    static const EQProcessor::EQState* currentState(EQProcessor& eq) noexcept
+    {
+        return eq.loadCurrentState(std::memory_order_acquire);
+    }
+    // ★ 段階① v2: 理由は引数で明示（デフォルトなし）
+    static void flushPendingEpochAdvance(EQProcessor& eq,
+                                         EQProcessor::PublishReason reason) noexcept
+    {
+        eq.flushPendingEpochAdvance(reason);
+    }
+    static void closeReaderRegistration(EQProcessor& eq) noexcept
+    {
+        eq.m_epochDomain->closeReaderRegistration();
+    }
+    // ★ 段階①: pending を立てずに滞留を作る（reclaim のみの経路を検証するため）
+    //   epoch は呼出し側が明示する（現在 epoch より古い値にすると、
+    //   publish なしでも reclaim 可能になる）。
+    static bool enqueueTestRetire(EQProcessor& eq, void* ptr, void (*deleter)(void*),
+                                  std::uint64_t epoch) noexcept
+    {
+        return eq.enqueueDeferredDeleteWithFallback(ptr, deleter, epoch);
+    }
+    static std::uint64_t currentEpoch(EQProcessor& eq) noexcept
+    {
+        return eq.m_epochDomain->currentEpoch();
+    }
+};
+
+// ★ 段階①: 検証用 deleter（実際に解放されたことを数える）
+namespace {
+std::atomic<int> g_driverProbeDeletes{0};
+void driverProbeDeleter(void* p) noexcept
+{
+    g_driverProbeDeletes.fetch_add(1, std::memory_order_relaxed);
+    delete static_cast<int*>(p);
+}
+}
+
+namespace
+{
+constexpr int    kGate1BlockSize = 256;
+constexpr double kGate1SampleRate = 48000.0;
+
+void gate1FillInput(juce::AudioBuffer<double>& buf)
+{
+    const int n = buf.getNumSamples();
+    const double twoPi = 6.283185307179586476925286766559;
+    for (int i = 0; i < n; ++i)
+    {
+        // 飽和（soft clip）の差が出るよう振幅 3.0（|x| > 1）で入れる
+        const double s = 3.0 * std::sin(twoPi * 1000.0 * static_cast<double>(i) / kGate1SampleRate);
+        for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+            buf.setSample(ch, i, s);
+    }
+}
+
+void gate1Configure(EQProcessor& eq)
+{
+    eq.prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+    eq.setBandType(0, EQBandType::Peaking);
+    eq.setBandFrequency(0, 1000.0f);
+    eq.setBandGain(0, 9.0f);
+    eq.setBandQ(0, 0.7f);
+    eq.setBandEnabled(0, true);
+    eq.setBandType(1, EQBandType::HighShelf);
+    eq.setBandFrequency(1, 6000.0f);
+    eq.setBandGain(1, -9.0f);
+    eq.setBandQ(1, 0.7f);
+    eq.setBandEnabled(1, true);
+}
+
+bool gate1Render(EQProcessor& eq, std::vector<double>& outL, std::vector<double>& outR)
+{
+    std::vector<double> lastL, lastR;
+    bool finite = true;
+    juce::AudioBuffer<double> in(2, kGate1BlockSize);
+    for (int b = 0; b < 3; ++b)
+    {
+        gate1FillInput(in);
+        juce::dsp::AudioBlock<double> block(in);
+        eq.process(block);
+        lastL.assign(in.getReadPointer(0), in.getReadPointer(0) + kGate1BlockSize);
+        lastR.assign(in.getReadPointer(1), in.getReadPointer(1) + kGate1BlockSize);
+        for (double v : lastL) if (!std::isfinite(v)) finite = false;
+        for (double v : lastR) if (!std::isfinite(v)) finite = false;
+    }
+    outL.swap(lastL);
+    outR.swap(lastR);
+    return finite;
+}
+
+double gate1MaxAbs(const std::vector<double>& v)
+{
+    double m = 0.0;
+    for (double x : v) m = std::max(m, std::abs(x));
+    return m;
+}
+
+double gate1MaxAbsDiff(const std::vector<double>& a, const std::vector<double>& b)
+{
+    if (a.size() != b.size()) return std::numeric_limits<double>::infinity();
+    double m = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) m = std::max(m, std::abs(a[i] - b[i]));
+    return m;
+}
+} // namespace
+
+static bool checkGate1ProcessIsolation()
+{
+    bool ok = true;
+
+    // ---- (a) 正常入場: 状態と BandNode を従来どおり参照する（カウンタ 0・出力は非無音・有限） ----
+    {
+        auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eq = std::make_unique<EQProcessor>();
+        eq->setRetireCoordinator(coordinator.get());   // retire authority（null だと drop される）
+        gate1Configure(*eq);
+
+        std::vector<double> l, r;
+        if (!gate1Render(*eq, l, r))
+        {
+            std::fprintf(stderr, "G1-1: non-finite output\n");
+            ok = false;
+        }
+        if (eq->unprotectedReadCount() != 0)
+        {
+            std::fprintf(stderr, "G1-1: unprotectedReadCount=%u (expected 0)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()));
+            ok = false;
+        }
+        if (EQProcessorGate1TestAccess::currentState(*eq) == nullptr)
+        {
+            std::fprintf(stderr, "G1-1: currentState is null\n");
+            ok = false;
+        }
+        if (gate1MaxAbs(l) < 1.0e-9)
+        {
+            std::fprintf(stderr, "G1-1: output is silent (state not applied?)\n");
+            ok = false;
+        }
+    }
+
+    // ---- (b) 入場失敗 + reclaim 完了後: 状態も BandNode も参照しない ----
+    {
+        // 参考 1: バンドを全て無効にした「素通し」参照（同じ EQProcessor 履歴で比較する）
+        auto coordRef = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eqRef = std::make_unique<EQProcessor>();
+        eqRef->setRetireCoordinator(coordRef.get());
+        gate1Configure(*eqRef);
+        eqRef->setBandEnabled(0, false);
+        eqRef->setBandEnabled(1, false);
+        std::vector<double> lRef, rRef;
+        if (!gate1Render(*eqRef, lRef, rRef))
+        {
+            std::fprintf(stderr, "G1-2: non-finite output (reference passthrough)\n");
+            ok = false;
+        }
+
+        // 参考 2: バンド有効（= 失敗経路が退役対象を参照した場合に見えるはずの出力）
+        auto coordBand = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eqBand = std::make_unique<EQProcessor>();
+        eqBand->setRetireCoordinator(coordBand.get());
+        gate1Configure(*eqBand);
+        eqBand->setNonlinearSaturation(0.9f);
+        eqBand->setBandGain(1, -6.0f);
+        std::vector<double> lBand, rBand;
+        if (!gate1Render(*eqBand, lBand, rBand))
+        {
+            std::fprintf(stderr, "G1-2: non-finite output (reference banded)\n");
+            ok = false;
+        }
+
+        // 被験体: saturatuin 0.9 の状態と BandNode を退役・reclaim させてから入場失敗で process する
+        auto coord = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eq = std::make_unique<EQProcessor>();
+        eq->setRetireCoordinator(coord.get());
+        gate1Configure(*eq);
+        eq->setNonlinearSaturation(0.9f);
+        eq->setBandGain(1, -6.0f);      // 参考 2 と同じ最終係数
+
+        const EQProcessor::EQState* retired = EQProcessorGate1TestAccess::currentState(*eq);
+        if (retired == nullptr)
+        {
+            std::fprintf(stderr, "G1-2: retired state is null\n");
+            ok = false;
+        }
+
+        eq->setBandGain(0, 6.0f);                                    // 交換 → 直前の状態を退役
+        EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);    // publish + reclaim
+
+        if (eq->eqOwnedPendingRetire() != 0)
+        {
+            std::fprintf(stderr, "G1-2: pendingRetire=%u (reclaim not completed)\n",
+                         static_cast<unsigned>(eq->eqOwnedPendingRetire()));
+            ok = false;
+        }
+        if (eq->eqRetireDropCount() != 0)
+        {
+            std::fprintf(stderr, "G1-2: retire dropped (%u) - coordinator not effective\n",
+                         static_cast<unsigned>(eq->eqRetireDropCount()));
+            ok = false;
+        }
+        const EQProcessor::EQState* current = EQProcessorGate1TestAccess::currentState(*eq);
+        if (current == nullptr || current == retired)
+        {
+            std::fprintf(stderr, "G1-2: state was not exchanged (current=%p retired=%p)\n",
+                         static_cast<const void*>(current), static_cast<const void*>(retired));
+            ok = false;
+        }
+
+        // Reader 登録を閉じる → EQ の RCUReader は入場できない（決定的な失敗注入）
+        EQProcessorGate1TestAccess::closeReaderRegistration(*eq);
+
+        // 解放済みブロックを再利用して毒を入れる（誤って退役対象を読んだ場合に必ず観測できるようにする）
+        std::vector<std::unique_ptr<EQProcessor::EQState>> poison;
+        for (int i = 0; i < 8; ++i)
+        {
+            poison.push_back(std::make_unique<EQProcessor::EQState>());
+            poison.back()->nonlinearSaturation = 1.0f;
+            for (int b = 0; b < EQProcessor::NUM_BANDS; ++b) poison.back()->bands[static_cast<size_t>(b)].gain = 24.0f;
+        }
+
+        std::vector<double> lFail, rFail;
+        if (!gate1Render(*eq, lFail, rFail))
+        {
+            std::fprintf(stderr, "G1-2: non-finite output (failure path)\n");
+            ok = false;
+        }
+        if (eq->unprotectedReadCount() != 3)
+        {
+            std::fprintf(stderr, "G1-2: unprotectedReadCount=%u (expected 3)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()));
+            ok = false;
+        }
+
+        // 失敗経路は「バンド無効の素通し」と一致し、「バンド有効」とは一致しない。
+        const double dRef = gate1MaxAbsDiff(lFail, lRef);
+        const double dBand = gate1MaxAbsDiff(lFail, lBand);
+        std::printf("  G1-2: dRef=%.6g dBand=%.6g (amplitude=%.3f)\n",
+                    dRef, dBand, gate1MaxAbs(lFail));
+        if (!(dRef < 1.0e-5))
+        {
+            std::fprintf(stderr, "G1-2: failure path is not passthrough (dRef=%.6g)\n", dRef);
+            ok = false;
+        }
+        if (!(dBand > 1.0e-3))
+        {
+            std::fprintf(stderr, "G1-2: probe has no discriminating power (dBand=%.6g)\n", dBand);
+            ok = false;
+        }
+
+        // ---- (d) 入場失敗のまま reclaim を反復しても退役対象に触れない ----
+        const std::uint32_t before = eq->unprotectedReadCount();
+        for (int i = 0; i < 5; ++i)
+        {
+            eq->setBandGain(0, 3.0f + static_cast<float>(i));
+            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);
+            std::vector<double> lx, rx;
+            if (!gate1Render(*eq, lx, rx))
+            {
+                std::fprintf(stderr, "G1-3: non-finite output (repeat %d)\n", i);
+                ok = false;
+                break;
+            }
+        }
+        if (eq->unprotectedReadCount() != before + 15u)
+        {
+            std::fprintf(stderr, "G1-3: unprotectedReadCount=%u (expected %u)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()),
+                         static_cast<unsigned>(before + 15u));
+            ok = false;
+        }
+    }
+
+    // ---- (e) reclaim と入場失敗の同時進行（非 RT スレッドが交換 + publish + reclaim） ----
+    {
+        auto coordC = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        auto eq = std::make_unique<EQProcessor>();
+        eq->setRetireCoordinator(coordC.get());
+        gate1Configure(*eq);
+        EQProcessorGate1TestAccess::closeReaderRegistration(*eq);   // 音声側は常に入場失敗
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> swaps{0};
+        std::thread driver([&] {
+            for (int i = 0; i < 300 && !stop.load(std::memory_order_acquire); ++i)
+            {
+                eq->setBandGain(0, 3.0f + static_cast<float>(i % 7));
+                EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);   // publish + reclaim
+                swaps.fetch_add(1, std::memory_order_relaxed);
+            }
+            stop.store(true, std::memory_order_release);
+        });
+
+        bool finite = true;
+        int blocks = 0;
+        std::vector<double> l, r;
+        juce::AudioBuffer<double> in(2, kGate1BlockSize);
+        while (!stop.load(std::memory_order_acquire) || blocks < 300)
+        {
+            if (blocks >= 4000) break;                    // 暴走防止
+            gate1FillInput(in);
+            juce::dsp::AudioBlock<double> block(in);
+            eq->process(block);                            // 毎回入場失敗 → 何も参照しない
+            for (int ch = 0; ch < 2 && finite; ++ch)
+                for (int i = 0; i < kGate1BlockSize; ++i)
+                    if (!std::isfinite(in.getSample(ch, i))) finite = false;
+            ++blocks;
+        }
+        driver.join();
+
+        std::printf("  G1-4: concurrent blocks=%d swaps=%d unprotected=%u\n",
+                    blocks, swaps.load(), static_cast<unsigned>(eq->unprotectedReadCount()));
+        if (!finite)
+        {
+            std::fprintf(stderr, "G1-4: non-finite output during concurrent reclaim\n");
+            ok = false;
+        }
+        if (eq->unprotectedReadCount() != static_cast<std::uint32_t>(blocks))
+        {
+            std::fprintf(stderr, "G1-4: unprotectedReadCount=%u (expected %d)\n",
+                         static_cast<unsigned>(eq->unprotectedReadCount()), blocks);
+            ok = false;
+        }
+        if (swaps.load() <= 0)
+        {
+            std::fprintf(stderr, "G1-4: no concurrent reclaim happened\n");
+            ok = false;
+        }
+        if (eq->eqRetireDropCount() != 0)
+        {
+            std::fprintf(stderr, "G1-4: retire dropped (%u)\n",
+                         static_cast<unsigned>(eq->eqRetireDropCount()));
+            ok = false;
+        }
+    }
+
+    return ok;
+}
+
+// =============================================================================
+// ★ 段階① (2026-11-11, Owner 承認): reclaim ドライバの契約検証（7 項目）
+//   1 pending あり  2 pending なし・滞留あり  3 pending なし・滞留なし
+//   5 publish 理由 4 区分  6 競合・寿命  7 RT（Message Thread）制約
+// =============================================================================
+static bool checkRetireDriverContract()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;   // MessageManager（main thread = message thread）
+    bool ok = true;
+
+    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto eq = std::make_unique<EQProcessor>();
+    eq->setRetireCoordinator(coordinator.get());
+    gate1Configure(*eq);
+
+    auto fail = [&ok](const char* what) {
+        std::fprintf(stderr, "DRV: %s\n", what);
+        ok = false;
+    };
+
+    // ---- 1) pending あり: epoch 前進 + reclaim ----
+    {
+        const auto before = eq->retireDriverStats();
+        eq->setBandGain(0, 6.0f);                       // pending = true
+        eq->driveRetireReclaimNonRt();
+        const auto after = eq->retireDriverStats();
+
+        if (after.currentEpoch != before.currentEpoch + 1) fail("1: epoch did not advance by 1");
+        if (after.publishTimerPending != before.publishTimerPending + 1) fail("1: timerPending publish not counted");
+        if (after.pendingRetire != 0) fail("1: D queue not drained");
+        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns) fail("1: publish path must not count as reclaim-only");
+    }
+
+    // ---- 2) pending なし・滞留あり: epoch は前進せず reclaim のみ ----
+    //   滞留は「publish 済みの古い epoch」で作る。つまり
+    //   epoch を進めなくても safe-below に入っている entry である。
+    {
+        const std::uint64_t epochNow = EQProcessorGate1TestAccess::currentEpoch(*eq);
+        if (epochNow < 2)
+            fail("2: epoch must be >= 2 before the reclaim-only probe");
+
+        const auto before = eq->retireDriverStats();
+        const int deletesBefore = g_driverProbeDeletes.load(std::memory_order_relaxed);
+        if (! EQProcessorGate1TestAccess::enqueueTestRetire(*eq, new int(7), driverProbeDeleter,
+                                                            epochNow - 1))
+            fail("2: enqueue of probe entry failed (coordinator?)");
+
+        const auto enqueued = eq->retireDriverStats();
+        if (enqueued.pendingRetire == 0) fail("2: probe entry is not resident in D queue");
+
+        eq->driveRetireReclaimNonRt();
+        const auto after = eq->retireDriverStats();
+
+        if (after.currentEpoch != before.currentEpoch) fail("2: epoch advanced without pending");
+        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns + 1) fail("2: reclaim-only run not counted");
+        if (g_driverProbeDeletes.load(std::memory_order_relaxed) != deletesBefore + 1)
+            fail("2: probe entry was not reclaimed");
+        if (after.pendingRetire != 0) fail("2: D queue not drained by reclaim-only run");
+    }
+
+    // ---- 3) pending なし・滞留なし: 何もしない ----
+    {
+        const auto before = eq->retireDriverStats();
+        eq->driveRetireReclaimNonRt();
+        const auto after = eq->retireDriverStats();
+
+        if (after.idleTicks != before.idleTicks + 1) fail("3: idle tick not counted");
+        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns) fail("3: unnecessary reclaim executed");
+        if (after.publishTimerPending != before.publishTimerPending) fail("3: unexpected publish");
+        if (after.currentEpoch != before.currentEpoch) fail("3: epoch changed while idle");
+    }
+
+    // ---- 5) publish 理由 4 区分 ----
+    {
+        {   // prepare 経由
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -3.0f);
+            eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+            const auto after = eq->retireDriverStats();
+            if (after.publishPrepare != before.publishPrepare + 1) fail("5: prepare publish not counted");
+        }
+        {   // release 経由
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -4.0f);
+            eq->releaseResources();
+            const auto after = eq->retireDriverStats();
+            if (after.publishRelease != before.publishRelease + 1) fail("5: release publish not counted");
+        }
+        {   // 明示的な直接 flush = Explicit
+            eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -5.0f);
+            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq, EQProcessor::PublishReason::Explicit);
+            const auto after = eq->retireDriverStats();
+            if (after.publishExplicit != before.publishExplicit + 1) fail("5: explicit publish not counted");
+        }
+        {   // タイマー経由
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(1, -6.0f);
+            eq->driveRetireReclaimNonRt();
+            const auto after = eq->retireDriverStats();
+            if (after.publishTimerPending != before.publishTimerPending + 1) fail("5: timer publish not counted");
+        }
+        {   // ★ 段階① v2: TimerPending の二重計数がないこと
+            //   ドライバは flush を呼ばないため、ドライバ 1 回で増えるのは
+            //   publishTimerPending だけである（Explicit は増えない）。
+            const auto before = eq->retireDriverStats();
+            eq->setBandGain(0, 4.0f);
+            eq->driveRetireReclaimNonRt();
+            const auto after = eq->retireDriverStats();
+            if (after.publishTimerPending != before.publishTimerPending + 1) fail("5b: timer publish not counted once");
+            if (after.publishExplicit != before.publishExplicit) fail("5b: timer path must not count as explicit");
+            if (after.publishPrepare != before.publishPrepare) fail("5b: timer path must not count as prepare");
+            if (after.publishRelease != before.publishRelease) fail("5b: timer path must not count as release");
+        }
+    }
+
+    // ---- 6) 競合・寿命: driver（Message Thread）と setter/prepare/release（他スレッド）----
+    {
+        std::atomic<bool> stop{false};
+        std::atomic<int> iterations{0};
+        std::thread worker([&] {
+            for (int i = 0; i < 200 && ! stop.load(std::memory_order_acquire); ++i)
+            {
+                eq->setBandGain(0, 3.0f + static_cast<float>(i % 5));
+                if ((i % 20) == 0)  eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+                if ((i % 20) == 10) eq->releaseResources();
+                iterations.fetch_add(1, std::memory_order_relaxed);
+            }
+            stop.store(true, std::memory_order_release);
+        });
+
+        int ticks = 0;
+        while (! stop.load(std::memory_order_acquire) || ticks < 200)
+        {
+            eq->driveRetireReclaimNonRt();
+            ++ticks;
+            if (ticks > 200000) break;                  // 暴走防止
+        }
+        worker.join();
+
+        // 最後の setter が残した entry は、あと 1 回 publish すれば safe-below に入る。
+        // ドライバが pending を消費して epoch を進めれば D は空になる。
+        eq->setBandGain(0, 2.0f);
+        eq->driveRetireReclaimNonRt();
+
+        const auto end = eq->retireDriverStats();
+        if (eq->eqRetireDropCount() != 0) fail("6: retire drop occurred under concurrency");
+        if (end.pendingRetire != 0 || end.resident != 0) fail("6: residue left after concurrency");
+        if (iterations.load() <= 0) fail("6: worker did not run");
+        std::printf("  DRV6: ticks=%d iterations=%d epoch=%llu\n", ticks, iterations.load(),
+                    static_cast<unsigned long long>(end.currentEpoch));
+    }
+
+    // ---- 7) RT 制約: Message Thread 以外からは拒否（fail-safe）----
+    {
+        eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+        const auto before = eq->retireDriverStats();
+        std::thread foreign([&] { eq->driveRetireReclaimNonRt(); });
+        foreign.join();
+        const auto after = eq->retireDriverStats();
+
+        if (after.offThreadRejects != before.offThreadRejects + 1) fail("7: off-thread call was not rejected");
+        if (after.currentEpoch != before.currentEpoch) fail("7: off-thread call advanced the epoch");
+        if (after.publishTimerPending != before.publishTimerPending) fail("7: off-thread call published");
+    }
+
+    // ---- 最終: 音声処理が崩れていないこと ----
+    {
+        eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
+        std::vector<double> l, r;
+        if (! gate1Render(*eq, l, r)) fail("final: non-finite output");
+        if (gate1MaxAbs(l) < 1.0e-9) fail("final: silent output");
+        const auto s = eq->retireDriverStats();
+        std::printf("  DRV: timer=%u prepare=%u release=%u explicit=%u reclaimOnly=%u idle=%u offThread=%u\n",
+                    s.publishTimerPending, s.publishPrepare, s.publishRelease, s.publishExplicit,
+                    s.reclaimOnlyRuns, s.idleTicks, s.offThreadRejects);
+    }
+
+    return ok;
+}
+
+// =============================================================================
+// ★ 段階③ (2026-11-11, Owner 承認): 3 分類診断の契約検証
+//   (1) 合成 driver+ebr+exec+unclassified == latency
+//   (2) firstScanTs==0 → unclassified 全額（0 埋めしない）
+//   (3) safeTs==0 → 分類対象外（excluded）(4)(5) 順序不整合 → inconsistent
+//   (6) 実キュー由来の観測で合成と firstScanTs を確認
+// =============================================================================
+static bool checkLatencyClassificationContract()
+{
+    bool ok = true;
+    using Rec = convo::isr::RetireLatencyRecorder;
+
+    auto fail = [&ok](const char* what) {
+        std::fprintf(stderr, "CLS: %s\n", what);
+        ok = false;
+    };
+
+    // (1) 合成: ts=1000, firstScan=5000, safe=8000, now=9000
+    {
+        const auto c = Rec::classifyTimes (1000u, 5000u, 8000u, 9000u);
+
+        if (! c.classified) fail("1: not classified");
+        if (c.driverWaitNs != 4000u) fail("1: driverWait != 4000");
+        if (c.ebrWaitNs != 3000u) fail("1: ebrWait != 3000");
+        if (c.execWaitNs != 1000u) fail("1: execWait != 1000");
+        if (c.unclassifiedNs != 0u) fail("1: unclassified != 0");
+        const std::uint64_t total = 9000u - 1000u;
+        if (c.driverWaitNs + c.ebrWaitNs + c.execWaitNs + c.unclassifiedNs != total)
+            fail("1: composition != latency");
+    }
+
+    // (2) firstScanTs 未設定 → unclassified は latency 全額
+    {
+        const auto c = Rec::classifyTimes (1000u, 0u, 8000u, 9000u);
+
+        if (c.classified) fail("2: must not be classified");
+        if (c.unclassifiedNs != 8000u) fail("2: unclassified must be the full latency");
+    }
+
+    // (3) safeTs 未観測 → 分類対象外
+    {
+        const auto c = Rec::classifyTimes (1000u, 5000u, 0u, 9000u);
+
+        if (! c.excluded) fail("3: must be excluded");
+        if (c.classified) fail("3: excluded must not be classified");
+    }
+
+    // (4) firstScanTs < ts → 不整合
+    {
+        const auto c = Rec::classifyTimes (5000u, 1000u, 8000u, 9000u);
+
+        if (! c.inconsistent) fail("4: must be inconsistent");
+        if (c.unclassifiedNs != 4000u) fail("4: unclassified must be the full latency");
+    }
+
+    // (5) safeTs < firstScanTs → 不整合
+    {
+        const auto c = Rec::classifyTimes (1000u, 6000u, 5000u, 9000u);
+
+        if (! c.inconsistent) fail("5: must be inconsistent");
+        if (c.unclassifiedNs != 8000u) fail("5: unclassified must be the full latency");
+    }
+
+    // (5b) safeTs < ts（安全時刻が要求より前）も不整合として拾う
+    {
+        const auto c = Rec::classifyTimes (5000u, 5000u, 4000u, 9000u);
+
+        if (! c.inconsistent) fail("5b: safeTs < ts must be inconsistent");
+        if (c.excluded) fail("5b: safeTs < ts must not be treated as excluded");
+    }
+
+    // (6) 実観測での合成（実キューの reclaim 経路を通ったもの）
+    {
+        const auto snap = Rec::instance().snapshot();
+        std::uint64_t withFirstScan = 0;
+        std::uint64_t classifiedObs = 0;
+        std::uint64_t compositionErrors = 0;
+
+        for (const auto& o : snap.observations)
+        {
+            if (o.safeTsNs == 0)
+                continue;
+            if (o.firstScanTsNs == 0)
+                continue;                  // 未走査（drainAll）は対象外
+
+            ++withFirstScan;
+
+            if (o.classified == 1u)
+            {
+                ++classifiedObs;
+                const std::uint64_t sum = o.driverWaitNs + o.ebrWaitNs + o.execWaitNs + o.unclassifiedNs;
+
+                if (sum != o.latencyNs)
+                    ++compositionErrors;
+            }
+        }
+
+        std::printf("  CLS6: observations_with_firstScan=%llu classified=%llu compositionErrors=%llu\n",
+                    static_cast<unsigned long long>(withFirstScan),
+                    static_cast<unsigned long long>(classifiedObs),
+                    static_cast<unsigned long long>(compositionErrors));
+
+        if (withFirstScan == 0) fail("6: firstScanTs is never recorded (queue hook missing)");
+        if (classifiedObs == 0) fail("6: no classified observation");
+        if (compositionErrors != 0) fail("6: composition mismatch in real observations");
+
+        // 母数分離: classified + unclassified + excluded == completions
+        const auto& tot = snap.classTotals;
+
+        if (tot.classified + tot.unclassified + tot.excluded != tot.completions)
+        {
+            std::fprintf(stderr, "CLS6: counts classified=%llu unclassified=%llu excluded=%llu completions=%llu\n",
+                         static_cast<unsigned long long>(tot.classified),
+                         static_cast<unsigned long long>(tot.unclassified),
+                         static_cast<unsigned long long>(tot.excluded),
+                         static_cast<unsigned long long>(tot.completions));
+            fail("6: classified + unclassified + excluded != completions");
+        }
+    }
+
+    return ok;
+}
+
 int runSTG11EQRetireTests()
 {
     bool ok = true;
@@ -115529,8 +120608,23 @@ int runSTG11EQRetireTests()
         std::fprintf(stderr, "FAIL: D15 phase unwrap contract\n");
         ok = false;
     }
+    if (!checkGate1ProcessIsolation())
+    {
+        std::fprintf(stderr, "FAIL: Gate1 reader-safety process isolation\n");
+        ok = false;
+    }
+    if (!checkRetireDriverContract())
+    {
+        std::fprintf(stderr, "FAIL: stage-1 retire reclaim driver contract\n");
+        ok = false;
+    }
+    if (!checkLatencyClassificationContract())
+    {
+        std::fprintf(stderr, "FAIL: stage-3 latency classification contract\n");
+        ok = false;
+    }
     if (ok)
-        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b)\n");
+        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b/Gate1/Stage1/Stage3)\n");
     return ok ? 0 : 1;
 }
 
@@ -122720,7 +127814,7 @@ int v11FindActiveSlot(convo::EpochDomain& domain) noexcept
 // v11_1: baseline re-entry while registration is open.
 bool checkV11BaselineReentry()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::RCUReader reader(domain);
 
     bool first = false, second = false;
@@ -122740,7 +127834,7 @@ bool checkV11BaselineReentry()
 bool checkV11ProtectionAfterClose()
 {
     v11ResetCounters();
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     convo::RCUReader reader(domain);
 
@@ -122771,7 +127865,7 @@ bool checkV11ProtectionAfterClose()
                          DeletionEntryType::Generic, "v11-harness");
         domain.publishEpoch();                       // new publication advances the epoch
 
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         if (g_v11DeleterCalls != 0)
         {
             std::printf("  v11_3: object freed while the guard was held (calls=%d)\n",
@@ -122780,7 +127874,7 @@ bool checkV11ProtectionAfterClose()
         }
     }
 
-    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
     if (g_v11DeleterCalls != 1 || g_v11LastDeleted != obj)
     {
         std::printf("  v11_4: object not freed after the guard dropped (calls=%d)\n",
@@ -122793,7 +127887,7 @@ bool checkV11ProtectionAfterClose()
 // v11_5: a thread that never registered must not obtain a slot after close.
 bool checkV11NewThreadStillRefused()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     domain.closeReaderRegistration();
 
     std::atomic<int> outcome{99};
@@ -122817,7 +127911,7 @@ bool checkV11NewThreadStillRefused()
 // v11_6: ownership — a foreign thread cannot re-acquire the owner's slot.
 bool checkV11ForeignReacquireRefused()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::RCUReader reader(domain);
 
     int slot = -1;
@@ -122878,7 +127972,7 @@ void v11PayloadDeleter(void* p) noexcept
 // obtain a slot, so nothing pins the epoch); true exercises the re-acquire path.
 V11ConcResult v11RunConcurrency(bool registeredBeforeClose, long long iterations)
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     std::atomic<V11Payload*> world{nullptr};
 
@@ -122948,7 +128042,7 @@ V11ConcResult v11RunConcurrency(bool registeredBeforeClose, long long iterations
         domain.publishEpoch();
 
         const std::size_t residentBefore = store.residentCount();
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         const std::size_t residentAfter = store.residentCount();
         if (residentAfter < residentBefore)
             reclaims.fetch_add(static_cast<long long>(residentBefore - residentAfter),
@@ -122996,7 +128090,7 @@ bool checkV11Concurrency()
 bool checkV11QuarantinePreserved()
 {
     v11ResetCounters();
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     convo::RCUReader reader(domain);
 
@@ -123033,7 +128127,7 @@ bool checkV11QuarantinePreserved()
         store.quarantine(obj, v11TestDeleter, retireEpoch,
                          DeletionEntryType::Generic, "v11-harness-q");
         domain.publishEpoch();
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         protectedWhileActive = (g_v11DeleterCalls == 0);
 
         if (domain.quarantinedReaderCount() != before)
@@ -123044,7 +128138,7 @@ bool checkV11QuarantinePreserved()
         }
     }
 
-    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
     const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
     const bool flagKept = domain.quarantinedReaderCount() == before;
 
@@ -123064,7 +128158,7 @@ bool checkV11QuarantinePreserved()
 // enterReader() in the same call (acquireThreadSlot -> enterReader).
 bool checkV11ReacquireIsSingleShot()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::RCUReader reader(domain);
 
     int slot = -1;
@@ -123097,7 +128191,7 @@ bool checkV11ReacquireIsSingleShot()
 bool checkV11QuarantinePendingTransition()
 {
     v11ResetCounters();
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
     convo::isr::RetireQuarantineStore store;
     convo::RCUReader reader(domain);
 
@@ -123133,11 +128227,11 @@ bool checkV11QuarantinePendingTransition()
         store.quarantine(obj, v11TestDeleter, domain.currentEpoch(),
                          DeletionEntryType::Generic, "v11-11");
         domain.publishEpoch();
-        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+        store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
         protectedWhileActive = (g_v11DeleterCalls == 0);
     }
 
-    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder);
+    store.drain(domain.getMinReaderEpoch(), convo::EpochDomain::isOlder, convo::RetireDomainId::Unknown);
     const bool freed = (g_v11DeleterCalls == 1) && (g_v11LastDeleted == obj);
 
     std::printf("  v11_11: deferred=%d notCountedWhilePending=%d promoted=%d "
@@ -123154,7 +128248,7 @@ bool checkV11QuarantinePendingTransition()
 // must let a reader re-enter - the refusal must not poison the slots that are already held.
 bool checkV11CapacityRefusalRecovers()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
 
     std::array<std::unique_ptr<convo::RCUReader>, convo::EpochDomain::kMaxReaders> readers;
     std::array<std::unique_ptr<convo::RCUReaderGuard>, convo::EpochDomain::kMaxReaders> guards;
@@ -125220,12 +130314,16 @@ int main() {
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <thread>
+
+#include "DspNumericPolicy.h"          // ★ T13: ScopedThreadRole（RT 違反ケース）
 
 #include "audioengine/AtomicAccess.h"
 #include "audioengine/ISRAuthorityClass.h"   // RetireEnqueueResult
 #include "audioengine/ISRRetireRouter.h"
 
 #include "core/IEpochProvider.h"
+#include "core/EpochDomain.h"          // ★ T11: 実 provider（実 DeferredDeletionQueue）で C3 を駆動する
 #include "core/SnapshotCoordinator.h"
 #include "core/SnapshotFactory.h"
 #include "core/SnapshotParams.h"
@@ -125412,6 +130510,12 @@ public:
     static void resetFadeStateAndRetireTarget(SnapshotCoordinator& c) noexcept
     {
         c.resetFadeStateAndRetireTarget();
+    }
+
+    // ★ C2 テスト用: target スロットの現在値（RT 違反時に残っていることの確認に使う）
+    static GlobalSnapshot* targetSlot(SnapshotCoordinator& c) noexcept
+    {
+        return c.m_slots.loadTarget(std::memory_order_acquire);
     }
 };
 } // namespace convo
@@ -126153,9 +131257,530 @@ static bool test_T10_ResetFadeStateAndRetireTarget()
 }
 
 //============================================================================
-// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
+// T11 — completeFade (C3) の要求・完了 1 対 1（2026-11-10 Owner 承認・テスト限定）
+//
+//   C3 は製品経路で到達しないため、既存テストで回帰を担保する。
+//   実 SnapshotCoordinator・実 EpochDomain（実 DeferredDeletionQueue）・実 recorder を使う。
+//   quarantine 経由でも記録が重複しないことを併せて確認する。
 //============================================================================
 
+namespace {
+
+// enqueueRetire を常に拒否する provider（quarantine 移送の検査用）
+class FullQueueEpochProvider final : public convo::EpochDomain
+{
+public:
+    // ★ domain tag (v2.9): テスト用 provider は本番帰属を持たないため Unknown を明示する。
+    FullQueueEpochProvider() : convo::EpochDomain (convo::RetireDomainId::Unknown) {}
+
+    bool enqueueRetire(void*, void (*)(void*), uint64_t) noexcept override { return false; }
+    bool enqueueRetireTyped(void*, void (*)(void*), uint64_t, DeletionEntryType) noexcept override { return false; }
+};
+
+// D/Q/E/T を epoch-gated に drain する
+void drainRetireQueues(convo::EpochDomain& dom, convo::isr::ISRRetireRouter& router) noexcept
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        dom.publishEpoch();
+        router.tryReclaim();
+    }
+}
+
+} // namespace
+
+static bool test_T11_CompleteFadeRecords()
+{
+    std::printf("[T11] completeFade (C3) request/completion 1:1 (real queue)...\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    bool pass = true;
+
+    // --- (1) 正常系: D キューが受領する ---
+    {
+        rec.reset();
+        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        convo::isr::ISRRetireRouter router(dom);
+        convo::SnapshotCoordinator coord(dom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        if (a == nullptr || b == nullptr)
+        {
+            std::printf("  FAIL: SnapshotFactory::create returned null\n");
+            return false;
+        }
+
+        coord.startFade(a, /*fadeSamples=*/100);   // current = a
+        coord.startFade(b, /*fadeSamples=*/100);   // target  = b
+        const auto before = rec.snapshot();
+
+        coord.advanceFade(1000);
+        const bool completed = coord.tryCompleteFade();   // 旧 current (a) を退役 = C3
+        const auto after = rec.snapshot();
+
+        if (! completed)
+        {
+            std::printf("  FAIL: tryCompleteFade did not complete\n");
+            pass = false;
+        }
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL: requests=%llu, expected %llu\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+
+        drainRetireQueues(dom, router);
+        const auto drained = rec.snapshot();
+        if (drained.completions != drained.requests || drained.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL: req=%llu comp=%llu unmatched=%llu\n",
+                        (unsigned long long) drained.requests,
+                        (unsigned long long) drained.completions,
+                        (unsigned long long) drained.unmatchedCompletions);
+            pass = false;
+        }
+        if (drained.cancelled != 0)
+        {
+            std::printf("  FAIL: cancelled=%llu, expected 0\n",
+                        (unsigned long long) drained.cancelled);
+            pass = false;
+        }
+
+        // 後始末は C5 経路（finalizeShutdown → retireCurrentAndTarget）で行う
+        coord.finalizeShutdown(/*timedOut=*/false);
+        drainRetireQueues(dom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (finalize): req=%llu comp=%llu unmatched=%llu\n",
+                        (unsigned long long) fin.requests,
+                        (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions);
+            pass = false;
+        }
+        if (fin.recordMisses != 0)
+        {
+            std::printf("  FAIL: recordMisses=%llu, expected 0\n",
+                        (unsigned long long) fin.recordMisses);
+            pass = false;
+        }
+    }
+
+    // --- (2) queue 失敗 → quarantine 移送: 記録が重複しない ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter frouter(fdom);
+        convo::SnapshotCoordinator fcoord(fdom);
+        fcoord.setRetireSink(&frouter);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        if (a == nullptr || b == nullptr)
+        {
+            std::printf("  FAIL: SnapshotFactory::create returned null (Q case)\n");
+            return false;
+        }
+
+        fcoord.startFade(a, 100);
+        fcoord.startFade(b, 100);
+        const auto before = rec.snapshot();
+        fcoord.advanceFade(1000);
+        const bool completed = fcoord.tryCompleteFade();   // C3 → enqueue 失敗 → Q 移送
+        const auto after = rec.snapshot();
+
+        if (! completed)
+        {
+            std::printf("  FAIL: tryCompleteFade (Q) did not complete\n");
+            pass = false;
+        }
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL (Q): requests=%llu, expected %llu (duplicate record?)\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+
+        drainRetireQueues(fdom, frouter);
+        const auto drained = rec.snapshot();
+        if (drained.completions != drained.requests || drained.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (Q): req=%llu comp=%llu unmatched=%llu\n",
+                        (unsigned long long) drained.requests,
+                        (unsigned long long) drained.completions,
+                        (unsigned long long) drained.unmatchedCompletions);
+            pass = false;
+        }
+    }
+
+    if (pass)
+        std::printf("  PASS: C3 request/completion 1:1, no duplicate record on quarantine\n");
+    return pass;
+}
+
+//============================================================================
+// T12 — finalizeShutdown が current と target の両方を記録する（C5 の 2 か所）
+//
+//   fade 完了前に finalizeShutdown を呼ぶと、current と target の両方が
+//   retireCurrentAndTarget() で退役する。要求 2 件・完了 2 件を確認する。
+//============================================================================
+static bool test_T12_FinalizeRetiresTargetAndCurrent()
+{
+    std::printf("[T12] finalizeShutdown retires current + target (C5 both sites)...\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    bool pass = true;
+
+    rec.reset();
+    convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+    convo::isr::ISRRetireRouter router(dom);
+    convo::SnapshotCoordinator coord(dom);
+    coord.setRetireSink(&router);
+
+    auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+    if (a == nullptr || b == nullptr)
+    {
+        std::printf("  FAIL: SnapshotFactory::create returned null\n");
+        return false;
+    }
+
+    coord.startFade(a, /*fadeSamples=*/100);   // current = a
+    coord.startFade(b, /*fadeSamples=*/100);   // target  = b（fade は完了させない）
+    const auto before = rec.snapshot();
+
+    coord.finalizeShutdown(/*timedOut=*/false);   // current=a と target=b を退役
+    const auto after = rec.snapshot();
+
+    if (after.requests != before.requests + 2)
+    {
+        std::printf("  FAIL: requests=%llu, expected %llu (current+target)\n",
+                    (unsigned long long) after.requests,
+                    (unsigned long long) (before.requests + 2));
+        pass = false;
+    }
+
+    drainRetireQueues(dom, router);
+    const auto fin = rec.snapshot();
+    if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+    {
+        std::printf("  FAIL: req=%llu comp=%llu unmatched=%llu\n",
+                    (unsigned long long) fin.requests,
+                    (unsigned long long) fin.completions,
+                    (unsigned long long) fin.unmatchedCompletions);
+        pass = false;
+    }
+    if (fin.recordMisses != 0)
+    {
+        std::printf("  FAIL: recordMisses=%llu, expected 0\n",
+                    (unsigned long long) fin.recordMisses);
+        pass = false;
+    }
+
+    if (pass)
+        std::printf("  PASS: current + target retired, request/completion 2:2, unmatched 0\n");
+    return pass;
+}
+
+//============================================================================
+// T13 — C2 (resetFadeStateAndRetireTarget) Non-RT 専用化（2026-11-10 Owner 承認）
+//
+//   1. Non-RT 成功: D が受領、要求 1・完了 1
+//   2. Q 移送: enqueue 失敗 → Q が受領、要求 1・完了 1（Q drain 後）
+//   3. Q 満杯 → E が受領（所有権の重複なし）
+//   4. Q/E 満杯 → T が受領（所有権の重複なし）
+//   5. RT 違反: target・fade 状態・所有権・記録を変更しない（target が slot に残る）
+//   6. RT 違反後の Non-RT 再呼出し: 正常退役（要求 1・完了 1）
+//   7. 二重呼出し: 二重移送・二重記録なし
+//============================================================================
+
+namespace {
+
+void fillQuarantine(convo::isr::ISRRetireRouter& router, int n, uint64_t epoch) noexcept
+{
+    static int dummy = 0;
+    for (int i = 0; i < n; ++i)
+        (void) router.quarantineRetire(&dummy, +[](void*) noexcept {}, epoch,
+                                       DeletionEntryType::Generic, "t13-fill");
+}
+
+void fillEmergency(convo::isr::ISRRetireRouter& router, int n, uint64_t epoch) noexcept
+{
+    static int dummy2 = 0;
+    for (int i = 0; i < n; ++i)
+        (void) router.emergencyQuarantine(&dummy2, +[](void*) noexcept {}, epoch,
+                                          DeletionEntryType::Generic, "t13-fill", 0, 0);
+}
+
+} // namespace
+
+static bool test_T13_C2NonRtOnly()
+{
+    std::printf("[T13] C2 Non-RT only: success/Q/E/T/RT-violation/double-call...\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    bool pass = true;
+    const auto rtBefore = convo::SnapshotCoordinator::rtViolationCount();
+
+    // --- (1) Non-RT 成功 ---
+    {
+        rec.reset();
+        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        convo::isr::ISRRetireRouter router(dom);
+        convo::SnapshotCoordinator coord(dom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);            // target = b
+
+        const auto before = rec.snapshot();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto after = rec.snapshot();
+
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL (success): requests=%llu expected %llu\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+        if (convo::SnapshotCoordinatorTestAccess::targetSlot(coord) != nullptr)
+        {
+            std::printf("  FAIL (success): target slot not cleared\n");
+            pass = false;
+        }
+        drainRetireQueues(dom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0 || fin.cancelled != 0)
+        {
+            std::printf("  FAIL (success): req=%llu comp=%llu un=%llu cancelled=%llu\n",
+                        (unsigned long long) fin.requests, (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions, (unsigned long long) fin.cancelled);
+            pass = false;
+        }
+        coord.finalizeShutdown(false);
+        drainRetireQueues(dom, router);
+    }
+
+    // --- (2) Q 移送 ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter router(fdom);
+        convo::SnapshotCoordinator coord(fdom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto before = rec.snapshot();
+        const auto qBefore = router.quarantineResidentCount();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto after = rec.snapshot();
+        const auto qAfter = router.quarantineResidentCount();
+
+        if (qAfter != qBefore + 1)
+        {
+            std::printf("  FAIL (Q): quarantine resident %zu → %zu\n", qBefore, qAfter);
+            pass = false;
+        }
+        if (after.requests != before.requests + 1)
+        {
+            std::printf("  FAIL (Q): requests=%llu expected %llu\n",
+                        (unsigned long long) after.requests,
+                        (unsigned long long) (before.requests + 1));
+            pass = false;
+        }
+        drainRetireQueues(fdom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (Q): req=%llu comp=%llu un=%llu\n",
+                        (unsigned long long) fin.requests, (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions);
+            pass = false;
+        }
+    }
+
+    // --- (3) Q 満杯 → E ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter router(fdom);
+        convo::SnapshotCoordinator coord(fdom);
+        coord.setRetireSink(&router);
+
+        const uint64_t keepEpoch = fdom.currentEpoch();
+        fillQuarantine(router, 512, keepEpoch);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto eBefore = router.emergencyQuarantineResidentCount();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto eAfter = router.emergencyQuarantineResidentCount();
+
+        if (eAfter != eBefore + 1)
+        {
+            std::printf("  FAIL (Q→E): emergency resident %zu → %zu\n", eBefore, eAfter);
+            pass = false;
+        }
+        router.drainAllQuarantineStore();   // 後始末（noop deleter）
+    }
+
+    // --- (4) Q/E 満杯 → T ---
+    {
+        rec.reset();
+        FullQueueEpochProvider fdom;
+        convo::isr::ISRRetireRouter router(fdom);
+        convo::SnapshotCoordinator coord(fdom);
+        coord.setRetireSink(&router);
+
+        const uint64_t keepEpoch = fdom.currentEpoch();
+        fillQuarantine(router, 512, keepEpoch);
+        fillEmergency(router, 512, keepEpoch);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto tBefore = router.terminalReclaimResidentCount();
+        const auto syncBefore = rec.snapshot().paths[
+            static_cast<std::size_t>(convo::isr::RetireLatencyRecorder::Path::Sync)].count;
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto tAfter = router.terminalReclaimResidentCount();
+        const auto syncAfter = rec.snapshot().paths[
+            static_cast<std::size_t>(convo::isr::RetireLatencyRecorder::Path::Sync)].count;
+
+        // T は epoch 安全なら同期破棄する（resident は増えない）。どちらでも所有権は T。
+        if (tAfter != tBefore + 1 && syncAfter != syncBefore + 1)
+        {
+            std::printf("  FAIL (Q/E->T): terminal resident %zu -> %zu, sync %llu -> %llu\n",
+                        tBefore, tAfter, (unsigned long long) syncBefore, (unsigned long long) syncAfter);
+            pass = false;
+        }
+        router.drainAllQuarantineStore();
+    }
+
+    // --- (5) RT 違反: 状態を変更しない ---
+    {
+        rec.reset();
+        convo::EpochDomain dom(convo::RetireDomainId::Unknown);
+        convo::isr::ISRRetireRouter router(dom);
+        convo::SnapshotCoordinator coord(dom);
+        coord.setRetireSink(&router);
+
+        auto* a = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        auto* b = convo::SnapshotFactory::create(convo::SnapshotParams{});
+        coord.startFade(a, 100);
+        coord.startFade(b, 100);
+
+        const auto before = rec.snapshot();
+        const auto* targetBefore = convo::SnapshotCoordinatorTestAccess::targetSlot(coord);
+        const bool fadingBefore = coord.isFading();
+        const auto qBefore = router.quarantineResidentCount();
+
+        std::thread rt([&coord]
+        {
+            convo::numeric_policy::ScopedThreadRole role(convo::numeric_policy::ThreadRole::AudioRealtime);
+            convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        });
+        rt.join();
+
+        const auto after = rec.snapshot();
+        const auto* targetAfter = convo::SnapshotCoordinatorTestAccess::targetSlot(coord);
+
+        if (convo::SnapshotCoordinator::rtViolationCount() != rtBefore + 1)
+        {
+            std::printf("  FAIL (RT): rtViolationCount=%llu expected %llu\n",
+                        (unsigned long long) convo::SnapshotCoordinator::rtViolationCount(),
+                        (unsigned long long) (rtBefore + 1));
+            pass = false;
+        }
+        if (targetAfter != targetBefore || targetAfter == nullptr)
+        {
+            std::printf("  FAIL (RT): target slot changed (before=%p after=%p)\n",
+                        (const void*) targetBefore, (const void*) targetAfter);
+            pass = false;
+        }
+        if (coord.isFading() != fadingBefore)
+        {
+            std::printf("  FAIL (RT): fade state changed\n");
+            pass = false;
+        }
+        if (after.requests != before.requests || after.completions != before.completions)
+        {
+            std::printf("  FAIL (RT): record changed (req %llu→%llu comp %llu→%llu)\n",
+                        (unsigned long long) before.requests, (unsigned long long) after.requests,
+                        (unsigned long long) before.completions, (unsigned long long) after.completions);
+            pass = false;
+        }
+        if (router.quarantineResidentCount() != qBefore)
+        {
+            std::printf("  FAIL (RT): quarantine resident changed\n");
+            pass = false;
+        }
+
+        // --- (6) RT 違反後の Non-RT 再呼出し ---
+        const auto before2 = rec.snapshot();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);
+        const auto after2 = rec.snapshot();
+        if (after2.requests != before2.requests + 1)
+        {
+            std::printf("  FAIL (RT→NonRT): requests=%llu expected %llu\n",
+                        (unsigned long long) after2.requests,
+                        (unsigned long long) (before2.requests + 1));
+            pass = false;
+        }
+        if (convo::SnapshotCoordinatorTestAccess::targetSlot(coord) != nullptr)
+        {
+            std::printf("  FAIL (RT→NonRT): target not retired\n");
+            pass = false;
+        }
+        drainRetireQueues(dom, router);
+        const auto fin = rec.snapshot();
+        if (fin.completions != fin.requests || fin.unmatchedCompletions != 0)
+        {
+            std::printf("  FAIL (RT→NonRT): req=%llu comp=%llu un=%llu\n",
+                        (unsigned long long) fin.requests, (unsigned long long) fin.completions,
+                        (unsigned long long) fin.unmatchedCompletions);
+            pass = false;
+        }
+
+        // --- (7) 二重呼出し ---
+        const auto before3 = rec.snapshot();
+        convo::SnapshotCoordinatorTestAccess::resetFadeStateAndRetireTarget(coord);   // 2 回目
+        const auto after3 = rec.snapshot();
+        if (after3.requests != before3.requests)
+        {
+            std::printf("  FAIL (double): requests incremented on empty target (%llu → %llu)\n",
+                        (unsigned long long) before3.requests, (unsigned long long) after3.requests);
+            pass = false;
+        }
+        coord.finalizeShutdown(false);
+        drainRetireQueues(dom, router);
+    }
+
+    if (pass)
+        std::printf("  PASS: Non-RT only contract, Q/E/T chain, RT violation keeps state\n");
+    return pass;
+}
+
+//============================================================================
+// main — test runner (mirrors RetireGraceSemanticsTests.cpp pattern)
+//============================================================================
 int main()
 {
     bool ok = true;
@@ -126167,6 +131792,9 @@ int main()
     ok &= test_T7_SnapshotOwnershipConservation();
     ok &= test_T8_RouterOwnershipConservation();
     ok &= test_T10_ResetFadeStateAndRetireTarget();
+    ok &= test_T11_CompleteFadeRecords();
+    ok &= test_T12_FinalizeRetiresTargetAndCurrent();
+    ok &= test_T13_C2NonRtOnly();
 
     if (ok)
     {
@@ -126182,6 +131810,9 @@ int main()
         std::printf("  T6  DEFERRED (no production Shutdown path)\n");
         std::printf("  T9  DEFERRED (source audit only)\n");
         std::printf("  T10 resetFadeStateAndRetireTarget  PASS (direct call, T10-c unobservable)\n");
+        std::printf("  T11 completeFade (C3) record 1:1  PASS (real queue + quarantine)\n");
+        std::printf("  T12 finalizeShutdown current+target  PASS (C5 both sites)\n");
+        std::printf("  T13 C2 Non-RT only (Q/E/T + RT)      PASS\n");
         std::printf("========================================\n");
         return 0;
     }
@@ -126351,9 +131982,9 @@ bool testBasicEnqueueReclaim()
     TrackedObject obj1(1), obj2(2), obj3(3);
 
     // 同一 epoch (1) で 3 エントリ enqueue
-    checkTrue("basic: enqueue 1", queue.enqueue(&obj1, dummyDeleter, 1));
-    checkTrue("basic: enqueue 2", queue.enqueue(&obj2, dummyDeleter, 1));
-    checkTrue("basic: enqueue 3", queue.enqueue(&obj3, dummyDeleter, 1));
+    checkTrue("basic: enqueue 1", queue.enqueue(&obj1, dummyDeleter, 1, convo::RetireDomainId::Unknown));
+    checkTrue("basic: enqueue 2", queue.enqueue(&obj2, dummyDeleter, 1, convo::RetireDomainId::Unknown));
+    checkTrue("basic: enqueue 3", queue.enqueue(&obj3, dummyDeleter, 1, convo::RetireDomainId::Unknown));
 
     // epoch=1 より古い minReaderEpoch=2 で reclaim → 全件回収されるはず
     uint32_t reclaimed = queue.reclaim(2);
@@ -126379,9 +132010,9 @@ bool testFifoOrder()
 
     TrackedObject obj1(1), obj2(2), obj3(3);
 
-    queue.enqueue(&obj1, dummyDeleter, 1);
-    queue.enqueue(&obj2, dummyDeleter, 1);
-    queue.enqueue(&obj3, dummyDeleter, 1);
+    queue.enqueue(&obj1, dummyDeleter, 1, convo::RetireDomainId::Unknown);
+    queue.enqueue(&obj2, dummyDeleter, 1, convo::RetireDomainId::Unknown);
+    queue.enqueue(&obj3, dummyDeleter, 1, convo::RetireDomainId::Unknown);
 
     // epoch=1 より古い minReaderEpoch=2 で reclaim
     uint32_t reclaimed = queue.reclaim(2);
@@ -126405,8 +132036,8 @@ bool testMixedEpochReclaim()
 
     TrackedObject oldObj(1), newObj(2);
 
-    queue.enqueue(&oldObj, dummyDeleter, 1);  // epoch=1
-    queue.enqueue(&newObj, dummyDeleter, 5);  // epoch=5
+    queue.enqueue(&oldObj, dummyDeleter, 1, convo::RetireDomainId::Unknown);  // epoch=1
+    queue.enqueue(&newObj, dummyDeleter, 5, convo::RetireDomainId::Unknown);  // epoch=5
 
     // minReaderEpoch=3 → epoch=1 は回収可能、epoch=5 は回収不可（先頭ブロッキング）
     uint32_t reclaimed = queue.reclaim(3);
@@ -126441,8 +132072,8 @@ bool testHeadBlocking()
 
     TrackedObject blocker(1), blocked(2);
 
-    queue.enqueue(&blocker, dummyDeleter, 10); // epoch=10（新しい）
-    queue.enqueue(&blocked, dummyDeleter, 1);  // epoch=1（古いが後ろ） ← 逆転！
+    queue.enqueue(&blocker, dummyDeleter, 10, convo::RetireDomainId::Unknown); // epoch=10（新しい）
+    queue.enqueue(&blocked, dummyDeleter, 1, convo::RetireDomainId::Unknown);  // epoch=1（古いが後ろ） ← 逆転！
 
     // minReaderEpoch=5 → blocker(epoch=10) が先頭で回収不可
     // ★ 現状の実装: else 節 → !canDelete → break。blocked は後続にいるが回収されない
@@ -126473,7 +132104,7 @@ bool testReclaimCountAccuracy()
     objs.reserve(100);
     for (int i = 0; i < 100; ++i) {
         auto obj = std::make_unique<TrackedObject>(i);
-        queue.enqueue(obj.get(), dummyDeleter, 1);
+        queue.enqueue(obj.get(), dummyDeleter, 1, convo::RetireDomainId::Unknown);
         objs.push_back(std::move(obj));
     }
 
@@ -126498,8 +132129,8 @@ bool testReclaimCountAccuracy()
 
     // さらに追加して部分回収（スタック変数、get() 不使用）
     TrackedObject partial1(200), partial2(201);
-    queue.enqueue(&partial1, dummyDeleter, 1);
-    queue.enqueue(&partial2, dummyDeleter, 10); // 新しい
+    queue.enqueue(&partial1, dummyDeleter, 1, convo::RetireDomainId::Unknown);
+    queue.enqueue(&partial2, dummyDeleter, 10, convo::RetireDomainId::Unknown); // 新しい
 
     reclaimed = queue.reclaim(5);
     checkEq("count: partial reclaim (only old)", 1, reclaimed);
@@ -126526,7 +132157,7 @@ bool testEmptyQueueReclaim()
 
     // 空キューに enqueue して即 reclaim
     TrackedObject obj(1);
-    queue.enqueue(&obj, dummyDeleter, 1);
+    queue.enqueue(&obj, dummyDeleter, 1, convo::RetireDomainId::Unknown);
     reclaimed = queue.reclaim(2);
     checkEq("empty: single then reclaim", 1, reclaimed);
 
@@ -126597,7 +132228,7 @@ MpmcEpochInversionResult testMpmcEpochInversion(int numProducers,
                 uint64_t epoch = static_cast<uint64_t>(p * epochSpread + i);
                 queue.enqueue(obj, [](void* ptr) {
                     delete static_cast<TrackedObject*>(ptr);
-                }, epoch);
+                }, epoch, convo::RetireDomainId::Unknown);
             }
         });
     }
@@ -126747,7 +132378,7 @@ void runStressTest(int durationMs)
                 uint64_t epoch = baseEpoch + counter;
                 if (queue.enqueue(obj, [](void* ptr) {
                         delete static_cast<TrackedObject*>(ptr);
-                    }, epoch)) {
+                    }, epoch, convo::RetireDomainId::Unknown)) {
                     convo::fetchAddAtomic(result.totalEnqueued, uint64_t{1}, std::memory_order_release);
                 } else {
                     delete obj;
@@ -126850,7 +132481,7 @@ bool testMaxScanBudget()
     objs.reserve(kNumEntries);
     for (int i = 0; i < kNumEntries; ++i) {
         auto obj = std::make_unique<TrackedObject>(i);
-        queue.enqueue(obj.get(), dummyDeleter, 1);
+        queue.enqueue(obj.get(), dummyDeleter, 1, convo::RetireDomainId::Unknown);
         objs.push_back(std::move(obj));
     }
 
@@ -126876,7 +132507,7 @@ void testReclaimPerformance()
     objs.reserve(kNumEntries);
     for (int i = 0; i < kNumEntries; ++i) {
         auto obj = std::make_unique<TrackedObject>(i);
-        queue.enqueue(obj.get(), dummyDeleter, 1);
+        queue.enqueue(obj.get(), dummyDeleter, 1, convo::RetireDomainId::Unknown);
         objs.push_back(std::move(obj));
     }
 
@@ -126938,6 +132569,314 @@ int main()
     std::cout << "==============================================" << std::endl;
 
     return g_failCount > 0 ? 1 : 0;
+}
+
+```
+
+### 📄 `src\tests\DomainTagTests.cpp`
+
+```
+//==============================================================================
+// DomainTagTests.cpp
+//
+// domain tag 設計差分 v2.9 の §7.2 検証のうち、レコーダ／型の契約を単体で固定する。
+//   #15-a 値域制約（共通変換ロジック）
+//   #15-b Release の実 ctor（不正値 → Unknown・カウンタ +1・停止しない）
+//   #15-c Debug の実 ctor（--assert-probe 指定時。デバッガ接続時のみブレーク）
+//   #6/#8/#13 ドメイン別集計の不変条件・Unknown の非混入・未刻印の不在
+//   #9  retireLatencyD1 の互換（閾値・パス数の固定）
+//   #10 サイズ・型（DeferredDeletionQueue.h の static_assert と一致）
+//
+// ビルド: CMakeLists.txt の DomainTagTests ターゲット（JUCE 非依存）。
+//==============================================================================
+
+#include "core/RetireDomain.h"
+#include "core/EpochDomain.h"
+#include "DeferredDeletionQueue.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <type_traits>
+
+#if defined (_WIN32)
+    #include <windows.h>
+#endif
+
+namespace
+{
+int g_failures = 0;
+
+void check (bool cond, const char* what)
+{
+    std::printf ("  %s: %s\n", cond ? "ok  " : "FAIL", what);
+
+    if (! cond)
+        ++g_failures;
+}
+
+std::uint64_t nowNs()
+{
+    using namespace std::chrono;
+    return static_cast<std::uint64_t> (
+        duration_cast<nanoseconds> (steady_clock::now().time_since_epoch()).count());
+}
+
+// #15-c 用: 実 ctor に不正値を渡し、SEH で捕捉できるかを見る
+bool g_caught = false;
+unsigned long g_code = 0;
+
+void constructInvalidInSeh()
+{
+    // EpochDomain は仮想デストラクタを持つため、自動変数として __try 内に置くと C2712 になる。
+    // 静的ストレージへ placement new して、巻き戻し対象のオブジェクトを作らない。
+    alignas (convo::EpochDomain) static unsigned char storage[sizeof (convo::EpochDomain)];
+
+    __try
+    {
+        ::new (static_cast<void*> (storage)) convo::EpochDomain (convo::RetireDomainId::Count);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        g_caught = true;
+        g_code = GetExceptionCode();
+    }
+}
+
+void testValueRange()   // #15-a
+{
+    std::printf ("[#15-a] 値域制約（共通変換ロジック）\n");
+
+    check (convo::EpochDomain::isAssignableDomain (convo::RetireDomainId::Unknown), "Unknown is assignable");
+    check (convo::EpochDomain::isAssignableDomain (convo::RetireDomainId::EngineISR), "EngineISR is assignable");
+    check (convo::EpochDomain::isAssignableDomain (convo::RetireDomainId::EQ), "EQ is assignable");
+    check (! convo::EpochDomain::isAssignableDomain (convo::RetireDomainId::Unstamped), "Unstamped is not assignable");
+    check (! convo::EpochDomain::isAssignableDomain (convo::RetireDomainId::Count), "Count is not assignable");
+    check (! convo::EpochDomain::isAssignableDomain (static_cast<convo::RetireDomainId> (5)), "5 is not assignable");
+    check (! convo::EpochDomain::isAssignableDomain (static_cast<convo::RetireDomainId> (255)), "255 is not assignable");
+
+    check (convo::EpochDomain::sanitizeDomain (static_cast<convo::RetireDomainId> (5))
+               == convo::RetireDomainId::Unknown, "sanitize(5) == Unknown");
+    check (convo::EpochDomain::sanitizeDomain (convo::RetireDomainId::Unstamped)
+               == convo::RetireDomainId::Unknown, "sanitize(Unstamped) == Unknown");
+    check (convo::EpochDomain::sanitizeDomain (convo::RetireDomainId::EQ)
+               == convo::RetireDomainId::EQ, "sanitize(EQ) == EQ");
+}
+
+void testConstructorContract()   // #15-b（Release の実 ctor。Debug でも同じ結果になる）
+{
+    std::printf ("[#15-b] 実 ctor の値域契約\n");
+
+    const auto base = convo::EpochDomain::invalidDomainAssignments();
+
+    // EpochDomain は 4096 エントリのキューを内包し 1 個で約 230 KB。スタックに複数置かない。
+    auto engine = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EngineISR);
+    auto eq = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::EQ);
+    auto unknown = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unknown);
+    check (engine->domainId() == convo::RetireDomainId::EngineISR, "EngineISR adopted");
+    check (eq->domainId() == convo::RetireDomainId::EQ, "EQ adopted");
+    check (unknown->domainId() == convo::RetireDomainId::Unknown, "Unknown adopted");
+    check (convo::EpochDomain::invalidDomainAssignments() == base, "valid values do not bump the counter");
+
+    // 不正値は「採用しない」。Debug では assertion が走るため、ここは Release でのみ実行する。
+#if defined (NDEBUG)
+    auto bad5 = std::make_unique<convo::EpochDomain> (static_cast<convo::RetireDomainId> (5));
+    auto badCount = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Count);
+    auto badUnstamped = std::make_unique<convo::EpochDomain> (convo::RetireDomainId::Unstamped);
+
+    check (bad5->domainId() == convo::RetireDomainId::Unknown, "5 falls back to Unknown");
+    check (badCount->domainId() == convo::RetireDomainId::Unknown, "Count falls back to Unknown");
+    check (badUnstamped->domainId() == convo::RetireDomainId::Unknown, "Unstamped falls back to Unknown");
+    check (convo::EpochDomain::invalidDomainAssignments() == base + 3, "counter +3 for invalid values");
+    check (bad5->domainId() != convo::RetireDomainId::EngineISR
+               && bad5->domainId() != convo::RetireDomainId::EQ, "invalid value never becomes a real domain");
+#else
+    std::printf ("  (skip: Debug では assertion が走るため、不正値の生成は --assert-probe で行う)\n");
+#endif
+}
+
+void testRecorderInvariants()   // #6 / #8 / #13
+{
+    std::printf ("[#6/#8/#13] ドメイン別集計の不変条件\n");
+
+    auto& rec = convo::isr::RetireLatencyRecorder::instance();
+    rec.reset();
+
+    // ドメイン別に 4 完了を作る（EngineISR=classified, EQ=excluded, Unknown=unclassified, Unstamped=excluded）
+    static int objs[4];
+
+    struct Case { int* obj; convo::RetireDomainId domain; convo::isr::RetireLatencyRecorder::Path path; int mode; };
+    const Case cases[] = {
+        { &objs[0], convo::RetireDomainId::EngineISR, convo::isr::RetireLatencyRecorder::Path::Queue,      2 },
+        { &objs[1], convo::RetireDomainId::EQ,        convo::isr::RetireLatencyRecorder::Path::Drain,      0 },
+        { &objs[2], convo::RetireDomainId::Unknown,   convo::isr::RetireLatencyRecorder::Path::Sync,       1 },
+        { &objs[3], convo::RetireDomainId::Unstamped, convo::isr::RetireLatencyRecorder::Path::Quarantine, 0 },
+    };
+
+    for (const auto& c : cases)
+    {
+        rec.recordRequest (c.obj, 1);
+        std::uint64_t firstScan = 0;
+
+        if (c.mode >= 1)
+        {
+            const std::uint64_t t = nowNs();
+            rec.recordSafe (c.obj);
+            if (c.mode == 2)
+                firstScan = t;
+        }
+
+        rec.recordComplete (c.obj, c.path, c.domain, firstScan);
+    }
+
+    const auto snap = rec.snapshot();
+    const auto& tot = snap.classTotals;
+
+    std::uint64_t sumCount = 0, sumClassified = 0, sumUnclassified = 0, sumExcluded = 0, sumConsistency = 0;
+
+    for (int d = 0; d < convo::kRetireDomainCount; ++d)
+    {
+        sumCount += snap.domains[d].count;
+        sumClassified += snap.domains[d].classified;
+        sumUnclassified += snap.domains[d].unclassified;
+        sumExcluded += snap.domains[d].excluded;
+        sumConsistency += snap.domains[d].consistencyErrors;
+    }
+
+    check (sumCount == tot.completions, "sum(domains.count) == totals.completions");
+    check (sumClassified == tot.classified, "sum(domains.classified) == totals.classified");
+    check (sumUnclassified == tot.unclassified, "sum(domains.unclassified) == totals.unclassified");
+    check (sumExcluded == tot.excluded, "sum(domains.excluded) == totals.excluded");
+    check (sumConsistency == tot.consistencyErrors, "sum(domains.consistencyErrors) == totals.consistencyErrors");
+    check (tot.classified + tot.unclassified + tot.excluded == tot.completions,
+           "classified + unclassified + excluded == completions");
+
+    // 原因の分離
+    check (snap.domains[static_cast<int> (convo::RetireDomainId::Unstamped)].count == snap.stampMissing,
+           "domains[Unstamped].count == stampMissing");
+    check (snap.domains[static_cast<int> (convo::RetireDomainId::Unknown)].count
+               == snap.providerUnknown + snap.providerAbsent,
+           "domains[Unknown].count == providerUnknown + providerAbsent");
+    check (snap.providerAbsent == 0, "providerAbsent == 0 (防御的・到達不能)");
+
+    // Unknown の非混入（EngineISR / EQ はそれぞれ 1 件だけ）
+    check (snap.domains[static_cast<int> (convo::RetireDomainId::EngineISR)].count == 1,
+           "EngineISR count == 1 (Unknown が混入していない)");
+    check (snap.domains[static_cast<int> (convo::RetireDomainId::EQ)].count == 1,
+           "EQ count == 1 (Unknown が混入していない)");
+    check (snap.stampMissing == 1, "stampMissing counts the Unstamped completion");
+
+    // パス別の成分も一致するか（JSON の domainSumsConsistent と同じ検査）
+    bool pathSumsOk = true;
+
+    for (std::size_t p = 0; p < convo::isr::RetireLatencyRecorder::kPathCount; ++p)
+    {
+        std::uint64_t driver = 0, ebr = 0, exec = 0, unclassified = 0, excluded = 0;
+
+        for (int d = 0; d < convo::kRetireDomainCount; ++d)
+        {
+            driver += snap.domains[d].paths[p].driverWait.count;
+            ebr += snap.domains[d].paths[p].ebrWait.count;
+            exec += snap.domains[d].paths[p].execWait.count;
+            unclassified += snap.domains[d].paths[p].unclassifiedCount;
+            excluded += snap.domains[d].paths[p].excludedCount;
+        }
+
+        if (driver != snap.classifiedPaths[p].driverWait.count
+            || ebr != snap.classifiedPaths[p].ebrWait.count
+            || exec != snap.classifiedPaths[p].execWait.count
+            || unclassified != snap.classifiedPaths[p].unclassifiedCount
+            || excluded != snap.classifiedPaths[p].excludedCount)
+            pathSumsOk = false;
+    }
+
+    check (pathSumsOk, "Σ domains[].paths[p].<component> == paths[p].<component>");
+    check (snap.domains[static_cast<int> (convo::RetireDomainId::EngineISR)].classified == 1,
+           "EngineISR classified == 1");
+}
+
+void testCompatibilityAndSizes()   // #9 / #10
+{
+    std::printf ("[#9/#10] 既存互換とサイズ\n");
+
+    static_assert (convo::isr::RetireLatencyRecorder::kThresholdNs == 50'000'000ull,
+                   "50 ms 閾値は変更しない");
+    static_assert (static_cast<int> (convo::isr::RetireLatencyRecorder::Path::Count) == 6,
+                   "パス数は 6 のまま（キー構造の互換）");
+    check (true, "kThresholdNs == 50 ms / Path::Count == 6 (static_assert)");
+
+    check (sizeof (convo::RetireDomainId) == 1, "sizeof(RetireDomainId) == 1");
+    check (sizeof (DeletionEntry) == (sizeof (void*) == 8 ? 56u : 0u)
+               || sizeof (DeletionEntry) == 64u, "sizeof(DeletionEntry) is 56 or 64 (構成で異なる)");
+    check (alignof (DeletionEntry) == 8, "alignof(DeletionEntry) == 8");
+    check (std::is_trivially_copyable_v<DeletionEntry>, "DeletionEntry is trivially copyable");
+    check (std::is_trivially_destructible_v<DeletionEntry>, "DeletionEntry is trivially destructible");
+}
+
+int runAssertProbe()   // #15-c
+{
+    const bool underDebugger =
+#if defined (_WIN32)
+        ::IsDebuggerPresent() != FALSE;
+#else
+        false;
+#endif
+
+    std::printf ("[#15-c] 実 ctor の assertion（%s）\n",
+                 underDebugger ? "デバッガ接続" : "デバッガ非接続");
+
+    const auto base = convo::EpochDomain::invalidDomainAssignments();
+    constructInvalidInSeh();
+
+#if defined (NDEBUG)
+    // Release: assertion は無効。ブレークしない。
+    check (! g_caught, "Release: no break");
+    check (convo::EpochDomain::invalidDomainAssignments() == base + 1, "Release: counter +1");
+#else
+    if (underDebugger)
+    {
+        std::printf ("       exception code = 0x%08lx (EXCEPTION_BREAKPOINT = 0x%08x)\n",
+                     g_code, (unsigned) EXCEPTION_BREAKPOINT);
+        check (g_caught, "Debug + debugger: assertion broke (EXCEPTION_BREAKPOINT caught)");
+        check (g_code == EXCEPTION_BREAKPOINT, "exception code is EXCEPTION_BREAKPOINT");
+        check (convo::EpochDomain::invalidDomainAssignments() == base + 1,
+               "counter was incremented BEFORE the break");
+    }
+    else
+    {
+        // 15-c-1: デバッガ非接続ではブレークしない（JUCE の jassertfalse と同じ条件）
+        check (! g_caught, "Debug + no debugger: no break");
+        check (convo::EpochDomain::invalidDomainAssignments() == base + 1, "counter +1");
+    }
+#endif
+
+    std::printf ("  failures=%d\n%s\n", g_failures, g_failures == 0 ? "PASS" : "FAIL");
+    return g_failures == 0 ? 0 : 1;
+}
+} // namespace
+
+int main (int argc, char** argv)
+{
+    // --assert-probe は引数位置に依存させない（デバッガ経由では結果ファイル等が先に来る）
+    bool assertProbe = false;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp (argv[i], "--assert-probe") == 0)
+            assertProbe = true;
+    }
+
+    if (assertProbe)
+        return runAssertProbe();
+
+    testValueRange();
+    testConstructorContract();
+    testRecorderInvariants();
+    testCompatibilityAndSizes();
+
+    std::printf ("  failures=%d\n%s\n", g_failures, g_failures == 0 ? "PASS" : "FAIL");
+    return g_failures == 0 ? 0 : 1;
 }
 
 ```
@@ -130880,6 +136819,38 @@ private:
 //==============================================================================
 // INV-3-1: retire → epoch 安全 → reclaim の順序
 //==============================================================================
+// ★ 2026-11-08: Q2/Q5/Q6 の是正に伴う共通 observation ビルダー。
+//   Q6 は observation 非依存（ShutdownRuntime 内部カウンタ）になったため設定しない。
+//   Q5 は EpochQuiescenceEvidence（観測束）で渡す。
+//==============================================================================
+[[nodiscard]] convo::isr::ShutdownRuntime::QuiescenceObservation
+makeQuiescentObservation(std::uint64_t epochGen, std::uint64_t regGen,
+                         std::uint32_t activeReaders = 0,
+                         bool registrationClosed = true,
+                         bool evidenceCaptured = true,
+                         std::uint64_t evidenceEpochGen = 0,
+                         std::uint64_t evidenceRegGen = 0)
+{
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
+    obs.admissionReservationsZero = true;
+    obs.allProducersJoined = true;                 // producer 観測（join 済みなら true）
+    obs.readerRegistrationClosed = registrationClosed;
+    obs.activeReadersZero = (activeReaders == 0);
+    obs.noResurrection = true;
+    obs.epochGeneration = epochGen;
+    obs.readerRegistrationGeneration = regGen;
+    obs.epochEvidence.captured = evidenceCaptured;
+    obs.epochEvidence.epoch = epochGen;
+    // 0 は「observation と同じ generation」を意味する省略記法
+    obs.epochEvidence.epochGeneration = (evidenceEpochGen == 0) ? epochGen : evidenceEpochGen;
+    obs.epochEvidence.readerRegistrationGeneration =
+        (evidenceRegGen == 0) ? regGen : evidenceRegGen;
+    obs.epochEvidence.readerRegistrationClosed = registrationClosed;
+    obs.epochEvidence.activeReaders = activeReaders;
+    return obs;
+}
+
+//==============================================================================
 [[nodiscard]] bool testInv3_1RetireEpochSafeReclaim()
 {
     DSPHandleRuntime handleRuntime;
@@ -130993,17 +136964,9 @@ private:
 
     // --- Precondition 不成立: readersZero 不成立（active reader 残存）→ Proof 生成失敗 ---
     auto makeObservation = [&](bool regClosed, std::uint32_t readers) {
-        convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-        obs.admissionReservationsZero = true;
-        obs.allProducersJoined = true;
-        obs.readerRegistrationClosed = regClosed;   // Q3
-        obs.activeReadersZero = (readers == 0);     // Q4
-        obs.epochSettled = true;
-        obs.postStopEnqueueZero = true;
-        obs.noResurrection = true;
-        obs.epochGeneration = 7;
-        obs.readerRegistrationGeneration = 3;
-        return obs;
+        // ★ 2026-11-08: Q5 は EpochQuiescenceEvidence（観測束）、Q6 は authority 内部カウンタ。
+        return makeQuiescentObservation(/*epochGen=*/7, /*regGen=*/3, readers, regClosed,
+                                        /*evidenceCaptured=*/true);
     };
 
     // Q3 不成立（registration 未 close）→ Proof 生成失敗（precondition 前評価）
@@ -131218,7 +137181,7 @@ private:
 //   本テストでは登録封鎖の決定性のみを検証する。
 [[nodiscard]] bool testInvX3_4ReaderRegistrationClosed()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
 
     // close 前: 登録成功
     const int idx = domain.registerReaderThread("X3Test");
@@ -131246,7 +137209,7 @@ private:
 //==============================================================================
 [[nodiscard]] bool testA2G19G20EpochGenerationSupply()
 {
-    convo::EpochDomain domain;
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
 
     const auto gen0 = domain.epochGeneration();
     (void)domain.publishEpoch();
@@ -131270,7 +137233,8 @@ private:
 
 //==============================================================================
 // ★ dash2 §2.2 (Phase A2 — G10/G13/G21/G22): Proof/Permit acceptance テスト
-//   G10: postStopEnqueueZero が Q 条件の一部（observation 経由）
+//   G10: postStopEnqueueZero が Q 条件の一部（2026-11-08 以降は ShutdownRuntime 内部
+//        カウンタで判定 — observation 非依存）
 //   G13: epochSettled が Q 条件の一部
 //   G21: ReclaimPermit::consume() が single-use（2 回目は false）
 //   G22: ShutdownRuntime のみ Proof/Permit を生成可能（外部からは生成不能 = コンパイル不能）
@@ -131290,17 +137254,8 @@ private:
     if (shutdown.admissionState() != convo::isr::AdmissionState::Closed)
         return false;
 
-    // Q 条件を全成立させる観測値
-    ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;
-    obs.allProducersJoined = true;
-    obs.readerRegistrationClosed = true;
-    obs.activeReadersZero = true;
-    obs.epochSettled = true;            // G13
-    obs.postStopEnqueueZero = true;     // G10
-    obs.noResurrection = true;
-    obs.epochGeneration = 7;            // G19
-    obs.readerRegistrationGeneration = 3;  // G20
+    // Q 条件を全成立させる観測値（Q5 は EpochQuiescenceEvidence、Q6 は authority 内部カウンタ）
+    auto obs = makeQuiescentObservation(/*epochGen=*/7, /*regGen=*/3);
 
     // 全 Q 成立 → valid Proof
     auto proof = shutdown.tryMakeQuiescenceProof(obs);
@@ -131316,14 +137271,25 @@ private:
         return false;                   // G10: Q6 フラグ
 
     // Q 条件が 1 つでも欠けると nullopt（Q0〜Q7 全条件必須 — 簡易生成禁止）
-    obs.epochSettled = false;           // G13 違反
-    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
-        return false;
-    obs.epochSettled = true;
-    obs.postStopEnqueueZero = false;    // G10 違反
-    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
-        return false;
-    obs.postStopEnqueueZero = true;
+    // ★ 2026-11-08: Q5 は evidence の内容で不成立を作る（bool を false にするだけの
+    //   形式的テストを廃止）。Q6 は authority 内部カウンタなので専用テストで検証する。
+    {
+        auto bad = makeQuiescentObservation(7, 3);
+        bad.epochEvidence.captured = false;          // 観測未実施 → Q5 不成立
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
+    {
+        auto bad = makeQuiescentObservation(7, 3, /*activeReaders=*/1);  // reader 残存 → Q5 不成立
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
+    {
+        auto bad = makeQuiescentObservation(7, 3);
+        bad.epochEvidence.epochGeneration = 99;      // identity との不一致 → Q5 不成立
+        if (shutdown.tryMakeQuiescenceProof(bad).has_value())
+            return false;
+    }
 
     // Proof → Permit 生成（G17〜G20 identity 束縛）
     auto proof2 = shutdown.tryMakeQuiescenceProof(obs);
@@ -131373,16 +137339,8 @@ private:
     if (shutdown.currentShutdownGeneration() != genN)
         return false;
 
-    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;
-    obs.allProducersJoined = true;
-    obs.readerRegistrationClosed = true;
-    obs.activeReadersZero = true;
-    obs.epochSettled = true;
-    obs.postStopEnqueueZero = true;
-    obs.noResurrection = true;
-    obs.epochGeneration = 10;
-    obs.readerRegistrationGeneration = 4;
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs =
+        makeQuiescentObservation(/*epochGen=*/10, /*regGen=*/4);
 
     // ── T10d: ReclaimAuthority は constructor 固定注入（setReclaimAuthority 廃止 = compile-time）──
     //   Authority Singularization 完了: wiring の public mutator は存在しない（setReclaimAuthority 削除）。
@@ -131572,16 +137530,8 @@ private:
     shutdown.closeAdmission();
     shutdown.joinProducers();
 
-    convo::isr::ShutdownRuntime::QuiescenceObservation obs;
-    obs.admissionReservationsZero = true;
-    obs.allProducersJoined = true;
-    obs.readerRegistrationClosed = true;
-    obs.activeReadersZero = true;
-    obs.epochSettled = true;
-    obs.postStopEnqueueZero = true;
-    obs.noResurrection = true;
-    obs.epochGeneration = 5;
-    obs.readerRegistrationGeneration = 2;
+    convo::isr::ShutdownRuntime::QuiescenceObservation obs =
+        makeQuiescentObservation(/*epochGen=*/5, /*regGen=*/2);
 
     auto proof = shutdown.tryMakeQuiescenceProof(obs);
     if (!proof.has_value() || !proof->valid())
@@ -131610,6 +137560,171 @@ private:
         return false;
 
     return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: Q2（AllProducersJoined）は観測と authority の AND。
+//   - joinProducers() 前: authority 側 evidence が無いため、観測が true でも Proof は出ない
+//   - joinProducers() 後: authority evidence が立ち、観測 true で成立
+//   - join 後でも観測 false（producer が残っているという申告）なら不成立
+//==============================================================================
+[[nodiscard]] bool testQ2ProducerJoinAuthorityGate()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+
+    auto obs = makeQuiescentObservation(/*epochGen=*/1, /*regGen=*/1);
+
+    // (1) close のみ（join 未実施）: Q1=Closing / Q2 evidence なし → Proof 不成立
+    shutdown.closeAdmission();
+    if (shutdown.producersJoined())
+        return false;                         // まだ join していない
+    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
+        return false;
+
+    // (2) join 成功: authority evidence が立つ
+    if (!shutdown.joinProducers())
+        return false;
+    if (!shutdown.producersJoined())
+        return false;
+    auto proof = shutdown.tryMakeQuiescenceProof(obs);
+    if (!proof.has_value() || !proof->valid())
+        return false;
+    if (!proof->allProducersJoined())
+        return false;
+
+    // (3) join 済みでも caller が「producer 残存」と観測したら Q2 不成立（AND 条件）
+    auto noJoinObs = makeQuiescentObservation(/*epochGen=*/1, /*regGen=*/1);
+    noJoinObs.allProducersJoined = false;
+    if (shutdown.tryMakeQuiescenceProof(noJoinObs).has_value())
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: Q5（EpochSettled）は実 EpochDomain / ISRRetireRouter の観測で決まる。
+//   reader を実登録して active にした状態では Proof が出ず、exit + registration close 後に
+//   同じ観測手順で Proof が成立することを確認する。
+//==============================================================================
+[[nodiscard]] bool testQ5EpochEvidenceRealDomain()
+{
+    convo::EpochDomain domain(convo::RetireDomainId::Unknown);
+    ISRRetireRouter router(domain);
+
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+    shutdown.closeAdmission();
+    shutdown.joinProducers();
+
+    // reader を実登録して active にする（activeReaderCount == 1）
+    const int readerIndex = domain.registerReaderThread("Q5Test");
+    if (readerIndex < 0)
+        return false;
+    domain.enterReader(readerIndex);
+    if (router.activeReaderCount() != 1)
+        return false;
+
+    auto capture = [&](std::uint32_t observedReaders) {
+        auto obs = makeQuiescentObservation(domain.epochGeneration(),
+                                            domain.readerRegistrationGeneration(),
+                                            observedReaders,
+                                            domain.readerRegistrationClosed());
+        // 実測値を evidence に転写（AudioEngine::captureEpochQuiescenceEvidence と同順）
+        obs.epochEvidence = convo::isr::EpochQuiescenceEvidence{};
+        obs.epochEvidence.captured = true;
+        obs.epochEvidence.epoch = domain.currentEpoch();
+        obs.epochEvidence.epochGeneration = domain.epochGeneration();
+        obs.epochEvidence.readerRegistrationGeneration = domain.readerRegistrationGeneration();
+        obs.epochEvidence.readerRegistrationClosed = domain.readerRegistrationClosed();
+        obs.epochEvidence.activeReaders = observedReaders;
+        obs.epochEvidence.minReaderEpoch = router.minReaderEpoch();
+        return obs;
+    };
+
+    // (1) reader active のまま: Q4 / Q5 ともに不成立 → Proof なし
+    if (shutdown.tryMakeQuiescenceProof(capture(router.activeReaderCount())).has_value())
+        return false;
+
+    // (2) reader 退出 + registration close: Q5 が実状態から成立する
+    domain.exitReader(readerIndex);
+    if (router.activeReaderCount() != 0)
+        return false;
+    domain.closeReaderRegistration();
+    (void)domain.publishEpoch();              // settle epoch（epochGeneration が進む）
+
+    auto proof = shutdown.tryMakeQuiescenceProof(capture(router.activeReaderCount()));
+    if (!proof.has_value() || !proof->valid())
+        return false;
+    if (!proof->epochSettled())
+        return false;
+    if (proof->epochEvidence().activeReaders != 0)
+        return false;
+    if (!proof->epochEvidence().readerRegistrationClosed)
+        return false;
+    if (proof->epochEvidence().epochGeneration != domain.epochGeneration())
+        return false;
+
+    // (3) Q5 単独の拒否: Q4 の観測は true のまま、evidence だけが reader 残存を主張する
+    //     矛盾した入力は Proof に採用されない（observation と evidence の相互検証）。
+    {
+        auto contradictory = capture(router.activeReaderCount());
+        contradictory.epochEvidence.activeReaders = 1;
+        if (shutdown.tryMakeQuiescenceProof(contradictory).has_value())
+            return false;
+    }
+
+    return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: Q6（postStopEnqueue == 0）は authority 内部の実カウンタで決まる。
+//   markPostStopEnqueue() を実行した時点で Proof は出なくなる。
+//==============================================================================
+[[nodiscard]] bool testQ6PostStopEnqueueBlocksProof()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+    shutdown.closeAdmission();
+    shutdown.joinProducers();
+
+    auto obs = makeQuiescentObservation(/*epochGen=*/2, /*regGen=*/1);
+    if (!shutdown.tryMakeQuiescenceProof(obs).has_value())
+        return false;                         // 前提: 0 件なら成立する
+    if (shutdown.postStopEnqueueCount() != 0)
+        return false;
+
+    shutdown.markPostStopEnqueue();           // 実カウンタを増やす
+    if (shutdown.postStopEnqueueCount() != 1)
+        return false;
+    if (shutdown.tryMakeQuiescenceProof(obs).has_value())
+        return false;                         // Q6 不成立 → Proof なし
+
+    // Q6 不成立後の新規 Proof は発行されない（上の判定で確認済み）。
+    // なお Proof は取得時点のスナップショットであり、既発行の Proof から Permit を
+    // 得る経路はここでは扱わない（Q6 は H.11.13.4 の防波堤であり、認可は identity 照合で行う）。
+
+    return true;
+}
+
+//==============================================================================
+// ★ 2026-11-08: reclaim 認可失敗の観測性（Release でも残る）。
+//   noteReclaimProofFailure() の累計が collectResult に反映される。
+//==============================================================================
+[[nodiscard]] bool testReclaimProofFailureObservability()
+{
+    auto coordinatorStorage = std::make_unique<RuntimeIntentCoordinator>();
+    convo::isr::ShutdownRuntime shutdown(*coordinatorStorage);
+
+    if (shutdown.reclaimProofFailureCount() != 0)
+        return false;
+    shutdown.noteReclaimProofFailure();
+    shutdown.noteReclaimProofFailure();
+    if (shutdown.reclaimProofFailureCount() != 2)
+        return false;
+
+    const auto result = shutdown.collectResult(static_cast<convo::ISRHealthState>(0), 0);
+    return result.reclaimProofFailureCount == 2;
 }
 
 } // anonymous namespace
@@ -131650,6 +137765,14 @@ int main()
             throw std::runtime_error("A2-Step14/T11: setter resurrection 違反");
         if (!convo::isr::testA2Step14DestructionOrderingAudit())
             throw std::runtime_error("A2-Step14/T13: destruction ordering audit 違反");
+        if (!convo::isr::testQ2ProducerJoinAuthorityGate())
+            throw std::runtime_error("Q2 (2026-11-08): producer join の authority gate 違反");
+        if (!convo::isr::testQ5EpochEvidenceRealDomain())
+            throw std::runtime_error("Q5 (2026-11-08): EpochQuiescenceEvidence の実観測違反");
+        if (!convo::isr::testQ6PostStopEnqueueBlocksProof())
+            throw std::runtime_error("Q6 (2026-11-08): post-stop enqueue による Proof 阻止違反");
+        if (!convo::isr::testReclaimProofFailureObservability())
+            throw std::runtime_error("reclaim 失敗観測 (2026-11-08): collectResult 反映違反");
     }
     catch (const std::exception& e)
     {
@@ -131904,6 +138027,7 @@ int main()
 #include "audioengine/ISRRuntimeWorldAuthority.h"  // ★ A-1: Authority Adapter
 #include "AudioEngine.h"
 #include "ISRRuntimeSemanticSchema.h"
+#include "DeferredDeletionQueue.h"                 // ★ C3-D: head identity の取得契約テスト
 
 using convo::isr::PublicationSemantic;  // FUTURE-4: world publication fields
 
@@ -132215,7 +138339,7 @@ namespace {
                        1,
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
     // ★ D101-32-D: setFallbackBacklogCount / setReclaimInFlightCount /
@@ -132251,11 +138375,13 @@ namespace {
                        1,
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    coordinator.setRetireBacklogCount(1); // drained 条件を破る
+    // ★ C9-A (2026-11-13): retireBacklog は drain 述語から外れたため、drain 違反は
+    //   残る 13 条件の 1 つ（pendingIntentCount_）で駆動する。
+    coordinator.setRetireAcceptedCount(0);
     coordinator.setPublicationBacklogCount(0);
-    coordinator.setPendingIntentCount(0);
+    coordinator.setPendingIntentCount(1); // drained 条件を破る
     // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
-    //   fresh instance 初期値 0。drain 違反は setRetireBacklogCount(1) のみで駆動。
+    //   fresh instance 初期値 0。drain 違反は setPendingIntentCount(1) で駆動。
     coordinator.setSwapPending(false);
 
     if (coordinator.isFullyDrained())
@@ -132283,25 +138409,25 @@ namespace {
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
     // slope > threshold で Pressure へ遷移
-    coordinator.setRetireBacklogCount(9);
+    coordinator.setRetireAcceptedCount(9);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 中は normalization しない
     coordinator.setSwapPending(true);
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
 
     // swapPending 解除後、3 window で Ready へ復帰
     coordinator.setSwapPending(false);
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     if (coordinator.getState() != convo::isr::RuntimeIntentCoordinator::CoordinatorState::Pressure)
         return false;
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
 
     return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Ready;
 }
@@ -132321,7 +138447,7 @@ namespace {
                        1,
                        nullptr);   // ★ CW-3b: 初回 commit → prevWorld = nullptr
 
-    coordinator.setRetireBacklogCount(0);
+    coordinator.setRetireAcceptedCount(0);
     coordinator.setPublicationBacklogCount(0);
     coordinator.setPendingIntentCount(0);
     // ★ D101-32-D: fallback/reclaim/deferred の setter は削除済み（vestigial）。
@@ -134481,6 +140607,186 @@ namespace {
     }
 }
 
+// =============================================================================
+// ★ AC_DIAG (2026-11-13, Owner 承認 A2): collectDrainBreakdown() と isFullyDrained() の対応。
+//   C9-A (2026-11-13) で述語から retireAcceptedCount_ == 0 を外したため、述語は 13 条件
+//   （早期 return 1 ＋ && 12）である。診断側も同じ 13 条件で判定し、判定式から乖離しないことを
+//   ここで固定する。既存 getter を持つ 9 項目は値の一致を、残りは述語の一致を確認する。
+// =============================================================================
+[[nodiscard]] bool testAC1_drainBreakdownMatchesPredicate()
+{
+    auto c = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+
+    auto allDrained = [](const convo::isr::RuntimeIntentCoordinator::DrainBreakdown& b)
+    {
+        return !b.swapPending
+            && b.intentQueue == 0
+            && b.observeDeferredRing == 0
+            && b.quarantineFallback == 0
+            && b.recoveryIntentQueue == 0
+            && b.publicationBacklog == 0
+            && b.publicationIntentResidency == 0
+            && b.pendingIntent == 0
+            && b.reclaimInFlight == 0
+            && b.quarantineIntentResidency == 0
+            && b.quarantineRingResidency == 0
+            && !b.recoveryAdmissionPending
+            && b.liveRecoveryObligation == 0;
+    };
+
+    // (1) 初期状態: 述語は true、内訳はすべて 0。
+    const auto b0 = c->collectDrainBreakdown();
+    if (!c->isFullyDrained()) return false;
+    if (!allDrained(b0)) return false;
+
+    // (2) 既存 getter を持つ 9 項目は値が一致すること。
+    if (b0.swapPending != c->isSwapPending()) return false;
+    if (b0.retireBacklog != c->getRetireAcceptedCount()) return false;
+    if (b0.publicationBacklog != c->getPublicationBacklogCount()) return false;
+    if (b0.publicationIntentResidency != c->getPublicationIntentResidencyCount()) return false;
+    if (b0.pendingIntent != c->getPendingIntentCount()) return false;
+    if (b0.reclaimInFlight != c->getReclaimInFlightCount()) return false;
+    if (b0.quarantineIntentResidency != c->getQuarantineIntentResidencyCount()) return false;
+    if (b0.quarantineRingResidency != c->getQuarantineRingResidencyCount()) return false;
+    if (b0.liveRecoveryObligation != c->liveLogicalRecoveryObligationCount()) return false;
+
+    // (3) Publish Intent を 1 件積むと両者とも「未 drain」で一致し、滞留が内訳に現れる。
+    convo::isr::RuntimeIntentCoordinator::Intent intent{};
+    intent.type = convo::isr::RuntimeIntentCoordinator::IntentType::Publish;
+    intent.sequenceId = 1;
+    if (!c->enqueuePublicationIntent(intent)) return false;
+
+    const auto b1 = c->collectDrainBreakdown();
+    if (c->isFullyDrained()) return false;          // 未 drain のはず
+    if (allDrained(b1)) return false;               // 内訳も同じ結論
+    if (b1.intentQueue == 0 && b1.pendingIntent == 0 && b1.publicationIntentResidency == 0)
+        return false;                               // 滞留が内訳に現れていること
+
+    // (4) C9-A: retire 受理数（retireBacklog）は述語から外れている。非 0 でも両者とも「drain」で
+    //     一致すること（ミラーが削除済みの条件を要求していないことの直接確認）。
+    //     step (3) の滞留と混ざらないよう、新しいインスタンスで確認する。
+    {
+        auto c2 = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+        c2->setRetireAcceptedCount(7);
+        const auto b2 = c2->collectDrainBreakdown();
+        if (b2.retireBacklog != 7) return false;        // 内訳には現れる
+        if (!c2->isFullyDrained()) return false;        // 述語は retireBacklog を見ない
+        if (!allDrained(b2)) return false;              // ミラーも要求しない
+    }
+
+    return true;
+}
+
+// =============================================================================
+// ★ C3-D (2026-11-13, Owner 承認): head identity の取得契約。
+//   identity = (slotIndex, sequence, epoch)。失敗時は out 引数を書かない（推定値を返さない）。
+//   キューは変更しない（peek 後も sizeApprox が変わらず、reclaim が正常に動く）。
+// =============================================================================
+[[nodiscard]] bool testAC2_headIdentity()
+{
+    // DeferredDeletionQueue は約 280 KB（4096 entry + sequences）なのでヒープに置く。
+    auto qStorage = std::make_unique<DeferredDeletionQueue>();
+    auto& q = *qStorage;
+    int a = 0;
+    int b = 0;
+    auto del = [](void* p) noexcept { *static_cast<int*>(p) += 1; };
+
+    // (1) 空キュー: false かつ out 引数は不変（推定値を返さない）
+    {
+        DeletionEntry e{};
+        e.epoch = 999;                                  // sentinel
+        std::uint32_t slot = 0xFFFFFFFFu;
+        std::uint32_t seq = 0xFFFFFFFFu;
+        if (q.peekHead(e, slot, seq)) return false;
+        if (e.epoch != 999 || slot != 0xFFFFFFFFu || seq != 0xFFFFFFFFu) return false;
+    }
+
+    // (2) 2 件 enqueue: 先頭の 3 要素（slot / sequence / epoch）が取れる
+    if (!q.enqueue(&a, del, 10, convo::RetireDomainId::EngineISR)) return false;
+    if (!q.enqueue(&b, del, 11, convo::RetireDomainId::EngineISR)) return false;
+
+    DeletionEntry h1{};
+    std::uint32_t slot1 = 0;
+    std::uint32_t seq1 = 0;
+    if (!q.peekHead(h1, slot1, seq1)) return false;
+    if (h1.epoch != 10) return false;
+    if (slot1 != 0u) return false;                      // dequeuePos=0 → slot 0
+    if (seq1 != 1u) return false;                       // pos + 1
+    if (h1.domainId != convo::RetireDomainId::EngineISR) return false;
+
+    // (3) peek はキューを変えない（反復しても同じ identity・件数不変）
+    for (int i = 0; i < 5; ++i)
+    {
+        DeletionEntry t{};
+        std::uint32_t s = 0;
+        std::uint32_t sq = 0;
+        if (!q.peekHead(t, s, sq)) return false;
+        if (s != slot1 || sq != seq1 || t.epoch != 10) return false;
+    }
+    if (q.sizeApprox() != 2u) return false;
+
+    // (4) 先頭だけ reclaim すると identity が変わる（slot / sequence が進む）
+    if (q.reclaim(11) != 1u) return false;              // epoch 10 < 11 のみ回収
+    DeletionEntry h2{};
+    std::uint32_t slot2 = 0;
+    std::uint32_t seq2 = 0;
+    if (!q.peekHead(h2, slot2, seq2)) return false;
+    if (h2.epoch != 11) return false;
+    if (slot2 == slot1 && seq2 == seq1) return false;   // 同一 identity ではないこと
+
+    // (5) 全回収後は false（空 / sequence 不一致）
+    if (q.reclaim(12) != 1u) return false;
+    {
+        DeletionEntry e{};
+        e.epoch = 777;                                  // sentinel
+        std::uint32_t slot = 0xFFFFFFFFu;
+        std::uint32_t seq = 0xFFFFFFFFu;
+        if (q.peekHead(e, slot, seq)) return false;
+        if (e.epoch != 777 || slot != 0xFFFFFFFFu || seq != 0xFFFFFFFFu) return false;
+    }
+
+    // (6) 副作用なし: deleter は各 1 回だけ走り、キューは空
+    if (a != 1 || b != 1) return false;
+    if (q.sizeApprox() != 0u) return false;
+
+    return true;
+}
+
+// =============================================================================
+// ★ C9-A (2026-11-13, Owner 承認): Coordinator の drain 述語から retireBacklog 条件を外した。
+//   Bootstrapping 側: retireBacklog が非 0 でも、他の 13 条件が成立すれば drained。
+//   Faulted 側: 残した 13 条件のいずれかが非 0 なら Faulted（述語が空になっていない）。
+// =============================================================================
+[[nodiscard]] bool testC9A_retireBacklogDoesNotBlockDrain()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    coordinator.setRetireAcceptedCount(5);   // 旧述語ではこれだけで未 drain になっていた
+    if (!coordinator.isFullyDrained())
+        return false;                        // C9-A: retireBacklog は判定に使わない
+
+    coordinator.requestShutdown();
+    coordinator.markShutdownComplete();
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Bootstrapping;
+}
+
+[[nodiscard]] bool testC9A_faultedWhenOtherConditionSet()
+{
+    auto coordinatorStorage = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
+    auto& coordinator = *coordinatorStorage;
+
+    coordinator.setRetireAcceptedCount(5);   // 除外した条件（これ単独では Faulted にしない）
+    coordinator.setPendingIntentCount(1);   // 残した 13 条件の 1 つを非 0 にする
+
+    if (coordinator.isFullyDrained())
+        return false;
+
+    coordinator.requestShutdown();
+    coordinator.markShutdownComplete();
+    return coordinator.getState() == convo::isr::RuntimeIntentCoordinator::CoordinatorState::Faulted;
+}
+
 int main()
 {
     try
@@ -134738,6 +141044,20 @@ int main()
         throw std::runtime_error("T3c NT-4: adjudication after terminal resolve must be a no-op (single -1, no exhaustion, drop counted)");
     if (!testT3c_NT5_twoThreadIdentitySafety())
         throw std::runtime_error("T3c NT-5: postSignal/adjudicate/resolve races must preserve identity and liveCount invariants");
+
+    // --- AC_DIAG (2026-11-13, Owner 承認 A2): 診断側 14 条件と isFullyDrained() の対応 ---
+    if (!testAC1_drainBreakdownMatchesPredicate())
+        throw std::runtime_error("AC1: collectDrainBreakdown must match isFullyDrained (A2 copy)");
+
+    // --- C3-D (2026-11-13, Owner 承認): head identity の取得契約 ---
+    if (!testAC2_headIdentity())
+        throw std::runtime_error("AC2: head identity (slot, sequence, epoch) contract failed");
+
+    // --- C9-A (2026-11-13, Owner 承認): drain 述語から retireBacklog を除外 ---
+    if (!testC9A_retireBacklogDoesNotBlockDrain())
+        throw std::runtime_error("C9-A: retireBacklog must not block drain (Bootstrapping side)");
+    if (!testC9A_faultedWhenOtherConditionSet())
+        throw std::runtime_error("C9-A: other non-zero condition must still yield Faulted");
 
     return 0;
     }
@@ -135291,6 +141611,165 @@ int main()
 
 ```
 
+### 📄 `src\tests\LoaderCurrencyContractTests.cpp`
+
+```
+//==============================================================================
+// LoaderCurrencyContractTests.cpp — 2026-11-08
+//
+// 目的:
+//   ConvolverProcessor のローダー世代契約を、実際に使用されている
+//   GenerationManager（src/GenerationManager.h）に対して固定する。
+//
+// 背景（調査結果）:
+//   LoaderThread.cpp の旧コメントは「ロードループ内の generation check は実装待ち」と
+//   書いていたが、stale completion の正当性は commit 直前の
+//   convolverStateGeneration.isCurrentGeneration(requestGenId) が担っている
+//   （ConvolverProcessor.LoadPipeline.cpp: bumpGeneration / applyComputedIR /
+//     executePendingCommit / updateConvolverState）。
+//   ConvolverProcessor::loaderGeneration_ は加算のみで読み出しが無く、この契約に
+//   寄与していなかったため削除した（ConvolverProcessor.h / .Lifecycle.cpp）。
+//
+//   本テストは「新しい要求が古い要求を無効化する」という GenerationManager の
+//   セマンティクスを固定し、将来 loaderGeneration_ のような別カウンタを再導入して
+//   二重管理に戻ることを防ぐ。engine を起動しないため RT / MKL に依存しない。
+//==============================================================================
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <thread>
+#include <vector>
+
+#include "GenerationManager.h"
+
+namespace {
+
+[[nodiscard]] bool testBumpInvalidatesOlderGeneration()
+{
+    GenerationManager manager;
+    // 初期世代（0）をタスクが捕捉
+    const std::uint64_t taskGen = manager.getCurrentGeneration();
+    if (!manager.isCurrentGeneration(taskGen))
+        return false;
+
+    // 新しい要求 → 古いタスクは陳腐化
+    const std::uint64_t newGen = manager.bumpGeneration();
+    if (newGen == taskGen)
+        return false;
+    if (manager.isCurrentGeneration(taskGen))
+        return false;                       // stale は拒否される
+    if (!manager.isCurrentGeneration(newGen))
+        return false;                       // 最新は有効
+
+    // さらに新しい要求 → 直前の世代も陳腐化（単調増加の連鎖）
+    const std::uint64_t newest = manager.bumpGeneration();
+    if (manager.isCurrentGeneration(newGen))
+        return false;
+    if (!manager.isCurrentGeneration(newest))
+        return false;
+    return true;
+}
+
+// 複数スレッドが bump しても、最後に確定した世代以外は必ず stale と判定される。
+// （commit 側の isCurrentGeneration が「勝者 1 つだけ」を許すことの固定）
+[[nodiscard]] bool testConcurrentBumpLeavesSingleWinner()
+{
+    GenerationManager manager;
+    constexpr int kThreads = 8;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::uint64_t> generations(static_cast<std::size_t>(kThreads), 0);
+
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<std::size_t>(kThreads));
+    for (int i = 0; i < kThreads; ++i)
+    {
+        workers.emplace_back([&manager, &ready, &go, &generations, i]() {
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!go.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            generations[static_cast<std::size_t>(i)] = manager.bumpGeneration();
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != kThreads)
+        std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    for (auto& worker : workers)
+        worker.join();
+
+    int currentCount = 0;
+    for (const auto gen : generations)
+    {
+        if (manager.isCurrentGeneration(gen))
+            ++currentCount;
+    }
+    // 全世代が一意（bump は原子的）で、最新の 1 つだけが current
+    return currentCount == 1;
+}
+
+// タスクが走っている間に新しい要求が来た場合、途中の結果は採用されない。
+// （applyComputedIR → executePendingCommit の 2 段ガードと同じ判定を模す）
+[[nodiscard]] bool testInFlightTaskSeesStaleAfterNewRequest()
+{
+    GenerationManager manager;
+    const std::uint64_t requestGen = manager.bumpGeneration();
+
+    // ロード中の段階（変換完了）
+    bool intermediateAccepted = manager.isCurrentGeneration(requestGen);
+    if (!intermediateAccepted)
+        return false;
+
+    // ユーザーが別の IR を要求（= 新しい bump）
+    const std::uint64_t nextRequest = manager.bumpGeneration();
+
+    // commit 直前の判定: 途中結果は破棄、新しい要求だけが採用される
+    if (manager.isCurrentGeneration(requestGen))
+        return false;
+    if (!manager.isCurrentGeneration(nextRequest))
+        return false;
+    return true;
+}
+
+} // namespace
+
+int main()
+{
+    struct Case
+    {
+        const char* name;
+        bool (*fn)();
+    };
+    const Case cases[] = {
+        { "bump invalidates older generation", &testBumpInvalidatesOlderGeneration },
+        { "concurrent bump leaves a single winner", &testConcurrentBumpLeavesSingleWinner },
+        { "in-flight task becomes stale after a new request", &testInFlightTaskSeesStaleAfterNewRequest },
+    };
+
+    int failed = 0;
+    for (const auto& testCase : cases)
+    {
+        if (!testCase.fn())
+        {
+            std::fprintf(stderr, "FAIL: %s\n", testCase.name);
+            ++failed;
+        }
+        else
+        {
+            std::printf("PASS: %s\n", testCase.name);
+        }
+    }
+
+    if (failed != 0)
+    {
+        std::fprintf(stderr, "LoaderCurrencyContractTests: %d case(s) failed\n", failed);
+        return 1;
+    }
+    std::printf("LoaderCurrencyContractTests: ALL TESTS PASSED\n");
+    return 0;
+}
+
+```
+
 ### 📄 `src\tests\MpscBoundedRingTests.cpp`
 
 ```
@@ -135782,16 +142261,23 @@ LayerCfgTheo computeLayerCfg (int irLen, bool tailEnabled)
 {
     LayerCfgTheo cfg;
     const int l0Part  = nextPow2 (std::max (kBlockSize, 64));   // 64
-    const int l1Part  = l0Part * kTailL1L2Mult;                 // 512
-    const int l2Part  = l1Part * kTailL1L2Mult;                 // 4096
     const int l0LenByTailStart = static_cast<int> (std::llround (kTheoTailStartClamped * kSampleRate)); // 5760
+    // Part 8 H/I: production と同じ倍率制限（2 の冪・上限 4・L0 保持長以下）。
+    int l1Mult = 1;
+    while (l1Mult * 2 <= kTailL1L2Mult && l1Mult * 2 <= 4
+           && l1Mult * 2 * l0Part <= std::max (l0Part, l0LenByTailStart))
+        l1Mult *= 2;
+    const int l1Part  = l0Part * l1Mult;
+    const int l2Part  = l1Part * kTailL1L2Mult;
     // ★ I5 保証アライン（production cpp:758-764と同式）。5760 は 64 の倍数のため本構成では無変。
     const int l0CoverageAligned = ((l0LenByTailStart + l0Part - 1) / l0Part) * l0Part;
-    const int l0MaxParts = convo::MKLNonUniformConvolver::computeL0MaxParts (l0Part, l0CoverageAligned, tailEnabled);
-    const int l0MaxLen = l0MaxParts * l0Part;                   // tail on: 5760 / tail off: 2048
-    const int l0Len    = std::min (irLen, l0MaxLen);
-    const int l1Len    = tailEnabled ? std::max (0, std::min (irLen - l0Len, kL1MaxParts * l1Part)) : 0;
-    const int l2Len    = tailEnabled ? std::max (0, irLen - l0Len - l1Len) : 0;
+    const int l0MaxParts = convo::MKLNonUniformConvolver::computeL0MaxParts (l0Part, l0CoverageAligned, true);
+    const int l0MaxLen = l0MaxParts * l0Part;
+    // Part 8 F: tail 無効（Bypass）でも同じ L0 被覆（0.12 秒下限）と L1/L2 で IR 全体を覆う。
+    const int l0LenTarget = juce::jlimit (l0Part, l0MaxLen, l0CoverageAligned);
+    const int l0Len    = std::min (irLen, l0LenTarget);
+    const int l1Len    = std::max (0, std::min (irLen - l0Len, kL1MaxParts * l1Part));
+    const int l2Len    = std::max (0, irLen - l0Len - l1Len);
 
     cfg.partSize[0] = l0Part; cfg.partSize[1] = l1Part; cfg.partSize[2] = l2Part;
     cfg.len[0] = l0Len;  cfg.len[1] = l1Len;  cfg.len[2] = l2Len;
@@ -136753,7 +143239,7 @@ int main()
             if (! pass) ++structuralFailures;
         };
         geometryCheck ("768k/bs512 contour default(0.12 clamp)", 768000.0, 512, 200000, 0.085, true, 180);
-        geometryCheck ("768k/bs512 bypass",                       768000.0, 512, 200000, 0.085, false,  32);
+        geometryCheck ("768k/bs512 bypass",                       768000.0, 512, 200000, 0.085, false, 180);
         geometryCheck ("48k/bs64 ts0.80 hard cap",                 48000.0,  64, 100000, 0.80,  true,  256);
 
         // (3) S-4 ログ検証（拡大発動 + hard cap 到達）
@@ -142665,7 +149151,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
         auto isOlder = [](uint64_t a, uint64_t b) noexcept {
             return static_cast<int64_t>(a - b) < 0;
         };
-        store.drain(minReader, isOlder);
+        store.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
         if (store.residentCountAtomic() != 0) return false;
 
         // drainAllUnsafe resets to 0
@@ -142676,7 +149162,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
                              "test", 0, 0);
         }
         if (store.residentCountAtomic() != 2) return false;
-        store.drainAllUnsafe();
+        store.drainAllUnsafe(convo::RetireDomainId::Unknown);
         if (store.residentCountAtomic() != 0) return false;
     }
 
@@ -142700,7 +149186,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
         auto isOlder = [](uint64_t a, uint64_t b) noexcept {
             return static_cast<int64_t>(a - b) < 0;
         };
-        auth.drain(minReader, isOlder);
+        auth.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
         if (auth.residentCountAtomic() != 0) return false;
 
         // drainAll resets to 0
@@ -142710,7 +149196,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
             auth.store(ptr, deleter, 100, DeletionEntryType::Generic, "test");  // NOLINT(atomic-dot-call)
         }
         if (auth.residentCountAtomic() != 2) return false;
-        auth.drainAll();
+        auth.drainAll(convo::RetireDomainId::Unknown);
         if (auth.residentCountAtomic() != 0) return false;
     }
 
@@ -142802,7 +149288,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
     if (store.residentCountAtomic() != 1) return false;
 
     // Drain all → predicate becomes false
-    store.drainAllUnsafe();
+    store.drainAllUnsafe(convo::RetireDomainId::Unknown);
     if (store.residentCountAtomic() != 0) return false;
 
     // Predicate is false — a spurious wake here would cause wait_for to
@@ -142848,7 +149334,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
     if (store.residentCountAtomic() != 3) return false;
 
     // Shutdown forced drain
-    store.drainAllUnsafe();
+    store.drainAllUnsafe(convo::RetireDomainId::Unknown);
     if (store.residentCountAtomic() != 0) return false;
 
     // Predicate is now false — no wake signal should fire.
@@ -142887,7 +149373,7 @@ static_assert(!escalationRule_4, "escalation: a pending transition must block re
     if (store.residentCountAtomic() != 2) return false;
 
     // Drain epoch-safe entries: predicate becomes false
-    store.drain(200, isOlder);  // 100 < 200 → safe
+    store.drain(200, isOlder, convo::RetireDomainId::Unknown);  // 100 < 200 → safe
     if (store.residentCountAtomic() != 0) return false;
 
     // Enqueue again: predicate true
@@ -145646,7 +152132,7 @@ void* allocate()
 // ── T1: reader slot blocks reclamation across the read window ───────────────
 bool testT1_readerSlotBlocksReclaim()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     Counter counter;
     g_counter = &counter;
 
@@ -145681,7 +152167,7 @@ bool testT1_readerSlotBlocksReclaim()
 // ── T2: nested readers keep the barrier until the outermost exit ────────────
 bool testT2_nestedReadersKeepBarrier()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     Counter counter;
     g_counter = &counter;
 
@@ -145728,7 +152214,7 @@ bool testT2_nestedReadersKeepBarrier()
 // ── T3: no reader -> reclaimed on the first reclaim after publish (control) ─
 bool testT3_noReaderReclaimsImmediately()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     Counter counter;
     g_counter = &counter;
 
@@ -145748,7 +152234,7 @@ bool testT3_noReaderReclaimsImmediately()
 // ── T4: fail-closed after reader registration is closed ─────────────────────
 bool testT4_failClosedAfterRegistrationClosed()
 {
-    EpochDomain domain;
+    EpochDomain domain(convo::RetireDomainId::Unknown);
     domain.closeReaderRegistration();
 
     ScopedEpochReader reader (domain);
@@ -146538,7 +153024,7 @@ bool retireOne(EpochDomain& dom, DeleterTracker& tracker, int id, std::uint64_t 
 // =============================================================================
 static bool testT10_1_quarantinedLiveReaderIsNotExcluded()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);                                    // currentEpoch == 5
@@ -146617,7 +153103,7 @@ static bool testT10_1_quarantinedLiveReaderIsNotExcluded()
 // =============================================================================
 static bool testT10_2_quarantinedSlotIsReusableButLiveReaderProtected()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);
@@ -146691,7 +153177,7 @@ static bool testT10_2_quarantinedSlotIsReusableButLiveReaderProtected()
 // =============================================================================
 static bool testT10_3_deferredQuarantinePathStillUnblocksReclaim()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);
@@ -146764,7 +153250,7 @@ static bool testT10_3_deferredQuarantinePathStillUnblocksReclaim()
 // =============================================================================
 static bool testT10_4_shutdownUnquarantineAndDrain()
 {
-    EpochDomain dom;
+    EpochDomain dom(convo::RetireDomainId::Unknown);
     DeleterTracker tracker;
 
     advanceEpoch(dom, 5);
@@ -147066,7 +153552,7 @@ bool checkAllDrained(convo::EpochDomain& dom, convo::isr::ISRRetireRouter& route
 // =============================================================================
 static bool checkTD21QFullEscalatesToEmergency()
 {
-    auto dom = std::make_unique<convo::EpochDomain>();
+    auto dom = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
     auto router = std::make_unique<convo::isr::ISRRetireRouter>(*dom);
     auto coord = std::make_unique<convo::SnapshotCoordinator>(*dom);
     coord->setRetireSink(router.get());
@@ -147139,7 +153625,7 @@ static bool checkTD21QFullEscalatesToEmergency()
 // =============================================================================
 static bool checkTD22EFullEscalatesToTerminal()
 {
-    auto dom = std::make_unique<convo::EpochDomain>();
+    auto dom = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
     auto router = std::make_unique<convo::isr::ISRRetireRouter>(*dom);
     auto coord = std::make_unique<convo::SnapshotCoordinator>(*dom);
     coord->setRetireSink(router.get());
@@ -147198,7 +153684,7 @@ static bool checkTD22EFullEscalatesToTerminal()
 // =============================================================================
 static bool checkTD23ShutdownDrainCompletes()
 {
-    auto dom = std::make_unique<convo::EpochDomain>();
+    auto dom = std::make_unique<convo::EpochDomain>(convo::RetireDomainId::Unknown);
     auto router = std::make_unique<convo::isr::ISRRetireRouter>(*dom);
     auto coord = std::make_unique<convo::SnapshotCoordinator>(*dom);
     coord->setRetireSink(router.get());
@@ -147410,7 +153896,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // ── Test 1: Stuck reader + Q/E/Terminal populated → drainAllQuarantineStore clears all ──
 [[nodiscard]] bool testStuckReaderFallbackDrainsAllStores() {
     TestObject::aliveCount = 0;
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     // Step 1: Register a reader and enter it — this creates a "stuck reader"
@@ -147466,7 +153952,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // ── Test 2: Double drain is safe (idempotent) ──
 [[nodiscard]] bool testDoubleDrainIsSafe() {
     TestObject::aliveCount = 0;
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     int readerIdx = epochDomain.registerReaderThread("TestReader2");
@@ -147505,7 +153991,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // ── Test 3: No stuck reader (activeReaderCount == 0) — drainAll + drainAllQuarantineStore both work ──
 [[nodiscard]] bool testNoStuckReaderDrainWorks() {
     TestObject::aliveCount = 0;
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     // No reader registered — activeReaderCount() == 0
@@ -147529,7 +154015,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 
 // ── Test 4: Shutdown after drain — completion invariant holds ──
 [[nodiscard]] bool testShutdownCompletesAfterDrain() {
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     int readerIdx = epochDomain.registerReaderThread("TestReader4");
@@ -147559,7 +154045,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // Verifies that when we push to Q then E then Terminal, the Q+E counts
 // match exactly what we pushed (no double-counting / no lost entries).
 [[nodiscard]] bool testOwnershipTransferNoLeaks() {
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     // No stuck reader — activeReaderCount == 0
@@ -147604,7 +154090,7 @@ static int fillTerminalStore(ISRRetireRouter& router, int startId, DeleterTracke
 // drainAll() calls provider_->drainAll() (D) AND drainAllQuarantineStore() (Q+E+Terminal).
 // With a stuck reader, D is epoch-gated but Q+E+Terminal are epoch-agnostic.
 [[nodiscard]] bool testStuckReaderDrainAllPath() {
-    EpochDomain epochDomain;
+    EpochDomain epochDomain(convo::RetireDomainId::Unknown);
     ISRRetireRouter router(epochDomain);
 
     int readerIdx = epochDomain.registerReaderThread("TestReader6");
@@ -147668,6 +154154,403 @@ int main() {
 
     return 0;
 }
+
+```
+
+### 📄 `src\tests\TailLayerIntegrityTests.cpp`
+
+```
+//============================================================================
+// TailLayerIntegrityTests.cpp — Part 8 F/H/I の Production 回帰テスト
+//
+// 目的:
+//   * F: Bypass（tailMode=2）で IR 全体が厳密に再構成されること
+//   * H: 既定 tailMode=1 のテール保持がブロック長に依存しないこと
+//   * I: 長い IR でテール層の先頭パーティションが欠落しないこと
+//
+// 測定条件（実装準備仕様 §3.3）:
+//   48 kHz、IR 0.5 / 1.0 / 3.0 秒、block 64〜32768、インパルス入力、
+//   誤差はピーク整合後の max|out - ir|（倍精度）。
+//   CPU は Add+Get の壁時計時間 ÷ 処理音声秒数（5 回の中央値）。
+//   メモリは SetImpulse 前後の PrivateUsage 差分（1 インスタンス）。
+//
+// 出力: [PASS]/[FAIL] 行（受入 ID ごと）と測定値。FAIL は exit 1（fail-closed）。
+//============================================================================
+#include <JuceHeader.h>
+#include "MKLNonUniformConvolver.h"
+#include "tests/NUPCTestAccess.h"
+
+#include <windows.h>
+#include <psapi.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+namespace
+{
+constexpr double kSampleRate = 48000.0;
+constexpr double kPi         = 3.14159265358979323846;
+
+// 受入許容（実装準備仕様 §3.2 / §3.3）
+constexpr double kReconTolerance   = 1.0e-10; // F-1
+constexpr double kTailEnergyTolDb  = 0.1;     // F-2 / H-1
+constexpr double kWindowRatio      = 0.5;     // F-3
+constexpr double kCpuLimitMsPerSec = 10.0;    // §3.3
+constexpr double kMemLimitMB       = 32.0;    // §3.3
+
+int gFailures = 0;
+
+void report (const char* id, bool ok, const std::string& detail)
+{
+    std::printf ("[%s] %s %s\n", ok ? "PASS" : "FAIL", id, detail.c_str());
+    if (! ok) ++gFailures;
+}
+
+std::string fmt (const char* format, ...)
+{
+    char buf[512];
+    va_list args;
+    va_start (args, format);
+    std::vsnprintf (buf, sizeof (buf), format, args);
+    va_end (args);
+    return std::string (buf);
+}
+
+SIZE_T privateBytes()
+{
+    PROCESS_MEMORY_COUNTERS_EX pmc {};
+    if (GetProcessMemoryInfo (GetCurrentProcess(),
+                              reinterpret_cast<PROCESS_MEMORY_COUNTERS*> (&pmc),
+                              sizeof (pmc)) != 0)
+        return pmc.PrivateUsage;
+    return 0;
+}
+
+std::vector<double> makeIr (int irLen)
+{
+    std::vector<double> ir ((size_t) irLen, 0.0);
+    for (int i = 0; i < irLen; ++i)
+    {
+        const double t = i / kSampleRate;
+        ir[(size_t) i] = 0.5 * std::exp (-t / 0.15) * std::sin (2.0 * kPi * 997.0 * t);
+    }
+    ir[(size_t) (irLen - 1)] += 0.25;   // 末尾マーカー
+    return ir;
+}
+
+double energyDb (const std::vector<double>& v, int from, int to)
+{
+    double e = 0.0;
+    for (int i = from; i < to && i < (int) v.size(); ++i)
+        e += v[(size_t) i] * v[(size_t) i];
+    return e > 0.0 ? 10.0 * std::log10 (e) : -999.0;
+}
+
+double maxAbs (const std::vector<double>& v, int from, int to)
+{
+    double m = 0.0;
+    for (int i = from; i < to && i < (int) v.size(); ++i)
+        m = std::max (m, std::fabs (v[(size_t) i]));
+    return m;
+}
+
+int argMaxAbs (const std::vector<double>& v)
+{
+    int best = 0;
+    double m = -1.0;
+    for (int i = 0; i < (int) v.size(); ++i)
+    {
+        const double a = std::fabs (v[(size_t) i]);
+        if (a > m) { m = a; best = i; }
+    }
+    return best;
+}
+
+struct RunResult
+{
+    bool ok = false;
+    int layers = 0;
+    int partSize[3] { 0, 0, 0 };
+    int numPartsIR[3] { 0, 0, 0 };
+    int heldSamples = 0;
+    int lag = 0;
+    int firstErr = -1;
+    double maxErr = 0.0;
+    double tailEnergyDeltaDb = 0.0;
+    double eFixedDb = 0.0;
+    bool   hasFirstTailGain = false;
+    double eFirstTailGainDb = 0.0;
+    double minWindowRatio = 0.0;
+    double cpuMsPerAudioSec = 0.0;
+    double memDeltaMB = 0.0;
+};
+
+RunResult runCase (const std::vector<double>& ir, int block, bool tailEnabled)
+{
+    using convo::MKLNonUniformConvolver;
+
+    RunResult r;
+    const SIZE_T memBefore = privateBytes();
+
+    MKLNonUniformConvolver conv;
+    convo::FilterSpec spec {};
+    spec.sampleRate = kSampleRate;
+    spec.tailEnabled = tailEnabled;
+    spec.tailMode = tailEnabled ? 1 : 2;
+
+    if (! conv.SetImpulse (ir.data(), (int) ir.size(), block, 1.0, false, &spec))
+        return r;
+
+    const SIZE_T memAfter = privateBytes();
+    r.ok = true;
+    r.layers = convo::NUPCTestAccess::numActiveLayers (conv);
+    for (int li = 0; li < r.layers && li < 3; ++li)
+    {
+        r.partSize[li]   = convo::NUPCTestAccess::layerPartSize (conv, li);
+        r.numPartsIR[li] = convo::NUPCTestAccess::layerNumPartsIR (conv, li);
+    }
+    r.heldSamples = r.partSize[0] * r.numPartsIR[0];
+
+    const int irLen = (int) ir.size();
+    const int totalLen = ((irLen + 8 * block + block - 1) / block) * block;
+    std::vector<double> in ((size_t) block, 0.0);
+    std::vector<double> out ((size_t) totalLen, 0.0);
+
+    const auto runOnce = [&]() -> double
+    {
+        for (int t = 0; t < totalLen; t += block)
+        {
+            for (int i = 0; i < block; ++i)
+                in[(size_t) i] = ((t + i) == 0) ? 1.0 : 0.0;
+            conv.Add (in.data(), block);
+            conv.Get (out.data() + t, block);
+        }
+        return 0.0;
+    };
+
+    // 1 回目: 指標を取る（新しいインスタンス・残留なし）
+    const auto t0 = std::chrono::steady_clock::now();
+    runOnce();
+    const auto t1 = std::chrono::steady_clock::now();
+    const double firstMs = std::chrono::duration<double> (t1 - t0).count() * 1000.0;
+
+    // 指標は 1 回目の出力から取る（2 回目以降は状態を持ち越すため時間計測にのみ使う）
+    r.lag = argMaxAbs (out) - argMaxAbs (ir);
+
+    double maxErr = 0.0;
+    for (int i = 0; i < irLen; ++i)
+    {
+        const int j = i + r.lag;
+        const double o = (j >= 0 && j < totalLen) ? out[(size_t) j] : 0.0;
+        const double e = std::fabs (o - ir[(size_t) i]);
+        if (e > maxErr) maxErr = e;
+        if (e > 1.0e-6 && r.firstErr < 0) r.firstErr = i;
+    }
+    r.maxErr = maxErr;
+
+    // 末尾 100 ms の保持（F-2）
+    const int tailStart = std::max (0, irLen - (int) (0.1 * kSampleRate));
+    r.eFixedDb = energyDb (out, r.lag + irLen / 2, r.lag + irLen);
+
+    // I: 最初の L1 パーティションのゲイン（テール整形の有無を波形で確認する）
+    if (r.layers > 1 && r.heldSamples > 0 && r.heldSamples < irLen)
+    {
+        const int a = r.heldSamples;
+        const int b = std::min (irLen, a + r.partSize[1]);
+        r.eFirstTailGainDb = energyDb (out, r.lag + a, r.lag + b) - energyDb (ir, a, b);
+        r.hasFirstTailGain = true;
+    }
+    r.tailEnergyDeltaDb = energyDb (out, r.lag + tailStart, r.lag + irLen)
+                        - energyDb (ir, tailStart, irLen);
+
+    // 無音窓がないこと（F-3）
+    double minRatio = 1.0e9;
+    const int window = 8192;
+    for (int w = 0; w < irLen; w += window)
+    {
+        const int b = std::min (irLen, w + window);
+        const double o = maxAbs (out, r.lag + w, r.lag + b);
+        const double i = maxAbs (ir, w, b);
+        if (i > 1.0e-12) minRatio = std::min (minRatio, o / i);
+    }
+    r.minWindowRatio = (minRatio > 1.0e8) ? 0.0 : minRatio;
+
+    std::vector<double> timings { firstMs };
+    for (int rep = 0; rep < 4; ++rep)
+    {
+        const auto a = std::chrono::steady_clock::now();
+        runOnce();
+        const auto b = std::chrono::steady_clock::now();
+        timings.push_back (std::chrono::duration<double> (b - a).count() * 1000.0);
+    }
+    std::sort (timings.begin(), timings.end());
+    const double audioSec = (double) totalLen / kSampleRate;
+    r.cpuMsPerAudioSec = timings[2] / audioSec;   // 5 回の中央値
+    r.memDeltaMB = (double) (memAfter > memBefore ? memAfter - memBefore : 0) / (1024.0 * 1024.0);
+    return r;
+}
+
+void checkF (const std::vector<double>& ir, int block)
+{
+    const auto r = runCase (ir, block, false);
+    const int irLen = (int) ir.size();
+    if (! r.ok)
+    {
+        report ("F-1", false, fmt ("block=%d ir=%d SetImpulse failed", block, irLen));
+        return;
+    }
+
+    const int expectPart0 = juce::nextPowerOfTwo (std::max (block, 64));
+    bool geomOk = r.layers >= 1 && r.layers <= 3 && r.partSize[0] == expectPart0;
+    for (int li = 0; li < r.layers; ++li)
+        geomOk = geomOk && r.partSize[li] > 0 && r.numPartsIR[li] >= 1;
+    report ("F-4", geomOk, fmt ("block=%d ir=%d layers=%d l0=%d/%d",
+                                block, irLen, r.layers, r.partSize[0], r.numPartsIR[0]));
+
+    report ("F-1", r.maxErr <= kReconTolerance,
+            fmt ("block=%d ir=%d maxErr=%.3e firstErr=%d", block, irLen, r.maxErr, r.firstErr));
+    report ("F-2", std::fabs (r.tailEnergyDeltaDb) <= kTailEnergyTolDb,
+            fmt ("block=%d ir=%d tailDelta=%.3f dB", block, irLen, r.tailEnergyDeltaDb));
+    report ("F-3", r.minWindowRatio >= kWindowRatio,
+            fmt ("block=%d ir=%d minWindowRatio=%.3f", block, irLen, r.minWindowRatio));
+    report ("RES-F", r.cpuMsPerAudioSec <= kCpuLimitMsPerSec && r.memDeltaMB <= kMemLimitMB,
+            fmt ("block=%d ir=%d cpu=%.3f ms/s mem=%.2f MB", block, irLen,
+                 r.cpuMsPerAudioSec, r.memDeltaMB));
+}
+
+void checkH (int block, double baselineDb, double tolDb, const char* id)
+{
+    const auto ir = makeIr (48000);
+    const auto r = runCase (ir, block, true);
+    if (! r.ok)
+    {
+        report (id, false, fmt ("block=%d SetImpulse failed", block));
+        return;
+    }
+    const bool ok = std::fabs (r.eFixedDb - baselineDb) <= tolDb;
+    report (id, ok, fmt ("block=%d eFixed=%.3f dB baseline=%.3f dB tol=%.2f",
+                         block, r.eFixedDb, baselineDb, tolDb));
+}
+
+void checkI (const std::vector<double>& ir, int block)
+{
+    const auto off = runCase (ir, block, false);
+    report ("I-1", off.ok && off.firstErr < 0,
+            fmt ("block=%d ir=%d firstErr=%d maxErr=%.3e",
+                 block, (int) ir.size(), off.firstErr, off.maxErr));
+
+    const auto on = runCase (ir, block, true);
+    const bool geomOk = on.ok
+                        && (on.layers == 1
+                            || (on.partSize[1] <= 4 * on.partSize[0]
+                                && on.partSize[1] <= on.heldSamples));
+
+    // 先頭 L1 パーティションの出力を、block 256 の同じ層ゲインと比較する（波形での直接検出）。
+    const auto ref = runCase (makeIr ((int) ir.size()), 256, true);
+    const bool partOk = on.hasFirstTailGain && ref.hasFirstTailGain
+                        && on.eFirstTailGainDb > 0.0
+                        && std::fabs (on.eFirstTailGainDb - ref.eFirstTailGainDb) <= 1.0;
+
+    report ("I-2", geomOk && partOk,
+            fmt ("block=%d l0=%d/%d l1=%d/%d gain=%.2f dB ref=%.2f dB",
+                 block, on.partSize[0], on.numPartsIR[0],
+                 on.partSize[1], on.numPartsIR[1],
+                 on.eFirstTailGainDb, ref.eFirstTailGainDb));
+}
+
+void checkH4 (const std::vector<double>& ir, int block)
+{
+    const auto r = runCase (ir, block, true);
+    report ("H-4", r.ok && r.eFixedDb > -60.0,
+            fmt ("block=%d ir=%d eFixed=%.2f dB", block, (int) ir.size(), r.eFixedDb));
+}
+
+void checkGeometryAtMaxBlock()
+{
+    using convo::MKLNonUniformConvolver;
+    std::vector<double> ir = makeIr (48000);
+    MKLNonUniformConvolver conv;
+    convo::FilterSpec spec {};
+    spec.sampleRate = kSampleRate;
+    spec.tailEnabled = true;
+    spec.tailMode = 1;
+    const bool ok = conv.SetImpulse (ir.data(), (int) ir.size(), 524288, 1.0, false, &spec);
+    if (! ok)
+    {
+        report ("F-5", false, "block=524288 SetImpulse failed");
+        return;
+    }
+    const int layers = convo::NUPCTestAccess::numActiveLayers (conv);
+    const int p0 = convo::NUPCTestAccess::layerPartSize (conv, 0);
+    const int n0 = convo::NUPCTestAccess::layerNumPartsIR (conv, 0);
+    const bool geomOk = layers >= 1 && layers <= 3 && p0 == 524288 && n0 >= 1 && n0 <= 256;
+    report ("F-5", geomOk, fmt ("block=524288 layers=%d l0=%d/%d", layers, p0, n0));
+}
+} // namespace
+
+int main()
+{
+    juce::initialiseJuce_GUI();
+
+    struct Case { int block; int irLen; };
+    const Case cases[] = {
+        { 64,   24000 }, { 64,   48000 }, { 64,   144000 },
+        { 128,  24000 }, { 128,  48000 }, { 128,  144000 },
+        { 256,  24000 }, { 256,  48000 }, { 256,  144000 },
+        { 512,  24000 }, { 512,  48000 }, { 512, 144000 },
+        { 1024, 24000 }, { 1024, 48000 }, { 1024, 144000 },
+        { 2048, 24000 }, { 2048, 48000 }, { 2048, 144000 },
+        { 4096, 24000 }, { 4096, 48000 }, { 4096, 144000 },
+        { 8192, 24000 }, { 8192, 48000 }, { 8192, 144000 },
+        { 16384, 24000 }, { 16384, 48000 }, { 16384, 144000 },
+        { 32768, 24000 }, { 32768, 48000 }, { 32768, 144000 },
+    };
+
+    for (const auto& c : cases)
+    {
+        const auto ir = makeIr (c.irLen);
+        checkF (ir, c.block);
+    }
+    checkGeometryAtMaxBlock();
+
+    // ── I: block 512 の 3.0 秒 IR（先頭パーティション欠落の回帰） ──
+    {
+        const auto ir = makeIr (144000);
+        checkI (ir, 512);
+    }
+
+    // ── H-4: 3.0 秒 IR のテール保持（無音区間がないこと） ──
+    for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 })
+        checkH4 (makeIr (144000), b);
+
+    // ── H: 既定 tailMode=1 のテール保持（IR 1.0 秒・固定区間 0.5〜1.0 秒） ──
+    {
+        const auto ir = makeIr (48000);
+        const auto base = runCase (ir, 256, true);
+        if (base.ok)
+        {
+            std::printf ("[record] H baseline block=256 eFixed=%.3f dB\n", base.eFixedDb);
+            for (int b : { 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384 })
+                checkH (b, base.eFixedDb, (b <= 128) ? 2.5 : 0.1, (b <= 128) ? "H-2" : "H-1");
+        }
+        else
+        {
+            report ("H-1", false, "baseline block=256 SetImpulse failed");
+        }
+    }
+
+    std::printf ("[SUMMARY] failures=%d\n", gFailures);
+    return (gFailures == 0) ? 0 : 1;
+}
+
+
+
+
 
 ```
 
@@ -147760,7 +154643,7 @@ int main() {
     auto isOlder = [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;
     };
-    auth.drain(minReader, isOlder);
+    auth.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
 
     if (auth.residentCountAtomic() != 0)
         return false;
@@ -147807,7 +154690,7 @@ int main() {
     auto isOlder = [](uint64_t a, uint64_t b) noexcept {
         return static_cast<int64_t>(a - b) < 0;
     };
-    auth.drain(minReader, isOlder);
+    auth.drain(minReader, isOlder, convo::RetireDomainId::Unknown);
 
     if (auth.residentCountAtomic() != 0)
         return false;
@@ -147838,7 +154721,7 @@ int main() {
     if (auth.terminalDrainEntryCount() != 0)
         return false;
 
-    auth.drainAll();
+    auth.drainAll(convo::RetireDomainId::Unknown);
 
     if (auth.terminalDrainAllCount() != 1)
         return false;
@@ -147851,7 +154734,7 @@ int main() {
     if (auth.terminalPeakResident() != 4)
         return false;
 
-    auth.drainAll();
+    auth.drainAll(convo::RetireDomainId::Unknown);
     if (auth.terminalDrainAllCount() != 2)
         return false;
     if (auth.terminalDrainEntryCount() != 4)
@@ -147893,7 +154776,7 @@ int main() {
 
     convo::publishAtomic(s_deleteCount, 0);  // NOLINT(atomic-dot-call)
 
-    auth.drainAll();
+    auth.drainAll(convo::RetireDomainId::Unknown);
 
     if (auth.terminalDrainAllCount() != 1)
         return false;
@@ -148379,14 +155262,14 @@ def emit_build_id(build_dir, source_root, shadow_candidate):
     wt = ('production src/ diff = 0 (tests only)' if not prod_diff
           else 'PRODUCTION src DIFF: ' + prod_diff.splitlines()[0] + ' (+more)')
 
-    # (d) production_flag: Phase 0 は token 不在、Phase 1 以降は CMakeCache の option 実値を表示
+    # (d) production_flag: CMakeCache の option 実値を表示（Part 8 E で既定 ON）
     #     （R15-2: flag token の定義解禁は Phase 1 から。identity 判定ロジック自体は変更しない）
-    flag = 'undefined/off (Phase 0: R15-2 — CMake 未登録)'
+    flag = 'undefined/off (CMake 未登録)'
     cache_flag = cmake_cache_field(build_dir, 'CONVOPEQ_CORRECT_POLYPHASE_GAIN')
     if cache_flag is not None:
         _v = cache_flag.strip().upper()
-        flag = ('ON (Phase 1: 明示指定 — characterization 用)' if _v in ('ON', '1', 'TRUE')
-                else 'OFF (Phase 1: default OFF)')
+        flag = ('ON (production default: corrected gain convention, Part 8 E)' if _v in ('ON', '1', 'TRUE')
+                else 'OFF (legacy gain convention: explicit -DCONVOPEQ_CORRECT_POLYPHASE_GAIN=OFF)')
     else:
         try:
             with open(os.path.join(source_root, 'CMakeLists.txt'), 'r',

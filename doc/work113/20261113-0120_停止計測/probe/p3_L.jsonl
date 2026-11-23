@@ -1,0 +1,6 @@
+{"ts":16093071008,"ev":"mark","op":"loadIR_begin","a":4096,"b":2}
+{"ts":16093071516,"ev":"span","op":"cache_direct","us":207,"samples":0,"fft":4096,"phase":2,"cancelled":0}
+{"ts":16093075699,"ev":"span","op":"cache_low","us":108,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16093199905,"ev":"span","op":"cache_save_low","us":97002,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16093259484,"ev":"span","op":"convert_low","us":183748,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16093259598,"ev":"mark","op":"upgrade_start","a":512,"b":4096}

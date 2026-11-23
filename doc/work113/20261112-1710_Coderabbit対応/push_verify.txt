@@ -1,0 +1,9 @@
+=== push verification (a05daf76) ===
+2026-11-12 17:26:44
+local_head=a05daf76eda07a6eed6ba2c14049cc1c2a5669f0
+ls_remote=a05daf76eda07a6eed6ba2c14049cc1c2a5669f0
+remote_tracking=a05daf76eda07a6eed6ba2c14049cc1c2a5669f0
+pr_head=a05daf76eda07a6eed6ba2c14049cc1c2a5669f0
+pr_state=OPEN
+pr_base=main
+worktree_entries=0

@@ -1,0 +1,40 @@
+[PASS] line-comment-inside-string
+[PASS] line-comment-inside-string (string kept)
+[PASS] real-trailing-comment-blanked
+[PASS] block-comment-inside-string
+[PASS] raw-string-comment-markers
+[PASS] prefixed-raw-string
+[PASS] char-literal-brace-is-literal
+[PASS] char-literal-brace-brace-hidden
+[PASS] digit-separator-not-literal
+[PASS] digit-separator-code-kept
+[PASS] char-literal-escaped-quote-single-range
+[PASS] char-literal-escaped-quote-slice
+[PASS] char-literal-escaped-quote-start
+[PASS] char-literal-escaped-quote-end
+[PASS] char-literal-escaped-quote-code-kept
+[PASS] prefixed-char-literal
+[PASS] apostrophe-in-comment
+[PASS] apostrophe-in-comment-code-kept
+[PASS] apostrophe-in-string
+[PASS] escaped-quote-single-range
+[PASS] escaped-quote-range-covers-literal
+[PASS] escaped-quote-range-start
+[PASS] escaped-quote-range-end
+[PASS] escaped-quote-comment-marker-inside
+[PASS] escaped-quote-code-kept
+[PASS] lf-continuation-single-range
+[PASS] lf-continuation-range-spans-lines
+[PASS] lf-continuation-code-kept
+[PASS] crlf-continuation-single-range
+[PASS] crlf-continuation-range-spans-lines
+[PASS] crlf-continuation-code-kept
+[PASS] continued-literal-single-range
+[PASS] continued-literal-comment-marker-kept
+[PASS] continued-literal-real-comment-blanked
+[PASS] continued-literal-code-kept
+[PASS] mutation-escape-detection-observable
+[PASS] mutation-crlf-continuation-observable
+[PASS] mutation-char-escape-detection-observable
+
+scanner probe: all checks passed

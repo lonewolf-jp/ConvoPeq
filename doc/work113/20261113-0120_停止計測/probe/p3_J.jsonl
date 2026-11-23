@@ -1,0 +1,4 @@
+{"ts":16073914954,"ev":"mark","op":"loadIR_begin","a":4096,"b":1}
+{"ts":16073915686,"ev":"span","op":"cache_direct","us":125,"samples":0,"fft":4096,"phase":1,"cancelled":0}
+{"ts":16073963062,"ev":"span","op":"cache_low","us":45511,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16074022155,"ev":"mark","op":"upgrade_start","a":512,"b":4096}

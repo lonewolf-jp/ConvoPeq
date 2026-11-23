@@ -462,13 +462,20 @@ public:
     // ★ 段階③: 時刻から 3 分類を計算する純関数（テスト可能にするため public）
     struct Classification
     {
-        bool excluded = false;      // safeTs 未観測（分類しない）
-        bool inconsistent = false;  // 順序不整合（unclassified に全額）
-        bool classified = false;
-        std::uint64_t driverWaitNs = 0;
-        std::uint64_t ebrWaitNs = 0;
-        std::uint64_t execWaitNs = 0;
-        std::uint64_t unclassifiedNs = 0;
+        bool excluded;              // safeTs 未観測（分類しない）
+        bool inconsistent;          // 順序不整合（unclassified に全額）
+        bool classified;
+        std::uint64_t driverWaitNs;
+        std::uint64_t ebrWaitNs;
+        std::uint64_t execWaitNs;
+        std::uint64_t unclassifiedNs;
+
+        // ★ icx (Clang) 対応: 既定メンバ初期化子は外側クラス定義内では使えない。
+        //   appendObservation の既定引数 Classification{} が外側クラス定義内に
+        //   あるため、constexpr ctor に置き換える（値は従来と同一）。
+        constexpr Classification() noexcept
+            : excluded(false), inconsistent(false), classified(false),
+              driverWaitNs(0), ebrWaitNs(0), execWaitNs(0), unclassifiedNs(0) {}
     };
     static Classification classifyTimes (std::uint64_t ts,
                                          std::uint64_t firstScanTs,

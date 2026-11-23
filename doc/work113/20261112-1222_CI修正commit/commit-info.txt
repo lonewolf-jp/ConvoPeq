@@ -1,0 +1,5 @@
+commit: b237f233f5ddaab9ef471bf2afe3e036ceb089b5
+parent: 173e69957b046290f7077797782f031ed8633fd0
+author: lonewolf-jp <lonewolf-jp@users.noreply.github.com>
+date: Thu Nov 12 12:22:33 2026 +0900
+subject: fix(isr): restore the lint, atomic-access and proof-scope gates

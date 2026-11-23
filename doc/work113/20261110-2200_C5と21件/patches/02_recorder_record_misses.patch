@@ -1,0 +1,99 @@
+--- a/src/audioengine/ISRRetireLatency.h
++++ b/src/audioengine/ISRRetireLatency.h
+@@ -77,6 +77,7 @@
+         if (shutdownPhase_.load (std::memory_order_acquire))
+         {
+             addCount (postShutdown_);
++            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+             return 0;
+         }
+ 
+@@ -85,6 +86,7 @@
+         if (id == 0u || id == std::numeric_limits<std::uint64_t>::max())
+         {
+             addCount (idExhausted_);
++            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+             return 0;
+         }
+ 
+@@ -138,6 +140,7 @@
+         }
+ 
+         addCount (overflow_);
++        addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+         return 0;
+     }
+ 
+@@ -154,6 +157,7 @@
+         if (shutdownPhase_.load (std::memory_order_acquire))
+         {
+             addCount (postShutdown_);
++            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+             return 0;
+         }
+ 
+@@ -162,6 +166,7 @@
+         if (id == 0u || id == std::numeric_limits<std::uint64_t>::max())
+         {
+             addCount (idExhausted_);
++            addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+             return 0;
+         }
+ 
+@@ -199,6 +204,7 @@
+         }
+ 
+         addCount (overflow_);
++        addCount (recordMisses_);   // ★ C5: 計測上の欠落を検出可能にする
+         return 0;
+     }
+ 
+@@ -376,6 +382,7 @@
+         std::uint64_t idExhausted = 0;
+         std::uint64_t cancelled = 0;
+         std::uint64_t postShutdownRequests = 0;   // drainAll 以降の要求
++        std::uint64_t recordMisses = 0;           // ★ C5: 記録できなかった要求
+         std::uint64_t ebrCount = 0;
+         std::uint64_t ebrSumNs = 0;
+         std::uint64_t ebrMaxNs = 0;
+@@ -399,6 +406,7 @@
+         std::uint64_t overflow = 0;
+         std::uint64_t idExhausted = 0;
+         std::uint64_t postShutdownRequests = 0;
++        std::uint64_t recordMisses = 0;   // ★ C5: 記録できなかった要求
+         std::uint64_t pending = 0;
+         std::uint64_t ebrCount = 0;
+         std::uint64_t ebrSumNs = 0;
+@@ -421,6 +429,7 @@
+         s.overflow = overflow_.load (std::memory_order_acquire);
+         s.idExhausted = idExhausted_.load (std::memory_order_acquire);
+         s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
++        s.recordMisses = recordMisses_.load (std::memory_order_acquire);
+         s.ebrCount = ebrCount_.load (std::memory_order_acquire);
+         s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
+         s.ebrMaxNs = ebrMaxNs_.load (std::memory_order_acquire);
+@@ -465,6 +474,7 @@
+         s.idExhausted = idExhausted_.load (std::memory_order_acquire);
+         s.cancelled = cancelled_.load (std::memory_order_acquire);
+         s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
++        s.recordMisses = recordMisses_.load (std::memory_order_acquire);
+         s.ebrCount = ebrCount_.load (std::memory_order_acquire);
+         s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
+         s.ebrMaxNs = ebrMaxNs_.load (std::memory_order_acquire);
+@@ -525,6 +535,7 @@
+         runtimeStage_[1] = StageStats{};
+         runtimeStageSlot_.store (0, std::memory_order_release);
+         postShutdown_.store (0, std::memory_order_release);
++        recordMisses_.store (0, std::memory_order_release);
+         for (std::size_t i = 0; i < kSlots; ++i)
+         {
+             slots_[i].state.store (kStateFree, std::memory_order_release);
+@@ -697,6 +708,8 @@
+     std::atomic<std::uint64_t> idExhausted_{0};
+     std::atomic<std::uint64_t> cancelled_{0};
+     std::atomic<std::uint64_t> postShutdown_{0};
++    // ★ C5 (2026-11-10): 記録できなかった要求の総数（overflow・ID 枯渇・shutdown 相）
++    std::atomic<std::uint64_t> recordMisses_{0};
+     std::atomic<bool> shutdownPhase_{false};
+     StageStats runtimeStage_[2]{};
+     std::atomic<std::size_t> runtimeStageSlot_{0};

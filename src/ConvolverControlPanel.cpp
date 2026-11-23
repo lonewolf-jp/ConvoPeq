@@ -36,6 +36,17 @@ ConvolverProcessor::PhaseMode comboIdToPhaseMode(int id)
     }
 }
 
+// ★ B-10: 実効位相モードの表示名（要求と実効が食い違う場合に UI へ出す）。
+const char* phaseModeShortName(ConvolverProcessor::PhaseMode mode)
+{
+    switch (mode)
+    {
+        case ConvolverProcessor::PhaseMode::Minimum: return "Minimum";
+        case ConvolverProcessor::PhaseMode::Mixed:   return "Mixed";
+        default:                                      return "Linear";
+    }
+}
+
 int tailModeToComboId(ConvolverProcessor::TailMode mode)
 {
     switch (mode)
@@ -1412,9 +1423,29 @@ void ConvolverControlPanel::updateIRInfo()
         else
             info += " Lat A: " + juce::String(algorithmMs) + "ms / T: " + juce::String(totalMs) + "ms";
 
-        irInfoLabel.setText(info, juce::dontSendNotification);
-        irInfoLabel.setColour(juce::Label::textColourId,
-                             juce::Colours::lightgreen);
+        // ★ B-10: 実際に適用された位相モードを併記する。要求と異なる場合は、線形位相で
+        //   動いている事実を警告として出す（最小位相化が FFT 上限でスキップされた場合）。
+        const int effectivePhaseRaw = convolver.getEffectivePhaseModeForLastLoad();
+
+        if (effectivePhaseRaw >= 0)
+            info += juce::String(" · Phase: ")
+                  + phaseModeShortName(static_cast<ConvolverProcessor::PhaseMode>(effectivePhaseRaw));
+
+        const juce::String phaseWarning = convolver.getLastPhaseWarning();
+
+        if (phaseWarning.isNotEmpty())
+        {
+            irInfoLabel.setText(phaseWarning, juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+            irInfoLabel.setTooltip(info);
+        }
+        else
+        {
+            irInfoLabel.setText(info, juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId,
+                                 juce::Colours::lightgreen);
+            irInfoLabel.setTooltip("");
+        }
     }
     else if (const float progress = convolver.getLoadProgress(); convolver.isLoadingIR() && progress >= 0.0f && progress < 1.0f)
     {

@@ -1,0 +1,12 @@
+{"ts":21007110711,"ev":"span","op":"stopLearning_terminal","us":10223,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21007111198,"ev":"mark","op":"coord_stop_result","a":1,"b":0}
+{"ts":21007111238,"ev":"span","op":"coord_stop","us":40,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21015812412,"ev":"span","op":"stopLearning_terminal","us":2901,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21015812742,"ev":"mark","op":"coord_stop_result","a":1,"b":0}
+{"ts":21015812781,"ev":"span","op":"coord_stop","us":39,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21024521547,"ev":"span","op":"stopLearning_terminal","us":2435,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21024522236,"ev":"mark","op":"coord_stop_result","a":1,"b":0}
+{"ts":21024522270,"ev":"span","op":"coord_stop","us":34,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21033220420,"ev":"span","op":"stopLearning_terminal","us":2755,"samples":0,"fft":0,"phase":0,"cancelled":0}
+{"ts":21033220678,"ev":"mark","op":"coord_stop_result","a":1,"b":0}
+{"ts":21033220706,"ev":"span","op":"coord_stop","us":28,"samples":0,"fft":0,"phase":0,"cancelled":0}

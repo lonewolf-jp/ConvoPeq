@@ -6,6 +6,7 @@
 //============================================================================
 #include "MainWindow.h"
 #include <cmath>
+#include "InputInspection.h"   // ★ B-05/B-06: XML のサイズ・深さ検査
 #include "audioengine/AtomicAccess.h"
 
 namespace
@@ -264,15 +265,54 @@ MainWindow::MainWindow (const juce::String& name)
 
     // デフォルトのブラックリストファイルを作成（存在しない場合）
     // シングルクライアントASIOや不安定なドライバをデフォルトで除外
-    if (! blacklistFile.existsAsFile())
+    constexpr const char* kDefaultAsioBlacklist =
+        "# ASIO Driver Blacklist\n"
+        "# Add partial driver names to exclude them from the list.\n"
+        "BRAVO-HD\n"
+        "ASIO4ALL\n";
+
+    // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
+    //   作成に失敗する。従来は無言で空リストのまま起動していた。ユーザー領域へ
+    //   フォールバックし、それも失敗したら UI に通知する。
+    bool blacklistReady = blacklistFile.existsAsFile()
+                          || (blacklistFile.replaceWithText (kDefaultAsioBlacklist)
+                              && blacklistFile.existsAsFile());
+
+    if (! blacklistReady)
     {
-        blacklistFile.replaceWithText ("# ASIO Driver Blacklist\n"
-                                       "# Add partial driver names to exclude them from the list.\n"
-                                       "BRAVO-HD\n"
-                                       "ASIO4ALL\n");
+        auto userFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                            .getChildFile ("ConvoPeq")
+                            .getChildFile ("asio_blacklist.txt");
+
+        userFile.getParentDirectory().createDirectory();
+        blacklistReady = userFile.existsAsFile()
+                         || (userFile.replaceWithText (kDefaultAsioBlacklist)
+                             && userFile.existsAsFile());
+
+        if (blacklistReady)
+        {
+            blacklistFile = userFile;
+            juce::Logger::writeToLog ("[MainWindow] ASIO blacklist fell back to: "
+                                      + userFile.getFullPathName());
+        }
     }
 
-    asioBlacklist.loadFromFile (blacklistFile);
+    if (! asioBlacklist.loadFromFile (blacklistFile))
+    {
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist could not be created or read: "
+                                  + blacklistFile.getFullPathName());
+
+        juce::NativeMessageBox::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::WarningIcon)
+                .withTitle ("ASIO blacklist")
+                .withMessage ("The ASIO driver blacklist could not be created or read:\n"
+                              + blacklistFile.getFullPathName()
+                              + "\nUnstable drivers such as ASIO4ALL or BRAVO-HD may appear "
+                                "in the device list."),
+            nullptr);
+    }
+
     DeviceSettings::applyAsioBlacklist (audioDeviceManager, asioBlacklist);
 
     // エンジンを先に初期化してデフォルトのサンプルレート(48kHz)を設定
@@ -397,14 +437,26 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-learning-action").isEmpty()
         || !findValue("--cli-learning-mode").isEmpty()
         || !findValue("--cli-exit-ms").isEmpty()
-        || !findValue("--cli-log-file").isEmpty();
+        || !findValue("--cli-log-file").isEmpty()
+        || !findValue("--cli-measure-ir").isEmpty()
+        || !findValue("--cli-measure-async-load-count").isEmpty()
+        || !findValue("--cli-measure-late-load-at-ms").isEmpty()
+        || !findValue("--cli-measure-bypass-from-ms").isEmpty()
+        || !findValue("--cli-measure-bypass-span-ms").isEmpty()
+        || !findValue("--cli-measure-eq-from-ms").isEmpty()
+        || !findValue("--cli-measure-eq-span-ms").isEmpty()
+        || hasFlag("--cli-measure-enable-upgrade");
 
     // ★ v14.47: --cli-log-file <path> — 診断ログをファイルに出力
     if (const auto logFileValue = findValue("--cli-log-file"); !logFileValue.isEmpty())
     {
         const auto logFile = juce::File::getCurrentWorkingDirectory().getChildFile(logFileValue);
-        auto fileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq CLI Log", 0);
-        juce::Logger::setCurrentLogger(fileLogger.release());
+
+        // ★ B-14: setCurrentLogger は所有権を取らない。従来は release() で所有権を
+        //   捨てていたため、CLI 実行時に logger とファイルハンドルが終了まで残っていた。
+        //   メンバで保持し、デストラクタで Logger から外してから解放する。
+        cliLogFileLogger = std::make_unique<juce::FileLogger>(logFile, "ConvoPeq CLI Log", 0);
+        juce::Logger::setCurrentLogger(cliLogFileLogger.get());
         juce::Logger::writeToLog("[CLI] Log file: " + logFile.getFullPathName());
     }
 
@@ -418,6 +470,111 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         cliRequestedBufferSamples = 0;
         cliRequestedSampleRateHz = 0.0;
         return;
+    }
+
+    // ★ 計測専用（既定 OFF）: 走行中 Worker を作る opt-in 経路。
+    //   --cli-measure-ir / --cli-measure-async-load-count / --cli-measure-enable-upgrade を
+    //   指定したときだけ動く。通常実行では何もしない（production 挙動不変）。
+    if (const auto measureIr = findValue("--cli-measure-ir"); !measureIr.isEmpty())
+    {
+        const auto irFile = juce::File::getCurrentWorkingDirectory().getChildFile (measureIr);
+        const int asyncCount = findValue("--cli-measure-async-load-count").getIntValue();
+        const int asyncIntervalMs = juce::jmax (50, findValue("--cli-measure-async-load-interval-ms").getIntValue());
+        const bool enableUpgrade = hasFlag ("--cli-measure-enable-upgrade");
+        juce::Component::SafePointer<MainWindow> safeThis (this);
+
+        if (enableUpgrade)
+            audioEngine.getConvolverProcessor().setEnableProgressiveUpgrade (true);
+
+        for (int i = 0; asyncCount > 0 && i < juce::jlimit (1, 64, asyncCount); ++i)
+        {
+            juce::Timer::callAfterDelay (300 + i * asyncIntervalMs, [safeThis, irFile, enableUpgrade]()
+            {
+                if (auto* w = safeThis.getComponent())
+                {
+                    auto& proc = w->getAudioEngine()->getConvolverProcessor();
+
+                    if (enableUpgrade)
+                    {
+                        // 設定ロードで false に戻されることがあるため、各回の直前に立て直す。
+                        proc.setEnableProgressiveUpgrade (true);
+                        proc.loadIR (irFile);          // → startProgressiveUpgrade（W6 を作る）
+                    }
+                    else
+                    {
+                        proc.loadImpulseResponse (irFile, false);   // → LoaderThread（W5 を作る）
+                    }
+                }
+            });
+        }
+
+        // 計測専用の負荷: 指定時刻から bypass と EQ gain を交互に切り替える（競合状態の再現）。
+        if (const auto fromMs = findValue("--cli-measure-bypass-from-ms"); !fromMs.isEmpty())
+        {
+            const int from = juce::jlimit (0, 600000, fromMs.getIntValue());
+            constexpr int kIntervalMs = 5;
+            const int kSpanMs = juce::jlimit (20, 5000,
+                findValue ("--cli-measure-bypass-span-ms").getIntValue() > 0
+                    ? findValue ("--cli-measure-bypass-span-ms").getIntValue() : 2000);
+            for (int i = 0; i < kSpanMs / kIntervalMs; ++i)
+            {
+                juce::Timer::callAfterDelay (from + i * kIntervalMs,
+                                             [safeThis, i]()
+                {
+                    if (auto* w = safeThis.getComponent())
+                    {
+                        // bypass のみを切り替える（EQ gain の切替は submitRebuildIntent を
+                        // 誘発して進行中ロードをキャンセルするため、この条件には含めない）。
+                        w->getAudioEngine()->setConvolverBypassRequested ((i % 2) == 0);
+                    }
+                });
+            }
+        }
+
+        // 計測専用の負荷（EQ gain 切替）: submitRebuildIntent を誘発する条件。
+        if (const auto eqFromMs = findValue ("--cli-measure-eq-from-ms"); !eqFromMs.isEmpty())
+        {
+            const int from = juce::jlimit (0, 600000, eqFromMs.getIntValue());
+            constexpr int kIntervalMs = 5;
+            const int spanMs = juce::jlimit (20, 5000,
+                findValue ("--cli-measure-eq-span-ms").getIntValue() > 0
+                    ? findValue ("--cli-measure-eq-span-ms").getIntValue() : 260);
+            for (int i = 0; i < spanMs / kIntervalMs; ++i)
+            {
+                juce::Timer::callAfterDelay (from + i * kIntervalMs,
+                                             [safeThis, i]()
+                {
+                    if (auto* w = safeThis.getComponent())
+                        w->getAudioEngine()->setEQBandGain (0, ((i % 2) == 0) ? 0.0f : 3.0f);
+                });
+            }
+        }
+
+        // 終了直前に 1 回だけロードして、shutdown 時点で走行中の Worker を作る。
+        if (const auto lateMs = findValue("--cli-measure-late-load-at-ms"); !lateMs.isEmpty())
+        {
+            const int atMs = juce::jlimit (100, 600000, lateMs.getIntValue());
+            juce::Timer::callAfterDelay (atMs, [safeThis, irFile, enableUpgrade]()
+            {
+                if (auto* w = safeThis.getComponent())
+                {
+                    auto& proc = w->getAudioEngine()->getConvolverProcessor();
+                    if (enableUpgrade)
+                    {
+                        proc.setEnableProgressiveUpgrade (true);
+                        proc.loadIR (irFile);
+                    }
+                    else
+                    {
+                        proc.loadImpulseResponse (irFile, false);
+                    }
+                }
+            });
+        }
+    }
+    else if (hasFlag ("--cli-measure-enable-upgrade"))
+    {
+        audioEngine.getConvolverProcessor().setEnableProgressiveUpgrade (true);
     }
 
     juce::Logger::writeToLog("[CLI] Automation requested: " + trimmedCommandLine);
@@ -910,15 +1067,22 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     burstBypassValue = (parsedValue != 0);
             }
 
+            // ★ A(D1): 交互バースト（毎回値を反転する）。同一値の連投では publish が
+            //   起きない場合があるため、測定用の駆動として明示的に交互切替を選べるようにする。
+            bool burstAlternate = false;
+            if (const auto alternateValue = findValue("--cli-bypass-burst-alternate"); !alternateValue.isEmpty())
+                burstAlternate = (alternateValue != "0");
+
             juce::Logger::writeToLog("[CLI] Scheduled bypass burst: count="
                                      + juce::String(burstCount)
                                      + " intervalMs=" + juce::String(burstIntervalMs)
-                                     + " value=" + juce::String(static_cast<int>(burstBypassValue)));
+                                     + " value=" + juce::String(static_cast<int>(burstBypassValue))
+                                     + " alternate=" + juce::String(static_cast<int>(burstAlternate)));
 
             for (int i = 0; i < burstCount; ++i)
             {
                 const int delayMs = i * burstIntervalMs;
-                juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), burstBypassValue]
+                juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), burstBypassValue, burstAlternate, i]
                 {
                     if (safeThis == nullptr)
                         return;
@@ -926,7 +1090,10 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
                         return;
 
-                    safeThis->audioEngine.setConvolverBypassRequested(burstBypassValue);
+                    const bool requested = burstAlternate
+                                             ? (((i % 2) == 0) ? burstBypassValue : ! burstBypassValue)
+                                             : burstBypassValue;
+                    safeThis->audioEngine.setConvolverBypassRequested(requested);
                 });
             }
         }
@@ -1114,6 +1281,10 @@ std::unique_ptr<juce::AccessibilityHandler> MainWindow::createAccessibilityHandl
 //--------------------------------------------------------------
 MainWindow::~MainWindow()
 {
+    // ★ B-14: Logger は logger を所有しない。破棄より先に必ず外す。
+    if (cliLogFileLogger != nullptr)
+        juce::Logger::setCurrentLogger (nullptr);
+
     convo::publishAtomic(cliAutomationCallbacksEnabled, false, std::memory_order_release);
     juce::Logger::writeToLog("[DIAG] ~MainWindow: ENTER (before setLookAndFeel)");
     orderModeBox.setLookAndFeel (nullptr);
@@ -1634,9 +1805,42 @@ void MainWindow::launchFileChooserImpl(bool isSaving)
         if (isSaving)
         {
             auto state = safeThis->audioEngine.getCurrentState();
+
+            // ★ 保存失敗はユーザーに明示する。原因の詳細はログに残し、
+            //   通知文言は原因ごとに増やさず統一する（保存が完了しなかったことを明示）。
+            const auto notifySaveFailure = [] (const juce::String& detail)
+            {
+                juce::Logger::writeToLog ("[MainWindow] preset XML save rejected: " + detail);
+
+                juce::NativeMessageBox::showAsync (
+                    juce::MessageBoxOptions()
+                        .withIconType (juce::MessageBoxIconType::WarningIcon)
+                        .withTitle ("Preset not saved")
+                        .withMessage ("The preset was not saved. The existing file was left unchanged.")
+                        .withButton ("OK"),
+                    nullptr);
+            };
+
             if (auto xml = state.createXml())
             {
-                xml->writeTo(file);
+                const juce::String xmlText = xml->toString();
+
+                // ★ 上限判定は読込側と同じ関数・同じ単位（UTF-8 バイト数）で行う。
+                //   超過時は writeTo を呼ばない（既存ファイルに触れない）。
+                if (! convo::safeinput::isXmlTextWithinLimit (xmlText))
+                {
+                    notifySaveFailure ("size " + juce::String (static_cast<juce::int64> (xmlText.getNumBytesAsUTF8()))
+                                       + " bytes exceeds the limit of "
+                                       + juce::String (convo::safeinput::kMaxXmlFileBytes) + " bytes");
+                }
+                else if (! xml->writeTo (file))
+                {
+                    notifySaveFailure ("write failed: " + file.getFullPathName());
+                }
+            }
+            else
+            {
+                notifySaveFailure ("state could not be serialized");
             }
         }
         else // 読み込み中
@@ -1645,11 +1849,31 @@ void MainWindow::launchFileChooserImpl(bool isSaving)
             {
                 if (file.hasFileExtension(".xml"))
                 {
-                    if (auto xml = juce::XmlDocument::parse(file))
+                    // ★ B-06: プリセット／セッション XML は解析前にサイズ・深さ・DOCTYPE を検査する。
+                    //   拒否理由はログと UI の両方へ出す（silent skip にしない）。
+                    juce::String xmlReason;
+
+                    if (auto xml = convo::safeinput::parseXmlFile(file, &xmlReason))
                     {
                         auto state = juce::ValueTree::fromXml(*xml);
                         if (state.isValid())
                             safeThis->audioEngine.requestLoadState(state);
+                    }
+                    else
+                    {
+                        const juce::String why = xmlReason.isNotEmpty()
+                                                     ? xmlReason
+                                                     : ("Preset XML could not be read: " + file.getFileName());
+
+                        juce::Logger::writeToLog("[MainWindow] preset XML rejected: " + why);
+
+                        juce::NativeMessageBox::showAsync(
+                            juce::MessageBoxOptions()
+                                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                .withTitle("Preset not loaded")
+                                .withMessage(why)
+                                .withButton("OK"),
+                            nullptr);
                     }
                 }
                 else if (file.hasFileExtension(".txt"))

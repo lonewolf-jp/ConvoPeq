@@ -31,24 +31,34 @@ public:
 
     struct Record
     {
-        std::atomic<uint8_t>  state{0};          // 0=free 1=active
-        std::atomic<uint64_t> enterUs{0};
-        std::atomic<uint64_t> instKey{0};
-        std::atomic<uint64_t> provKey{0};
-        std::atomic<uint64_t> threadTag{0};
-        std::atomic<uint32_t> slot{0xFFFFFFFFu};
-        std::atomic<uint32_t> depth{0};
-        std::atomic<uint32_t> seq{0};
-        char tag[32]{};
+        std::atomic<uint8_t>  state;             // 0=free 1=active
+        std::atomic<uint64_t> enterUs;
+        std::atomic<uint64_t> instKey;
+        std::atomic<uint64_t> provKey;
+        std::atomic<uint64_t> threadTag;
+        std::atomic<uint32_t> slot;
+        std::atomic<uint32_t> depth;
+        std::atomic<uint32_t> seq;
+        char tag[32];
+
+        // ★ icx (Clang) 対応: 既定メンバ初期化子は外側クラス定義内では使えない
+        //   （C++ の規則。MSVC は緩和する）。constexpr ctor に置き換えれば
+        //   static inline 配列の {} 初期化が通り、値も従来と同一になる。
+        constexpr Record() noexcept
+            : state(0), enterUs(0), instKey(0), provKey(0), threadTag(0),
+              slot(0xFFFFFFFFu), depth(0), seq(0), tag{} {}
     };
 
     struct Agg
     {
-        std::atomic<uint32_t> used{0};
-        std::atomic<uint64_t> count{0};
-        std::atomic<uint64_t> maxHoldUs{0};
-        std::atomic<uint64_t> sumHoldUs{0};
-        char tag[32]{};
+        std::atomic<uint32_t> used;
+        std::atomic<uint64_t> count;
+        std::atomic<uint64_t> maxHoldUs;
+        std::atomic<uint64_t> sumHoldUs;
+        char tag[32];
+
+        constexpr Agg() noexcept
+            : used(0), count(0), maxHoldUs(0), sumHoldUs(0), tag{} {}
     };
 
     static inline Record recs_[kRecords]{};

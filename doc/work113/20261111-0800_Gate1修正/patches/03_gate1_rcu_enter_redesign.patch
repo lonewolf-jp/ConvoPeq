@@ -1,0 +1,158 @@
+diff --git a/src/core/RCUReader.h b/src/core/RCUReader.h
+index 401ef99d..e697ace7 100644
+--- a/src/core/RCUReader.h
++++ b/src/core/RCUReader.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "IReaderEpochProvider.h"
++#include "ReaderMeasureRegistry.h"
+ #include <atomic>
+ #include <functional>
+ #include <thread>
+@@ -33,53 +34,64 @@ public:
+     RCUReader(RCUReader&&) = delete;
+     RCUReader& operator=(RCUReader&&) = delete;
+ 
+-    void enter() noexcept
++    // 笘・Gate 1 (2026-11-11): 謌ｻ繧雁､ = 縲後％縺ｮ蜻ｼ蜃ｺ縺励′菫晁ｭｷ繧堤｢ｺ遶九＠縺溘°縲阪・+    //   rootEnterSucceeded_ 縺ｯ謇譛芽・せ繝ｬ繝・ラ縺縺代′譖ｸ縺阪》hread-confined 繧堤ｶｭ謖√☆繧九・+    //   莉悶せ繝ｬ繝・ラ縺ｮ蜈･蝣ｴ縺ｯ nested 縺ｨ隱､隱阪○縺壹∫憾諷九ｒ荳蛻・､画峩縺帙★縺ｫ false 繧定ｿ斐☆縲・+    bool enter() noexcept
+     {
+-        // acq_rel: acquire 竊・逶ｴ蜑阪・ exit() 縺ｮ nestingDepth release 繧定ｦｳ貂ｬ縺励※繝阪せ繝医ｒ螳牙・蛹厄ｼ・-        //          release 竊・depth > 0 繧貞・髢九＠縲√ロ繧ｹ繝井ｸｭ縺ｮ enter 縺梧掠譛・return 縺ｧ縺阪ｋ縲・-        const uint32_t previousDepth = convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+-        if (previousDepth > 0)
++        const uint64_t my = currentThreadToken();
++
++        // 1) 謇譛芽・′譌｢縺ｫ螻・ｋ蝣ｴ蜷・ 蜷御ｸ繧ｹ繝ｬ繝・ラ縺ｪ繧・nested縲∽ｻ悶せ繝ｬ繝・ラ縺ｪ繧我ｽ輔ｂ螟画峩縺帙★螟ｱ謨・+        const uint64_t owner = convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire);
++        if (owner != 0)
+         {
+-            // 笘・繝阪せ繝・ 譛螟門ｱ､縺ｮ rootEnterSucceeded_ 繧堤ｶｭ謖・-            return;
++            if (owner != my)
++                return false;                       // 莉悶せ繝ｬ繝・ラ謇譛会ｼ・epth 繧・owner 繧りｧｦ繧峨↑縺・ｼ・+
++            convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
++            return rootEnterSucceeded_;             // nested 縺ｯ螟門・縺ｮ謌仙凄繧定ｿ斐☆
+         }
+ 
+-        const uint64_t threadToken = currentThreadToken();
++        // 2) 謇譛芽・′遨ｺ縺・ CAS 縺ｧ謇譛画ｨｩ繧貞・縺ｫ遒ｺ菫昴☆繧具ｼ医％縺薙′邱壼ｽ｢蛹也せ・・         uint64_t expectedOwner = 0;
+-        // CAS acq_rel/acquire: 謌仙粥譎・acq_rel 竊・ownerThreadToken 繧貞叙蠕励＠譁ｰ繧ｪ繝ｼ繝翫・繧貞・髢具ｼ・-        //                     螟ｱ謨玲凾 acquire 竊・遶ｶ蜷医せ繝ｬ繝・ラ縺ｮ譛譁ｰ ownerThreadToken 繧定ｦｳ貂ｬ縲・         if (!convo::compareExchangeAtomic(ownerThreadToken,
+                                           expectedOwner,
+-                                          threadToken,
++                                          my,
+                                           std::memory_order_acq_rel,
+-                                          std::memory_order_acquire)
+-            && expectedOwner != threadToken)
++                                          std::memory_order_acquire))
+         {
+-            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+-            return;
++            if (expectedOwner != my)
++                return false;                       // 遶ｶ蜷医↓雋縺代◆・育憾諷九・螟画峩縺励↑縺・ｼ・+
++            convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
++            return rootEnterSucceeded_;
+         }
+ 
++        // 3) 謇譛画ｨｩ繧貞ｾ励◆: depth 0竊・
++        convo::fetchAddAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
++
+         const int tid = acquireThreadSlot();
+         if (tid >= 0)
+         {
+             epochProvider->enterReader(tid);
+-            // 笘・P1-A: 莉雁屓縺ｮ enter 謌仙粥繧定ｨ倬鹸・・on-atomic: thread confined・・             rootEnterSucceeded_ = true;
++            measureIdx_ = convo::ReaderMeasureRegistry::claim ("RCUReader",
++                                                               static_cast<std::uint32_t> (tid), 1u,
++                                                               this, epochProvider);
++            return true;
+         }
+-        else
+-        {
+-            // 笘・P1-A: slot 蜿門ｾ怜､ｱ謨・竊・莉雁屓縺ｮ enter 螟ｱ謨励ｒ險倬鹸・・ail-Closed・・-            rootEnterSucceeded_ = false;
+-            // acq_rel: 繧ｹ繝ｭ繝・ヨ蜿門ｾ怜､ｱ謨玲凾縺ｮ nestingDepth 貂帷ｮ・窶・acq_rel 縺ｧ螳牙・縺ｫ蜈ｬ髢九・-            convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
+-            uint64_t expectedOwnerOnRelease = threadToken;
+-            // CAS acq_rel/acquire: ownerThreadToken 繧・0 縺ｫ謌ｻ縺呻ｼ帛､ｱ謨玲凾 acquire 縺ｧ譛譁ｰ蛟､隕ｳ貂ｬ縲・-            convo::compareExchangeAtomic(ownerThreadToken,
+-                                         expectedOwnerOnRelease,
+-                                         static_cast<uint64_t>(0),
+-                                         std::memory_order_acq_rel,
+-                                         std::memory_order_acquire);
+-        }
++
++        // 4) slot 蜿門ｾ怜､ｱ謨・ owner 縺ｨ depth 繧偵Ο繝ｼ繝ｫ繝舌ャ繧ｯ
++        rootEnterSucceeded_ = false;
++        convo::ReaderMeasureRegistry::enterFailures_.fetch_add (1u, std::memory_order_relaxed);
++        convo::fetchSubAtomic(nestingDepth, static_cast<uint32_t>(1), std::memory_order_acq_rel);
++        uint64_t expectedOwnerOnRelease = my;
++        convo::compareExchangeAtomic(ownerThreadToken,
++                                     expectedOwnerOnRelease,
++                                     static_cast<uint64_t>(0),
++                                     std::memory_order_acq_rel,
++                                     std::memory_order_acquire);
++        return false;
+     }
+ 
+     // === 髯仙ｮ壼・髢帰PI (P0-14: EpochDomain蝙九ｒ髴ｲ蜃ｺ縺励↑縺・ ===
+@@ -112,6 +124,7 @@ public:
+         if (previousDepth == 0)
+         {
+             rootEnterSucceeded_ = false;
++            convo::ReaderMeasureRegistry::underflows_.fetch_add (1u, std::memory_order_relaxed);   // 笘・險域ｸｬ
+             // underflow繧ｬ繝ｼ繝・ 0 繧・release 縺ｧ蜀榊・髢九＠縲∝ｱ暮幕 depth 繧剃ｿｮ豁｣縲・             convo::publishAtomic(nestingDepth, 0, std::memory_order_release);
+             return;
+@@ -124,6 +137,12 @@ public:
+ 
+         // 笘・previousDepth == 1: 譛螟門ｱ､ exit
+         // acquire: enter() 縺ｮ ownerThreadToken acq_rel 縺ｨ HB 縺励∵園譛芽・ｒ隕ｳ貂ｬ縲・+        // 笘・險域ｸｬ (2026-11-11): 譛螟門ｱ､縺ｮ騾蜃ｺ縺ｧ蛹ｺ逕ｻ繧帝哩縺倥ｋ・医ロ繧ｹ繝医〒縺ｯ髢峨§縺ｪ縺・ｼ・+        if (measureIdx_ >= 0)
++        {
++            convo::ReaderMeasureRegistry::close (measureIdx_);
++            measureIdx_ = -1;
++        }
+         if (convo::consumeAtomic(ownerThreadToken, std::memory_order_acquire) != currentThreadToken())
+         {
+             rootEnterSucceeded_ = false;  // 謇譛芽・ｸ堺ｸ閾ｴ縺ｧ繧ゅΜ繧ｻ繝・ヨ
+@@ -194,6 +213,7 @@ private:
+     std::atomic<uint32_t> nestingDepth { 0 };
+     std::atomic<uint64_t> ownerThreadToken { 0 };
+     IReaderEpochProvider* epochProvider = nullptr;
++    int measureIdx_ = -1;   // 笘・險域ｸｬ: ReaderMeasureRegistry 縺ｮ繝ｬ繧ｳ繝ｼ繝臥分蜿ｷ
+     // 笘・P1-A: per-enter 謌仙凄霑ｽ霍｡・・on-atomic: RAII thread confinement 荳九〒螳牙・・・     bool rootEnterSucceeded_ = false;
+ };
+@@ -201,32 +221,38 @@ private:
+ class RCUReaderGuard
+ {
+ public:
+-    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r) { reader->enter(); }
+-    ~RCUReaderGuard() noexcept { if (reader) reader->exit(); }
++    // 笘・Gate 1 (2026-11-11): 謌仙凄繧偵後％縺ｮ蜻ｼ蜃ｺ縺励阪〒菫晄戟縺吶ｋ・亥・譛峨ヵ繝ｩ繧ｰ繧定ｪｭ縺ｾ縺ｪ縺・ｼ峨・+    explicit RCUReaderGuard(RCUReader& r) noexcept : reader(&r), ok_(r.enter()) {}
++    // 笘・Gate 1: 蜈･蝣ｴ縺ｫ螟ｱ謨励＠縺・guard 縺ｯ exit 繧貞他縺ｰ縺ｪ縺・ｼ・epth 繧貞｣翫＆縺ｪ縺・ｼ・+    ~RCUReaderGuard() noexcept { if (reader && ok_) reader->exit(); }
+ 
+     RCUReaderGuard(const RCUReaderGuard&) = delete;
+     RCUReaderGuard& operator=(const RCUReaderGuard&) = delete;
+ 
+-    RCUReaderGuard(RCUReaderGuard&& other) noexcept : reader(other.reader) { other.reader = nullptr; }
++    RCUReaderGuard(RCUReaderGuard&& other) noexcept
++        : reader(other.reader), ok_(other.ok_) { other.reader = nullptr; other.ok_ = false; }
+     RCUReaderGuard& operator=(RCUReaderGuard&& other) noexcept
+     {
+         if (this != &other)
+         {
+-            if (reader) reader->exit();
++            if (reader && ok_) reader->exit();
+             reader = other.reader;
++            ok_ = other.ok_;
+             other.reader = nullptr;
++            other.ok_ = false;
+         }
+         return *this;
+     }
+ 
+-    // 笘・C-7: RCU enter 謌仙粥縺ｮ遒ｺ隱・+    // 笘・C-7 + Gate 1: 縺薙・ guard 縺ｮ蜈･蝣ｴ縺御ｿ晁ｭｷ繧堤｢ｺ遶九＠縺溘°
+     [[nodiscard]] bool rootEnterSucceeded() const noexcept
+     {
+-        return reader != nullptr && reader->rootEnterSucceeded();
++        return reader != nullptr && ok_;
+     }
+ 
+ private:
+     RCUReader* reader = nullptr;
++    bool ok_ = false;
+ };
+ 
+ } // namespace convo

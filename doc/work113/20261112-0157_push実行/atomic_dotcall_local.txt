@@ -1,0 +1,275 @@
+Strict atomic dot-call violations detected: 258
+
+src\audioengine\ISRDebugRuntime.cpp
+  51: g_forceEvidenceEmission.store(enabled, std::memory_order_release);
+  56: return g_forceEvidenceEmission.load(std::memory_order_acquire);
+
+src\audioengine\ISRRetireLatency.h
+  80: if (shutdownPhase_.load (std::memory_order_acquire))
+  99: const std::uint8_t state = slots_[i].state.load (std::memory_order_acquire);
+  102: && slots_[i].object.load (std::memory_order_acquire) == object)
+  121: if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
+  135: slots_[i].state.store (kStateReady, std::memory_order_release);
+  160: if (shutdownPhase_.load (std::memory_order_acquire))
+  184: if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
+  198: slots_[i].state.store (kStateReady, std::memory_order_release);
+  201: rtRequests_.fetch_add (1u, std::memory_order_acq_rel);
+  222: if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+  225: if (slots_[i].object.load (std::memory_order_acquire) != object)
+  233: if (slots_[i].state.compare_exchange_strong (expected, kStateFree,
+  256: if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+  259: if (slots_[i].object.load (std::memory_order_acquire) != object)
+  267: if (slots_[i].state.compare_exchange_strong (expected, kStateFree,
+  285: slots_[index].state.store (kStateFree, std::memory_order_release);
+  298: if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+  301: if (slots_[i].object.load (std::memory_order_acquire) != object)
+  307: slots_[i].safeTsNs.compare_exchange_strong (expected, now,
+  321: if (shutdownPhase_.load (std::memory_order_acquire))
+  338: slots_[index].state.store (kStateFree, std::memory_order_release);
+  351: ebrCount_.fetch_add (1u, std::memory_order_acq_rel);
+  352: ebrSumNs_.fetch_add (ebrNs, std::memory_order_acq_rel);
+  353: execCount_.fetch_add (1u, std::memory_order_acq_rel);
+  354: execSumNs_.fetch_add (execNs, std::memory_order_acq_rel);
+  360: unobservedSafe_.fetch_add (1u, std::memory_order_acq_rel);
+  379: classExcluded_[pathIndex].fetch_add (1u, std::memory_order_acq_rel);
+  380: classExcludedTotal_.fetch_add (1u, std::memory_order_acq_rel);
+  384: classConsistencyErrors_.fetch_add (1u, std::memory_order_acq_rel);
+  389: classClassifiedTotal_.fetch_add (1u, std::memory_order_acq_rel);
+  592: s.requests = requests_.load (std::memory_order_acquire);
+  593: s.completions = completions_.load (std::memory_order_acquire);
+  594: s.unmatchedCompletions = unmatchedCompletions_.load (std::memory_order_acquire);
+  595: s.overflow = overflow_.load (std::memory_order_acquire);
+  596: s.idExhausted = idExhausted_.load (std::memory_order_acquire);
+  597: s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
+  598: s.postShutdownCompletions = postShutdownCompletions_.load (std::memory_order_acquire);
+  599: s.recordMisses = recordMisses_.load (std::memory_order_acquire);
+  600: s.ebrCount = ebrCount_.load (std::memory_order_acquire);
+  601: s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
+  602: s.ebrMaxNs = ebrMaxNs_.load (std::memory_order_acquire);
+  603: s.execCount = execCount_.load (std::memory_order_acquire);
+  604: s.execSumNs = execSumNs_.load (std::memory_order_acquire);
+  605: s.execMaxNs = execMaxNs_.load (std::memory_order_acquire);
+  606: s.unobservedSafe = unobservedSafe_.load (std::memory_order_acquire);
+  607: s.rtRequests = rtRequests_.load (std::memory_order_acquire);
+  612: s.paths[p].count = pathCount_[p].load (std::memory_order_acquire);
+  613: s.paths[p].overThreshold = pathOver_[p].load (std::memory_order_acquire);
+  614: s.paths[p].maxNs = pathMaxNs_[p].load (std::memory_order_acquire);
+  618: const std::size_t current = runtimeStageSlot_.load (std::memory_order_acquire);
+  621: runtimeStageSlot_.store (static_cast<std::size_t> (slot + 1u), std::memory_order_release);
+  652: finalStageValid_.store (true, std::memory_order_release);
+  661: {        const std::size_t marker = runtimeStageSlot_.load (std::memory_order_acquire);
+  672: s.requests = requests_.load (std::memory_order_acquire);
+  673: s.completions = completions_.load (std::memory_order_acquire);
+  674: s.unmatchedCompletions = unmatchedCompletions_.load (std::memory_order_acquire);
+  675: s.overflow = overflow_.load (std::memory_order_acquire);
+  676: s.idExhausted = idExhausted_.load (std::memory_order_acquire);
+  677: s.cancelled = cancelled_.load (std::memory_order_acquire);
+  678: s.postShutdownRequests = postShutdown_.load (std::memory_order_acquire);
+  679: s.postShutdownCompletions = postShutdownCompletions_.load (std::memory_order_acquire);
+  680: s.recordMisses = recordMisses_.load (std::memory_order_acquire);
+  681: s.ebrCount = ebrCount_.load (std::memory_order_acquire);
+  682: s.ebrSumNs = ebrSumNs_.load (std::memory_order_acquire);
+  683: s.ebrMaxNs = ebrMaxNs_.load (std::memory_order_acquire);
+  684: s.execCount = execCount_.load (std::memory_order_acquire);
+  685: s.execSumNs = execSumNs_.load (std::memory_order_acquire);
+  686: s.execMaxNs = execMaxNs_.load (std::memory_order_acquire);
+  687: s.unobservedSafe = unobservedSafe_.load (std::memory_order_acquire);
+  688: s.rtRequests = rtRequests_.load (std::memory_order_acquire);
+  692: s.paths[p].count = pathCount_[p].load (std::memory_order_acquire);
+  693: s.paths[p].overThreshold = pathOver_[p].load (std::memory_order_acquire);
+  694: s.paths[p].maxNs = pathMaxNs_[p].load (std::memory_order_acquire);
+  700: if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+  711: const std::uint64_t written = observationCount_.load (std::memory_order_acquire);
+  728: cp.driverWait.count = driverCount_[p].load (std::memory_order_acquire);
+  729: cp.driverWait.sumNs = driverSumNs_[p].load (std::memory_order_acquire);
+  730: cp.driverWait.maxNs = driverMaxNs_[p].load (std::memory_order_acquire);
+  731: cp.driverWait.overThreshold = driverOver_[p].load (std::memory_order_acquire);
+  732: cp.ebrWait.count = ebrCountC_[p].load (std::memory_order_acquire);
+  733: cp.ebrWait.sumNs = ebrSumNsC_[p].load (std::memory_order_acquire);
+  734: cp.ebrWait.maxNs = ebrMaxNsC_[p].load (std::memory_order_acquire);
+  735: cp.ebrWait.overThreshold = ebrOverC_[p].load (std::memory_order_acquire);
+  736: cp.execWait.count = execCountC_[p].load (std::memory_order_acquire);
+  737: cp.execWait.sumNs = execSumNsC_[p].load (std::memory_order_acquire);
+  738: cp.execWait.maxNs = execMaxNsC_[p].load (std::memory_order_acquire);
+  739: cp.execWait.overThreshold = execOverC_[p].load (std::memory_order_acquire);
+  740: cp.unclassifiedCount = classUnclassifiedCount_[p].load (std::memory_order_acquire);
+  741: cp.unclassifiedSumNs = classUnclassifiedSumNs_[p].load (std::memory_order_acquire);
+  742: cp.excludedCount = classExcluded_[p].load (std::memory_order_acquire);
+  747: s.classTotals.classified = classClassifiedTotal_.load (std::memory_order_acquire);
+  748: s.classTotals.unclassified = classUnclassifiedTotal_.load (std::memory_order_acquire);
+  749: s.classTotals.excluded = classExcludedTotal_.load (std::memory_order_acquire);
+  750: s.classTotals.consistencyErrors = classConsistencyErrors_.load (std::memory_order_acquire);
+  758: ds.count = t.count.load (std::memory_order_acquire);
+  759: ds.classified = t.classified.load (std::memory_order_acquire);
+  760: ds.unclassified = t.unclassified.load (std::memory_order_acquire);
+  761: ds.excluded = t.excluded.load (std::memory_order_acquire);
+  762: ds.consistencyErrors = t.consistencyErrors.load (std::memory_order_acquire);
+  763: ds.sumNs = t.sumNs.load (std::memory_order_acquire);
+  764: ds.maxNs = t.maxNs.load (std::memory_order_acquire);
+  765: ds.overThreshold = t.overThreshold.load (std::memory_order_acquire);
+  771: cp.driverWait.count = dp.driverCount.load (std::memory_order_acquire);
+  772: cp.driverWait.sumNs = dp.driverSum.load (std::memory_order_acquire);
+  773: cp.driverWait.maxNs = dp.driverMax.load (std::memory_order_acquire);
+  774: cp.driverWait.overThreshold = dp.driverOver.load (std::memory_order_acquire);
+  775: cp.ebrWait.count = dp.ebrCount.load (std::memory_order_acquire);
+  776: cp.ebrWait.sumNs = dp.ebrSum.load (std::memory_order_acquire);
+  777: cp.ebrWait.maxNs = dp.ebrMax.load (std::memory_order_acquire);
+  778: cp.ebrWait.overThreshold = dp.ebrOver.load (std::memory_order_acquire);
+  779: cp.execWait.count = dp.execCount.load (std::memory_order_acquire);
+  780: cp.execWait.sumNs = dp.execSum.load (std::memory_order_acquire);
+  781: cp.execWait.maxNs = dp.execMax.load (std::memory_order_acquire);
+  782: cp.execWait.overThreshold = dp.execOver.load (std::memory_order_acquire);
+  783: cp.unclassifiedCount = dp.unclassifiedCount.load (std::memory_order_acquire);
+  784: cp.unclassifiedSumNs = dp.unclassifiedSum.load (std::memory_order_acquire);
+  785: cp.excludedCount = dp.excluded.load (std::memory_order_acquire);
+  789: s.stampMissing = domainStampMissing_.load (std::memory_order_acquire);
+  790: s.providerUnknown = domainProviderUnknown_.load (std::memory_order_acquire);
+  791: s.providerAbsent = domainProviderAbsent_.load (std::memory_order_acquire);
+  800: shutdownPhase_.store (true, std::memory_order_release);
+  805: shutdownPhase_.store (false, std::memory_order_release);
+  808: runtimeStageSlot_.store (0, std::memory_order_release);
+  809: postShutdown_.store (0, std::memory_order_release);
+  810: postShutdownCompletions_.store (0, std::memory_order_release);
+  811: recordMisses_.store (0, std::memory_order_release);
+  814: slots_[i].state.store (kStateFree, std::memory_order_release);
+  824: requests_.store (0, std::memory_order_release);
+  825: completions_.store (0, std::memory_order_release);
+  826: unmatchedCompletions_.store (0, std::memory_order_release);
+  827: overflow_.store (0, std::memory_order_release);
+  828: idExhausted_.store (0, std::memory_order_release);
+  829: cancelled_.store (0, std::memory_order_release);
+  830: observationCount_.store (0, std::memory_order_release);
+  831: nextId_.store (0, std::memory_order_release);
+  832: nextRange_.store (0, std::memory_order_release);
+  833: ebrCount_.store (0, std::memory_order_release);
+  834: ebrSumNs_.store (0, std::memory_order_release);
+  835: ebrMaxNs_.store (0, std::memory_order_release);
+  836: execCount_.store (0, std::memory_order_release);
+  837: execSumNs_.store (0, std::memory_order_release);
+  838: execMaxNs_.store (0, std::memory_order_release);
+  839: unobservedSafe_.store (0, std::memory_order_release);
+  840: rtRequests_.store (0, std::memory_order_release);
+  844: pathCount_[p].store (0, std::memory_order_release);
+  845: pathOver_[p].store (0, std::memory_order_release);
+  846: pathMaxNs_[p].store (0, std::memory_order_release);
+  847: driverCount_[p].store (0, std::memory_order_release);
+  848: driverSumNs_[p].store (0, std::memory_order_release);
+  849: driverMaxNs_[p].store (0, std::memory_order_release);
+  850: driverOver_[p].store (0, std::memory_order_release);
+  851: ebrCountC_[p].store (0, std::memory_order_release);
+  852: ebrSumNsC_[p].store (0, std::memory_order_release);
+  853: ebrMaxNsC_[p].store (0, std::memory_order_release);
+  854: ebrOverC_[p].store (0, std::memory_order_release);
+  855: execCountC_[p].store (0, std::memory_order_release);
+  856: execSumNsC_[p].store (0, std::memory_order_release);
+  857: execMaxNsC_[p].store (0, std::memory_order_release);
+  858: execOverC_[p].store (0, std::memory_order_release);
+  859: classUnclassifiedCount_[p].store (0, std::memory_order_release);
+  860: classUnclassifiedSumNs_[p].store (0, std::memory_order_release);
+  861: classExcluded_[p].store (0, std::memory_order_release);
+  863: classClassifiedTotal_.store (0, std::memory_order_release);
+  864: classUnclassifiedTotal_.store (0, std::memory_order_release);
+  865: classUnclassifiedSumTotal_.store (0, std::memory_order_release);
+  866: classExcludedTotal_.store (0, std::memory_order_release);
+  867: classConsistencyErrors_.store (0, std::memory_order_release);
+  873: t.count.store (0); t.classified.store (0); t.unclassified.store (0);
+  874: t.excluded.store (0); t.consistencyErrors.store (0);
+  875: t.sumNs.store (0); t.maxNs.store (0); t.overThreshold.store (0);
+  879: dp.driverCount.store (0); dp.driverSum.store (0);
+  880: dp.driverMax.store (0); dp.driverOver.store (0);
+  881: dp.ebrCount.store (0); dp.ebrSum.store (0);
+  882: dp.ebrMax.store (0); dp.ebrOver.store (0);
+  883: dp.execCount.store (0); dp.execSum.store (0);
+  884: dp.execMax.store (0); dp.execOver.store (0);
+  885: dp.unclassifiedCount.store (0); dp.unclassifiedSum.store (0);
+  886: dp.excluded.store (0);
+  889: domainStampMissing_.store (0, std::memory_order_release);
+  890: domainProviderUnknown_.store (0, std::memory_order_release);
+  891: domainProviderAbsent_.store (0, std::memory_order_release);
+  943: t.sumNs.fetch_add (latency, std::memory_order_acq_rel);
+  962: dp.unclassifiedCount.fetch_add (1u, std::memory_order_acq_rel);
+  963: dp.unclassifiedSum.fetch_add (cls.unclassifiedNs, std::memory_order_acq_rel);
+  976: dp.unclassifiedCount.fetch_add (1u, std::memory_order_acq_rel);
+  977: dp.unclassifiedSum.fetch_add (cls.unclassifiedNs, std::memory_order_acq_rel);
+  983: dp.unclassifiedCount.fetch_add (1u, std::memory_order_acq_rel);
+  984: dp.unclassifiedSum.fetch_add (cls.unclassifiedNs, std::memory_order_acq_rel);
+  1032: counter.fetch_add (1u, std::memory_order_acq_rel);
+  1043: if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+  1046: if (slots_[i].object.load (std::memory_order_acquire) != object)
+  1051: if (slots_[i].state.compare_exchange_strong (expected, kStateFilling,
+  1070: count.fetch_add (1u, std::memory_order_acq_rel);
+  1071: sumNs.fetch_add (value, std::memory_order_acq_rel);
+  1073: overThreshold.fetch_add (1u, std::memory_order_acq_rel);
+  1078: classUnclassifiedTotal_.fetch_add (1u, std::memory_order_acq_rel);
+  1079: classUnclassifiedSumTotal_.fetch_add (value, std::memory_order_acq_rel);
+  1082: classUnclassifiedCount_[pathIndex].fetch_add (1u, std::memory_order_acq_rel);
+  1083: classUnclassifiedSumNs_[pathIndex].fetch_add (value, std::memory_order_acq_rel);
+  1088: std::uint64_t current = target.load (std::memory_order_acquire);
+  1091: && ! target.compare_exchange_weak (current, value,
+  1105: pathCount_[p].fetch_add (1u, std::memory_order_acq_rel);
+  1108: pathOver_[p].fetch_add (1u, std::memory_order_acq_rel);
+  1110: std::uint64_t current = pathMaxNs_[p].load (std::memory_order_acquire);
+  1113: && ! pathMaxNs_[p].compare_exchange_weak (current, latency,
+  1127: const std::uint64_t index = observationCount_.fetch_add (1u, std::memory_order_acq_rel);
+
+src\audioengine\WorldLifetimeRecorder.h
+  82: if (slots_[i].state.load (std::memory_order_acquire) != kStateFree)
+  87: if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
+  98: slots_[i].state.store (kStateReady, std::memory_order_release);
+  100: pathCommits_[static_cast<std::size_t> (path)].fetch_add (1u, std::memory_order_acq_rel);
+  104: overflow_.fetch_add (1u, std::memory_order_acq_rel);
+  115: if (slots_[i].state.load (std::memory_order_acquire) != kStateReady)
+  118: if (slots_[i].world.load (std::memory_order_acquire) != world)
+  123: if (! slots_[i].state.compare_exchange_strong (expected, kStateFilling,
+  133: slots_[i].state.store (kStateFree, std::memory_order_release);
+  141: pathDestroys_[p].fetch_add (1u, std::memory_order_acq_rel);
+  142: pathSumNs_[p].fetch_add (lifetime, std::memory_order_acq_rel);
+  146: const std::uint64_t index = observationCount_.fetch_add (1u, std::memory_order_acq_rel);
+  152: unmatched_.fetch_add (1u, std::memory_order_acq_rel);
+  171: s.paths[p].commits = pathCommits_[p].load (std::memory_order_acquire);
+  172: s.paths[p].destroys = pathDestroys_[p].load (std::memory_order_acquire);
+  173: s.paths[p].maxNs = pathMaxNs_[p].load (std::memory_order_acquire);
+  174: s.paths[p].sumNs = pathSumNs_[p].load (std::memory_order_acquire);
+  179: s.unmatched = unmatched_.load (std::memory_order_acquire);
+  180: s.overflow = overflow_.load (std::memory_order_acquire);
+  182: const std::uint64_t written = observationCount_.load (std::memory_order_acquire);
+  202: slots_[i].state.store (kStateFree, std::memory_order_release);
+  214: pathCommits_[p].store (0, std::memory_order_release);
+  215: pathDestroys_[p].store (0, std::memory_order_release);
+  216: pathMaxNs_[p].store (0, std::memory_order_release);
+  217: pathSumNs_[p].store (0, std::memory_order_release);
+  220: observationCount_.store (0, std::memory_order_release);
+  221: unmatched_.store (0, std::memory_order_release);
+  222: overflow_.store (0, std::memory_order_release);
+  250: std::uint64_t current = target.load (std::memory_order_acquire);
+  253: && ! target.compare_exchange_weak (current, value,
+
+src\core\EpochDomain.h
+  306: && ! w.maxHoldUs.compare_exchange_weak(expected, nowUs - startUs,
+
+src\core\ReaderMeasureRegistry.h
+  81: if (recs_[i].state.compare_exchange_strong (expected, 1,
+  88: recs_[i].instKey.store (static_cast<std::uint64_t> (
+  90: recs_[i].provKey.store (static_cast<std::uint64_t> (
+  121: if (aggs_[i].used.load (std::memory_order_acquire) == 1
+  133: if (aggs_[i].used.compare_exchange_strong (expected, 1,
+  150: && ! aggs_[aggIdx].maxHoldUs.compare_exchange_weak (expectedMax, hold,
+  161: recs_[idx].state.store (0, std::memory_order_release);   // çƒóòóp
+  186: if (aggs_[i].used.load (std::memory_order_acquire) != 1)
+  201: if (recs_[i].state.load (std::memory_order_acquire) != 1)
+
+src\core\ScopedEpochReader.h
+  241: if (measure_[i].state.compare_exchange_strong (expected, 1,
+  249: measure_[i].providerKey.store (static_cast<std::uint64_t> (
+  251: measure_[i].threadTag.store (
+  273: measure_[idx].state.store (2, std::memory_order_release);
+  292: if (r.state.load (std::memory_order_acquire) != 2)
+  301: if (q.state.load (std::memory_order_acquire) != 2)
+  314: if (q.state.load (std::memory_order_acquire) == 2
+  336: if (r.state.load (std::memory_order_acquire) != 1)
+  360: if (measure_[i].state.load (std::memory_order_acquire) == 1
+
+src\core\SnapshotCoordinator.h
+  140: return s_rtViolationCount.load (std::memory_order_acquire);
+
+Policy: use convo::consumeAtomic / publishAtomic / exchangeAtomic helpers instead of direct atomic dot-calls, do not reintroduce globalEpochDomain(), and do not hand off ObservedSnapshot across thread boundaries.

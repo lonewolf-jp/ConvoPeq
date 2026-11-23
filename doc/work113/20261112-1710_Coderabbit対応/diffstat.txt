@@ -1,0 +1,4 @@
+ .github/scripts/isr-verify-proof-scope.ps1         | 130 +++++++++---
+ .../scripts/test-isr-verify-proof-scope-lexer.ps1  |  24 ++-
+ .github/scripts/test-isr-verify-proof-scope.ps1    | 228 +++++++++++++++++++++
+ 3 files changed, 353 insertions(+), 29 deletions(-)

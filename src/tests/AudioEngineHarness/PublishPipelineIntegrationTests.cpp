@@ -111,6 +111,9 @@ int runIRLoadAdmissionTests();
 // IRLoadAdmissionTests.cpp (★ WORK102-PREV-01: preview loader admission / graceful failure)
 int runIRLoadPreviewAdmissionTests();
 
+// RuntimeParameterGuardTests.cpp (★ B-03: mixed f1/f2 の非有限値拒否)
+int runRuntimeParameterGuardTests();
+
 namespace {
 
 bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
@@ -1370,6 +1373,9 @@ int runB2DiagSinkTests();
 // ★ A2 -> A3-a: 二重解放と誤状態処理の分離検証（opt-in）。
 int runA2A3aQuarantineTests();
 
+// BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
+int runNoiseShaperStateRaceTests();
+
 //=== U3 (R-107 Stage 3): RT 経路の新規確保プローブ測定 ======================
 //   CONVOPEQ_RT_ALLOC_PROBE=1（プローブ有効）と
 //   CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms>（このモードの実行）で起動する。
@@ -1521,6 +1527,10 @@ int main(int argc, char* argv[])
     // ★ A2 -> A3-a: 二重解放（V1）と誤状態処理（V2）の検証（opt-in）。
     if (std::getenv("A2A3A_TEST") != nullptr)
         return runA2A3aQuarantineTests();
+
+    // ★ BUG-1: 学習状態 accessor のロック検証（専用ストレステスト・opt-in）。
+    if (std::getenv("CONVOPEQ_NS_STATE_RACE_TEST") != nullptr)
+        return runNoiseShaperStateRaceTests();
 
     // ★ 2026-11-08: D12（FrozenRuntimeWorld の release 順序を含む）だけを実行する。
     //   既定スイートが環境依存の測定区間で停止する場合の限定実行用（opt-in）。
@@ -1893,6 +1903,10 @@ int runFpmM2();
 
     // ★ WORK102-PREV-01: preview loader admission（FC-1〜FC-5）と graceful failure の回帰。
     if (runIRLoadPreviewAdmissionTests() != 0)
+        return 1;
+
+    // ★ B-03: mixed f1/f2 setter の非有限値拒否（setState 経路を含む）。
+    if (runRuntimeParameterGuardTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。

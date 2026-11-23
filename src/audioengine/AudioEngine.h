@@ -3086,7 +3086,7 @@ public:
         std::atomic<int> activeIndex { 0 };   // 0 = A, 1 = B
         std::atomic<uint32_t> generation { 1u };
         convo::NoiseShaperLearnerState state {};
-        std::mutex stateMutex;
+        mutable std::mutex stateMutex;   // ★ BUG-1: const getter からも lock する
         std::atomic<bool> writeLock { false };  // CAS用書き込みロック
     };
 

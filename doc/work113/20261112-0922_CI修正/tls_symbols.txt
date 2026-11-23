@@ -1,0 +1,12 @@
+TLS guard symbol check for: thread_local std::uint32_t assigned = 0xFFFFFFFFu;
+(compiled with MSVC 14.52, /O2 /std:c++20, obj symbol table via dumpbin /symbols)
+
+--- matches for dynamic TLS init / guard machinery ---
+(none)
+
+--- TLS section ---
+015 00000000 SECT8  notype       Static       | .tls$
+           4 .tls$
+
+--- _tls_index reference (normal TLS access) ---
+018 00000000 UNDEF  notype       External     | _tls_index

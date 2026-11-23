@@ -1,0 +1,339 @@
+diff --git a/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp b/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+index e0c49679..4d968e1f 100644
+--- a/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
++++ b/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+@@ -681,6 +681,331 @@ static bool checkUnwrapContract()
+     return ok;
+ }
+ 
++// =============================================================================
++// 笘・Gate 1 (2026-11-11, Owner 謇ｿ隱・: RCU 蜈･蝣ｴ螟ｱ謨玲凾縺ｫ騾蠖ｹ蟇ｾ雎｡繧貞盾辣ｧ縺励↑縺・％縺ｨ縺ｮ讀懆ｨｼ
++//   (a) 蜈･蝣ｴ謌仙粥: 迥ｶ諷句盾辣ｧ縺ｯ蠕捺擂縺ｩ縺翫ｊ・・nprotectedReadCount 縺ｯ 0 縺ｮ縺ｾ縺ｾ・・+//   (b) 蜈･蝣ｴ螟ｱ謨・ currentStateBits 繧定ｪｭ縺ｾ縺ｪ縺・ｼ医き繧ｦ繝ｳ繧ｿ +1繝ｻ蜃ｺ蜉帙・縲檎憾諷区悴蜈ｬ髢九阪・謖吝虚・・+//   (c) reclaim 螳御ｺ・ 隗｣謾ｾ貂医∩縺ｮ騾蠖ｹ蟇ｾ雎｡繧貞盾辣ｧ縺励↑縺・ｼ・San 繝薙Ν繝峨〒 UAF 辟｡縺暦ｼ・+//   EQProcessor 縺ｮ private 縺ｸ縺ｯ繝・せ繝亥ｰら畑 friend・郁｣ｽ蜩・API 縺ｯ霑ｽ蜉縺励↑縺・ｼ峨〒蛻ｰ驕斐☆繧九・+// =============================================================================
++struct EQProcessorGate1TestAccess
++{
++    static const EQProcessor::EQState* currentState(EQProcessor& eq) noexcept
++    {
++        return eq.loadCurrentState(std::memory_order_acquire);
++    }
++    static void flushPendingEpochAdvance(EQProcessor& eq) noexcept
++    {
++        eq.flushPendingEpochAdvance();
++    }
++    static void closeReaderRegistration(EQProcessor& eq) noexcept
++    {
++        eq.m_epochDomain->closeReaderRegistration();
++    }
++};
++
++namespace
++{
++constexpr int    kGate1BlockSize = 256;
++constexpr double kGate1SampleRate = 48000.0;
++
++void gate1FillInput(juce::AudioBuffer<double>& buf)
++{
++    const int n = buf.getNumSamples();
++    const double twoPi = 6.283185307179586476925286766559;
++    for (int i = 0; i < n; ++i)
++    {
++        // 鬟ｽ蜥鯉ｼ・oft clip・峨・蟾ｮ縺悟・繧九ｈ縺・険蟷・3.0・・x| > 1・峨〒蜈･繧後ｋ
++        const double s = 3.0 * std::sin(twoPi * 1000.0 * static_cast<double>(i) / kGate1SampleRate);
++        for (int ch = 0; ch < buf.getNumChannels(); ++ch)
++            buf.setSample(ch, i, s);
++    }
++}
++
++void gate1Configure(EQProcessor& eq)
++{
++    eq.prepareToPlay(kGate1SampleRate, kGate1BlockSize);
++    eq.setBandType(0, EQBandType::Peaking);
++    eq.setBandFrequency(0, 1000.0f);
++    eq.setBandGain(0, 9.0f);
++    eq.setBandQ(0, 0.7f);
++    eq.setBandEnabled(0, true);
++    eq.setBandType(1, EQBandType::HighShelf);
++    eq.setBandFrequency(1, 6000.0f);
++    eq.setBandGain(1, -9.0f);
++    eq.setBandQ(1, 0.7f);
++    eq.setBandEnabled(1, true);
++}
++
++bool gate1Render(EQProcessor& eq, std::vector<double>& outL, std::vector<double>& outR)
++{
++    std::vector<double> lastL, lastR;
++    bool finite = true;
++    juce::AudioBuffer<double> in(2, kGate1BlockSize);
++    for (int b = 0; b < 3; ++b)
++    {
++        gate1FillInput(in);
++        juce::dsp::AudioBlock<double> block(in);
++        eq.process(block);
++        lastL.assign(in.getReadPointer(0), in.getReadPointer(0) + kGate1BlockSize);
++        lastR.assign(in.getReadPointer(1), in.getReadPointer(1) + kGate1BlockSize);
++        for (double v : lastL) if (!std::isfinite(v)) finite = false;
++        for (double v : lastR) if (!std::isfinite(v)) finite = false;
++    }
++    outL.swap(lastL);
++    outR.swap(lastR);
++    return finite;
++}
++
++double gate1MaxAbs(const std::vector<double>& v)
++{
++    double m = 0.0;
++    for (double x : v) m = std::max(m, std::abs(x));
++    return m;
++}
++
++double gate1MaxAbsDiff(const std::vector<double>& a, const std::vector<double>& b)
++{
++    if (a.size() != b.size()) return std::numeric_limits<double>::infinity();
++    double m = 0.0;
++    for (size_t i = 0; i < a.size(); ++i) m = std::max(m, std::abs(a[i] - b[i]));
++    return m;
++}
++} // namespace
++
++static bool checkGate1ProcessIsolation()
++{
++    bool ok = true;
++
++    // ---- (a) 豁｣蟶ｸ蜈･蝣ｴ: 迥ｶ諷九→ BandNode 繧貞ｾ捺擂縺ｩ縺翫ｊ蜿ら・縺吶ｋ・医き繧ｦ繝ｳ繧ｿ 0繝ｻ蜃ｺ蜉帙・髱樒┌髻ｳ繝ｻ譛蛾剞・・----
++    {
++        auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
++        auto eq = std::make_unique<EQProcessor>();
++        eq->setRetireCoordinator(coordinator.get());   // retire authority・・ull 縺縺ｨ drop 縺輔ｌ繧具ｼ・+        gate1Configure(*eq);
++
++        std::vector<double> l, r;
++        if (!gate1Render(*eq, l, r))
++        {
++            std::fprintf(stderr, "G1-1: non-finite output\n");
++            ok = false;
++        }
++        if (eq->unprotectedReadCount() != 0)
++        {
++            std::fprintf(stderr, "G1-1: unprotectedReadCount=%u (expected 0)\n",
++                         static_cast<unsigned>(eq->unprotectedReadCount()));
++            ok = false;
++        }
++        if (EQProcessorGate1TestAccess::currentState(*eq) == nullptr)
++        {
++            std::fprintf(stderr, "G1-1: currentState is null\n");
++            ok = false;
++        }
++        if (gate1MaxAbs(l) < 1.0e-9)
++        {
++            std::fprintf(stderr, "G1-1: output is silent (state not applied?)\n");
++            ok = false;
++        }
++    }
++
++    // ---- (b) 蜈･蝣ｴ螟ｱ謨・+ reclaim 螳御ｺ・ｾ・ 迥ｶ諷九ｂ BandNode 繧ょ盾辣ｧ縺励↑縺・----
++    {
++        // 蜿り・1: 繝舌Φ繝峨ｒ蜈ｨ縺ｦ辟｡蜉ｹ縺ｫ縺励◆縲檎ｴ騾壹＠縲榊盾辣ｧ・亥酔縺・EQProcessor 螻･豁ｴ縺ｧ豈碑ｼ・☆繧具ｼ・+        auto coordRef = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
++        auto eqRef = std::make_unique<EQProcessor>();
++        eqRef->setRetireCoordinator(coordRef.get());
++        gate1Configure(*eqRef);
++        eqRef->setBandEnabled(0, false);
++        eqRef->setBandEnabled(1, false);
++        std::vector<double> lRef, rRef;
++        if (!gate1Render(*eqRef, lRef, rRef))
++        {
++            std::fprintf(stderr, "G1-2: non-finite output (reference passthrough)\n");
++            ok = false;
++        }
++
++        // 蜿り・2: 繝舌Φ繝画怏蜉ｹ・・ 螟ｱ謨礼ｵ瑚ｷｯ縺碁蠖ｹ蟇ｾ雎｡繧貞盾辣ｧ縺励◆蝣ｴ蜷医↓隕九∴繧九・縺壹・蜃ｺ蜉幢ｼ・+        auto coordBand = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
++        auto eqBand = std::make_unique<EQProcessor>();
++        eqBand->setRetireCoordinator(coordBand.get());
++        gate1Configure(*eqBand);
++        eqBand->setNonlinearSaturation(0.9f);
++        eqBand->setBandGain(1, -6.0f);
++        std::vector<double> lBand, rBand;
++        if (!gate1Render(*eqBand, lBand, rBand))
++        {
++            std::fprintf(stderr, "G1-2: non-finite output (reference banded)\n");
++            ok = false;
++        }
++
++        // 陲ｫ鬨謎ｽ・ saturatuin 0.9 縺ｮ迥ｶ諷九→ BandNode 繧帝蠖ｹ繝ｻreclaim 縺輔○縺ｦ縺九ｉ蜈･蝣ｴ螟ｱ謨励〒 process 縺吶ｋ
++        auto coord = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
++        auto eq = std::make_unique<EQProcessor>();
++        eq->setRetireCoordinator(coord.get());
++        gate1Configure(*eq);
++        eq->setNonlinearSaturation(0.9f);
++        eq->setBandGain(1, -6.0f);      // 蜿り・2 縺ｨ蜷後§譛邨ゆｿよ焚
++
++        const EQProcessor::EQState* retired = EQProcessorGate1TestAccess::currentState(*eq);
++        if (retired == nullptr)
++        {
++            std::fprintf(stderr, "G1-2: retired state is null\n");
++            ok = false;
++        }
++
++        eq->setBandGain(0, 6.0f);                                    // 莠､謠・竊・逶ｴ蜑阪・迥ｶ諷九ｒ騾蠖ｹ
++        EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);    // publish + reclaim
++
++        if (eq->eqOwnedPendingRetire() != 0)
++        {
++            std::fprintf(stderr, "G1-2: pendingRetire=%u (reclaim not completed)\n",
++                         static_cast<unsigned>(eq->eqOwnedPendingRetire()));
++            ok = false;
++        }
++        if (eq->eqRetireDropCount() != 0)
++        {
++            std::fprintf(stderr, "G1-2: retire dropped (%u) - coordinator not effective\n",
++                         static_cast<unsigned>(eq->eqRetireDropCount()));
++            ok = false;
++        }
++        const EQProcessor::EQState* current = EQProcessorGate1TestAccess::currentState(*eq);
++        if (current == nullptr || current == retired)
++        {
++            std::fprintf(stderr, "G1-2: state was not exchanged (current=%p retired=%p)\n",
++                         static_cast<const void*>(current), static_cast<const void*>(retired));
++            ok = false;
++        }
++
++        // Reader 逋ｻ骭ｲ繧帝哩縺倥ｋ 竊・EQ 縺ｮ RCUReader 縺ｯ蜈･蝣ｴ縺ｧ縺阪↑縺・ｼ域ｱｺ螳夂噪縺ｪ螟ｱ謨玲ｳｨ蜈･・・+        EQProcessorGate1TestAccess::closeReaderRegistration(*eq);
++
++        // 隗｣謾ｾ貂医∩繝悶Ο繝・け繧貞・蛻ｩ逕ｨ縺励※豈偵ｒ蜈･繧後ｋ・郁ｪ､縺｣縺ｦ騾蠖ｹ蟇ｾ雎｡繧定ｪｭ繧薙□蝣ｴ蜷医↓蠢・★隕ｳ貂ｬ縺ｧ縺阪ｋ繧医≧縺ｫ縺吶ｋ・・+        std::vector<std::unique_ptr<EQProcessor::EQState>> poison;
++        for (int i = 0; i < 8; ++i)
++        {
++            poison.push_back(std::make_unique<EQProcessor::EQState>());
++            poison.back()->nonlinearSaturation = 1.0f;
++            for (int b = 0; b < EQProcessor::NUM_BANDS; ++b) poison.back()->bands[static_cast<size_t>(b)].gain = 24.0f;
++        }
++
++        std::vector<double> lFail, rFail;
++        if (!gate1Render(*eq, lFail, rFail))
++        {
++            std::fprintf(stderr, "G1-2: non-finite output (failure path)\n");
++            ok = false;
++        }
++        if (eq->unprotectedReadCount() != 3)
++        {
++            std::fprintf(stderr, "G1-2: unprotectedReadCount=%u (expected 3)\n",
++                         static_cast<unsigned>(eq->unprotectedReadCount()));
++            ok = false;
++        }
++
++        // 螟ｱ謨礼ｵ瑚ｷｯ縺ｯ縲後ヰ繝ｳ繝臥┌蜉ｹ縺ｮ邏騾壹＠縲阪→荳閾ｴ縺励√後ヰ繝ｳ繝画怏蜉ｹ縲阪→縺ｯ荳閾ｴ縺励↑縺・・+        const double dRef = gate1MaxAbsDiff(lFail, lRef);
++        const double dBand = gate1MaxAbsDiff(lFail, lBand);
++        std::printf("  G1-2: dRef=%.6g dBand=%.6g (amplitude=%.3f)\n",
++                    dRef, dBand, gate1MaxAbs(lFail));
++        if (!(dRef < 1.0e-5))
++        {
++            std::fprintf(stderr, "G1-2: failure path is not passthrough (dRef=%.6g)\n", dRef);
++            ok = false;
++        }
++        if (!(dBand > 1.0e-3))
++        {
++            std::fprintf(stderr, "G1-2: probe has no discriminating power (dBand=%.6g)\n", dBand);
++            ok = false;
++        }
++
++        // ---- (d) 蜈･蝣ｴ螟ｱ謨励・縺ｾ縺ｾ reclaim 繧貞渚蠕ｩ縺励※繧る蠖ｹ蟇ｾ雎｡縺ｫ隗ｦ繧後↑縺・----
++        const std::uint32_t before = eq->unprotectedReadCount();
++        for (int i = 0; i < 5; ++i)
++        {
++            eq->setBandGain(0, 3.0f + static_cast<float>(i));
++            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);
++            std::vector<double> lx, rx;
++            if (!gate1Render(*eq, lx, rx))
++            {
++                std::fprintf(stderr, "G1-3: non-finite output (repeat %d)\n", i);
++                ok = false;
++                break;
++            }
++        }
++        if (eq->unprotectedReadCount() != before + 15u)
++        {
++            std::fprintf(stderr, "G1-3: unprotectedReadCount=%u (expected %u)\n",
++                         static_cast<unsigned>(eq->unprotectedReadCount()),
++                         static_cast<unsigned>(before + 15u));
++            ok = false;
++        }
++    }
++
++    // ---- (e) reclaim 縺ｨ蜈･蝣ｴ螟ｱ謨励・蜷梧凾騾ｲ陦鯉ｼ磯撼 RT 繧ｹ繝ｬ繝・ラ縺御ｺ､謠・+ publish + reclaim・・----
++    {
++        auto coordC = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
++        auto eq = std::make_unique<EQProcessor>();
++        eq->setRetireCoordinator(coordC.get());
++        gate1Configure(*eq);
++        EQProcessorGate1TestAccess::closeReaderRegistration(*eq);   // 髻ｳ螢ｰ蛛ｴ縺ｯ蟶ｸ縺ｫ蜈･蝣ｴ螟ｱ謨・+
++        std::atomic<bool> stop{false};
++        std::atomic<int> swaps{0};
++        std::thread driver([&] {
++            for (int i = 0; i < 300 && !stop.load(std::memory_order_acquire); ++i)
++            {
++                eq->setBandGain(0, 3.0f + static_cast<float>(i % 7));
++                EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);   // publish + reclaim
++                swaps.fetch_add(1, std::memory_order_relaxed);
++            }
++            stop.store(true, std::memory_order_release);
++        });
++
++        bool finite = true;
++        int blocks = 0;
++        std::vector<double> l, r;
++        juce::AudioBuffer<double> in(2, kGate1BlockSize);
++        while (!stop.load(std::memory_order_acquire) || blocks < 300)
++        {
++            if (blocks >= 4000) break;                    // 證ｴ襍ｰ髦ｲ豁｢
++            gate1FillInput(in);
++            juce::dsp::AudioBlock<double> block(in);
++            eq->process(block);                            // 豈主屓蜈･蝣ｴ螟ｱ謨・竊・菴輔ｂ蜿ら・縺励↑縺・+            for (int ch = 0; ch < 2 && finite; ++ch)
++                for (int i = 0; i < kGate1BlockSize; ++i)
++                    if (!std::isfinite(in.getSample(ch, i))) finite = false;
++            ++blocks;
++        }
++        driver.join();
++
++        std::printf("  G1-4: concurrent blocks=%d swaps=%d unprotected=%u\n",
++                    blocks, swaps.load(), static_cast<unsigned>(eq->unprotectedReadCount()));
++        if (!finite)
++        {
++            std::fprintf(stderr, "G1-4: non-finite output during concurrent reclaim\n");
++            ok = false;
++        }
++        if (eq->unprotectedReadCount() != static_cast<std::uint32_t>(blocks))
++        {
++            std::fprintf(stderr, "G1-4: unprotectedReadCount=%u (expected %d)\n",
++                         static_cast<unsigned>(eq->unprotectedReadCount()), blocks);
++            ok = false;
++        }
++        if (swaps.load() <= 0)
++        {
++            std::fprintf(stderr, "G1-4: no concurrent reclaim happened\n");
++            ok = false;
++        }
++        if (eq->eqRetireDropCount() != 0)
++        {
++            std::fprintf(stderr, "G1-4: retire dropped (%u)\n",
++                         static_cast<unsigned>(eq->eqRetireDropCount()));
++            ok = false;
++        }
++    }
++
++    return ok;
++}
++
+ int runSTG11EQRetireTests()
+ {
+     bool ok = true;
+@@ -729,8 +1054,13 @@ int runSTG11EQRetireTests()
+         std::fprintf(stderr, "FAIL: D15 phase unwrap contract\n");
+         ok = false;
+     }
++    if (!checkGate1ProcessIsolation())
++    {
++        std::fprintf(stderr, "FAIL: Gate1 reader-safety process isolation\n");
++        ok = false;
++    }
+     if (ok)
+-        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b)\n");
++        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b/Gate1)\n");
+     return ok ? 0 : 1;
+ }
+ 

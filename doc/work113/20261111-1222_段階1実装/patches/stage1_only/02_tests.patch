@@ -1,0 +1,225 @@
+--- a/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
++++ b/src/tests/AudioEngineHarness/STG11EQRetireTests.cpp
+@@ -702,9 +702,29 @@
+     {
+         eq.m_epochDomain->closeReaderRegistration();
+     }
++    // ★ 段階①: pending を立てずに滞留を作る（reclaim のみの経路を検証するため）
++    //   epoch は呼出し側が明示する（現在 epoch より古い値にすると、
++    //   publish なしでも reclaim 可能になる）。
++    static bool enqueueTestRetire(EQProcessor& eq, void* ptr, void (*deleter)(void*),
++                                  std::uint64_t epoch) noexcept
++    {
++        return eq.enqueueDeferredDeleteWithFallback(ptr, deleter, epoch);
++    }
++    static std::uint64_t currentEpoch(EQProcessor& eq) noexcept
++    {
++        return eq.m_epochDomain->currentEpoch();
++    }
+ };
+ 
+-
++// ★ 段階①: 検証用 deleter（実際に解放されたことを数える）
++namespace {
++std::atomic<int> g_driverProbeDeletes{0};
++void driverProbeDeleter(void* p) noexcept
++{
++    g_driverProbeDeletes.fetch_add(1, std::memory_order_relaxed);
++    delete static_cast<int*>(p);
++}
++}
+ 
+ namespace
+ {
+@@ -1008,6 +1028,176 @@
+     return ok;
+ }
+ 
++// =============================================================================
++// ★ 段階① (2026-11-11, Owner 承認): reclaim ドライバの契約検証（7 項目）
++//   1 pending あり  2 pending なし・滞留あり  3 pending なし・滞留なし
++//   5 publish 理由 4 区分  6 競合・寿命  7 RT（Message Thread）制約
++// =============================================================================
++static bool checkRetireDriverContract()
++{
++    static juce::ScopedJuceInitialiser_GUI juceInit;   // MessageManager（main thread = message thread）
++    bool ok = true;
++
++    auto coordinator = std::make_unique<convo::isr::RuntimeIntentCoordinator>();
++    auto eq = std::make_unique<EQProcessor>();
++    eq->setRetireCoordinator(coordinator.get());
++    gate1Configure(*eq);
++
++    auto fail = [&ok](const char* what) {
++        std::fprintf(stderr, "DRV: %s\n", what);
++        ok = false;
++    };
++
++    // ---- 1) pending あり: epoch 前進 + reclaim ----
++    {
++        const auto before = eq->retireDriverStats();
++        eq->setBandGain(0, 6.0f);                       // pending = true
++        eq->driveRetireReclaimNonRt();
++        const auto after = eq->retireDriverStats();
++
++        if (after.currentEpoch != before.currentEpoch + 1) fail("1: epoch did not advance by 1");
++        if (after.publishTimerPending != before.publishTimerPending + 1) fail("1: timerPending publish not counted");
++        if (after.pendingRetire != 0) fail("1: D queue not drained");
++        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns) fail("1: publish path must not count as reclaim-only");
++    }
++
++    // ---- 2) pending なし・滞留あり: epoch は前進せず reclaim のみ ----
++    //   滞留は「publish 済みの古い epoch」で作る。つまり
++    //   epoch を進めなくても safe-below に入っている entry である。
++    {
++        const std::uint64_t epochNow = EQProcessorGate1TestAccess::currentEpoch(*eq);
++        if (epochNow < 2)
++            fail("2: epoch must be >= 2 before the reclaim-only probe");
++
++        const auto before = eq->retireDriverStats();
++        const int deletesBefore = g_driverProbeDeletes.load(std::memory_order_relaxed);
++        if (! EQProcessorGate1TestAccess::enqueueTestRetire(*eq, new int(7), driverProbeDeleter,
++                                                            epochNow - 1))
++            fail("2: enqueue of probe entry failed (coordinator?)");
++
++        const auto enqueued = eq->retireDriverStats();
++        if (enqueued.pendingRetire == 0) fail("2: probe entry is not resident in D queue");
++
++        eq->driveRetireReclaimNonRt();
++        const auto after = eq->retireDriverStats();
++
++        if (after.currentEpoch != before.currentEpoch) fail("2: epoch advanced without pending");
++        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns + 1) fail("2: reclaim-only run not counted");
++        if (g_driverProbeDeletes.load(std::memory_order_relaxed) != deletesBefore + 1)
++            fail("2: probe entry was not reclaimed");
++        if (after.pendingRetire != 0) fail("2: D queue not drained by reclaim-only run");
++    }
++
++    // ---- 3) pending なし・滞留なし: 何もしない ----
++    {
++        const auto before = eq->retireDriverStats();
++        eq->driveRetireReclaimNonRt();
++        const auto after = eq->retireDriverStats();
++
++        if (after.idleTicks != before.idleTicks + 1) fail("3: idle tick not counted");
++        if (after.reclaimOnlyRuns != before.reclaimOnlyRuns) fail("3: unnecessary reclaim executed");
++        if (after.publishTimerPending != before.publishTimerPending) fail("3: unexpected publish");
++        if (after.currentEpoch != before.currentEpoch) fail("3: epoch changed while idle");
++    }
++
++    // ---- 5) publish 理由 4 区分 ----
++    {
++        {   // prepare 経由
++            const auto before = eq->retireDriverStats();
++            eq->setBandGain(1, -3.0f);
++            eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
++            const auto after = eq->retireDriverStats();
++            if (after.publishPrepare != before.publishPrepare + 1) fail("5: prepare publish not counted");
++        }
++        {   // release 経由
++            const auto before = eq->retireDriverStats();
++            eq->setBandGain(1, -4.0f);
++            eq->releaseResources();
++            const auto after = eq->retireDriverStats();
++            if (after.publishRelease != before.publishRelease + 1) fail("5: release publish not counted");
++        }
++        {   // タグ無しの直接 flush = other
++            eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
++            const auto before = eq->retireDriverStats();
++            eq->setBandGain(1, -5.0f);
++            EQProcessorGate1TestAccess::flushPendingEpochAdvance(*eq);
++            const auto after = eq->retireDriverStats();
++            if (after.publishOther != before.publishOther + 1) fail("5: untagged publish not counted as other");
++        }
++        {   // タイマー経由
++            const auto before = eq->retireDriverStats();
++            eq->setBandGain(1, -6.0f);
++            eq->driveRetireReclaimNonRt();
++            const auto after = eq->retireDriverStats();
++            if (after.publishTimerPending != before.publishTimerPending + 1) fail("5: timer publish not counted");
++        }
++    }
++
++    // ---- 6) 競合・寿命: driver（Message Thread）と setter/prepare/release（他スレッド）----
++    {
++        std::atomic<bool> stop{false};
++        std::atomic<int> iterations{0};
++        std::thread worker([&] {
++            for (int i = 0; i < 200 && ! stop.load(std::memory_order_acquire); ++i)
++            {
++                eq->setBandGain(0, 3.0f + static_cast<float>(i % 5));
++                if ((i % 20) == 0)  eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
++                if ((i % 20) == 10) eq->releaseResources();
++                iterations.fetch_add(1, std::memory_order_relaxed);
++            }
++            stop.store(true, std::memory_order_release);
++        });
++
++        int ticks = 0;
++        while (! stop.load(std::memory_order_acquire) || ticks < 200)
++        {
++            eq->driveRetireReclaimNonRt();
++            ++ticks;
++            if (ticks > 200000) break;                  // 暴走防止
++        }
++        worker.join();
++
++        // 最後の setter が残した entry は、あと 1 回 publish すれば safe-below に入る。
++        // ドライバが pending を消費して epoch を進めれば D は空になる。
++        eq->setBandGain(0, 2.0f);
++        eq->driveRetireReclaimNonRt();
++
++        const auto end = eq->retireDriverStats();
++        if (eq->eqRetireDropCount() != 0) fail("6: retire drop occurred under concurrency");
++        if (end.pendingRetire != 0 || end.resident != 0) fail("6: residue left after concurrency");
++        if (iterations.load() <= 0) fail("6: worker did not run");
++        std::printf("  DRV6: ticks=%d iterations=%d epoch=%llu\n", ticks, iterations.load(),
++                    static_cast<unsigned long long>(end.currentEpoch));
++    }
++
++    // ---- 7) RT 制約: Message Thread 以外からは拒否（fail-safe）----
++    {
++        eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
++        const auto before = eq->retireDriverStats();
++        std::thread foreign([&] { eq->driveRetireReclaimNonRt(); });
++        foreign.join();
++        const auto after = eq->retireDriverStats();
++
++        if (after.offThreadRejects != before.offThreadRejects + 1) fail("7: off-thread call was not rejected");
++        if (after.currentEpoch != before.currentEpoch) fail("7: off-thread call advanced the epoch");
++        if (after.publishTimerPending != before.publishTimerPending) fail("7: off-thread call published");
++    }
++
++    // ---- 最終: 音声処理が崩れていないこと ----
++    {
++        eq->prepareToPlay(kGate1SampleRate, kGate1BlockSize);
++        std::vector<double> l, r;
++        if (! gate1Render(*eq, l, r)) fail("final: non-finite output");
++        if (gate1MaxAbs(l) < 1.0e-9) fail("final: silent output");
++        const auto s = eq->retireDriverStats();
++        std::printf("  DRV: timer=%u prepare=%u release=%u other=%u reclaimOnly=%u idle=%u offThread=%u\n",
++                    s.publishTimerPending, s.publishPrepare, s.publishRelease, s.publishOther,
++                    s.reclaimOnlyRuns, s.idleTicks, s.offThreadRejects);
++    }
++
++    return ok;
++}
++
+ int runSTG11EQRetireTests()
+ {
+     bool ok = true;
+@@ -1061,8 +1251,13 @@
+         std::fprintf(stderr, "FAIL: Gate1 reader-safety process isolation\n");
+         ok = false;
+     }
++    if (!checkRetireDriverContract())
++    {
++        std::fprintf(stderr, "FAIL: stage-1 retire reclaim driver contract\n");
++        ok = false;
++    }
+     if (ok)
+-        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b/Gate1)\n");
++        std::printf("STG11EQRetireTests: PASS (TD1-1/TD1-2/TD1-3/TD1-4a/TD1-4b/Gate1/Stage1)\n");
+     return ok ? 0 : 1;
+ }
+ 

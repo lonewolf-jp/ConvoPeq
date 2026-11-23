@@ -1,0 +1,95 @@
+# 実装着手前のベースライン（読み取りのみ）
+
+実施: 2026-11-11 24:00 JST
+
+## git rev-parse HEAD
+
+```
+c94d376772ee22916f8350cdaa33f8d3787d16bd
+```
+
+## git status --porcelain -uall（件数）
+
+- 変更あり（M/A/D/R）: **63 件**
+- 未追跡: **149 件**
+
+## git diff --stat（追跡済みの変更のみ）
+
+```
+.github/scripts/isr-generate-runtime-evidence.ps1  |     5 +-
+ .github/scripts/isr-run-runtime-evidence.ps1       |   433 +-
+ .github/scripts/isr-run-tiered-verification.ps1    |    11 +-
+ .github/scripts/isr-seed-evidence.ps1              |     5 +-
+ .github/scripts/isr-verify-common.ps1              |    21 +
+ .github/scripts/isr-verify-v5.ps1                  |    10 +
+ AGENTS.md                                          |   196 +-
+ CMakeLists.txt                                     |   141 +
+ ConvoPeq.md                                        | 10239 ++++++++++++++++++-
+ src/CacheManager.cpp                               |   268 +-
+ src/CacheManager.h                                 |    34 +-
+ src/ConvolverControlPanel.cpp                      |    37 +-
+ src/ConvolverProcessor.h                           |    30 +
+ src/DeferredDeletionQueue.h                        |    27 +
+ src/DeviceSettings.cpp                             |     9 +-
+ src/IRConverter.cpp                                |   416 +-
+ src/IRConverter.h                                  |     6 +-
+ src/MKLNonUniformConvolver.cpp                     |    42 +-
+ src/MKLNonUniformConvolver.h                       |    11 +
+ src/MainApplication.cpp                            |    43 +-
+ src/MainApplication.h                              |     3 +
+ src/MainWindow.cpp                                 |   102 +-
+ src/MainWindow.h                                   |     4 +
+ src/NoiseShaperLearner.cpp                         |   224 +-
+ src/NoiseShaperLearner.h                           |    32 +-
+ src/ProgressiveUpgradeThread.cpp                   |    15 +-
+ src/audioengine/AudioEngine.Commit.cpp             |     6 +
+ src/audioengine/AudioEngine.CtorDtor.cpp           |     9 +
+ src/audioengine/AudioEngine.EQResponse.cpp         |     2 +-
+ src/audioengine/AudioEngine.Learning.cpp           |    29 +
+ src/audioengine/AudioEngine.Reader.cpp             |    23 +
+ src/audioengine/AudioEngine.RebuildDispatch.cpp    |     2 +-
+ src/audioengine/AudioEngine.Timer.cpp              |    13 +
+ src/audioengine/AudioEngine.h                      |    41 +-
+ src/audioengine/ISRDebugRuntime.cpp                |    94 +-
+ src/audioengine/ISRDebugRuntime.h                  |     9 +
+ src/audioengine/ISREvidenceExporter.cpp            |   120 +-
+ src/audioengine/ISREvidenceExporter.h              |    13 +-
+ src/audioengine/ISRHB.cpp                          |   373 +-
+ src/audioengine/ISRHB.h                            |    11 +-
+ src/audioengine/ISRRetireRouter.cpp                |    71 +-
+ .../ISRRuntimePublicationCoordinator.cpp           |    10 +
+ src/audioengine/RetireQuarantineStore.h            |     6 +
+ src/convolver/ConvolverProcessor.LoadPipeline.cpp  |    79 +-
+ src/convolver/ConvolverProcessor.LoaderThread.cpp  |   129 +-
+ .../ConvolverProcessor.ResampleAndFallback.cpp     |    12 +
+ src/convolver/ConvolverProcessor.Runtime.cpp       |    10 +
+ src/core/DeletionQueue.cpp                         |     9 +
+ src/core/EpochDomain.h                             |    66 +
+ src/core/IReaderEpochProvider.h                    |     7 +
+ src/core/RCUReader.h                               |    98 +-
+ src/core/ScopedEpochReader.h                       |   209 +-
+ src/core/SnapshotCoordinator.cpp                   |    39 +-
+ src/core/SnapshotCoordinator.h                     |    21 +-
+ src/eqprocessor/EQProcessor.Coefficients.cpp       |     2 +-
+ src/eqprocessor/EQProcessor.Core.cpp               |   108 +-
+ src/eqprocessor/EQProcessor.Processing.cpp         |    28 +-
+ src/eqprocessor/EQProcessor.h                      |    70 +-
+ .../AudioEngineHarness/IRLoadAdmissionTests.cpp    |   537 +-
+ .../PublishPipelineIntegrationTests.cpp            |     7 +
+ .../AudioEngineHarness/STG11EQRetireTests.cpp      |   672 +-
+ src/tests/D8_2_B_2_Tests.cpp                       |   536 +-
+ src/tests/TailLayerIntegrityTests.cpp              |    50 +-
+ 63 files changed, 14681 insertions(+), 1204 deletions(-)
+warning: in the working copy of '.github/scripts/isr-generate-runtime-evidence.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.github/scripts/isr-run-runtime-evidence.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.github/scripts/isr-run-tiered-verification.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.github/scripts/isr-seed-evidence.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.github/scripts/isr-verify-common.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ConvoPeq.md', CRLF will be replaced by LF the next time Git touches it
+```
+
+## git diff --stat（ステージ済みがあれば）
+
+```
+(なし)
+```

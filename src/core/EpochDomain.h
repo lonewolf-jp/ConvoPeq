@@ -809,11 +809,16 @@ public:
     //   スロット単位の固定容量で、ポインタを辿らない（破棄後も安全に読める）。
     struct HoldWitness
     {
-        std::atomic<uint64_t> maxHoldUs{0};
-        std::atomic<uint32_t> count{0};
-        std::atomic<uint32_t> slot{0xFFFFFFFFu};
-        char tag[32]{};
-        std::atomic<uint64_t> domainKey{0};
+        std::atomic<uint64_t> maxHoldUs;
+        std::atomic<uint32_t> count;
+        std::atomic<uint32_t> slot;
+        char tag[32];
+        std::atomic<uint64_t> domainKey;
+
+        // ★ icx (Clang) 対応: 既定メンバ初期化子は外側クラス定義内では使えない。
+        //   static inline 配列 holdWitness_ の {} 初期化のため constexpr ctor にする。
+        constexpr HoldWitness() noexcept
+            : maxHoldUs(0), count(0), slot(0xFFFFFFFFu), tag{}, domainKey(0) {}
     };
     static inline HoldWitness holdWitness_[kMaxReaders]{};
 

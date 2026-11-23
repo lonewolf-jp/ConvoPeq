@@ -1,0 +1,15 @@
+=== remote CI runs for ci-fix/173e6995 ===
+2026-11-12 12:46:47
+runs: 0
+
+=== workflow triggers (why a feature-branch push runs nothing) ===
+  audioengine-lint.yml           pull_request (paths) / push(main, paths)
+  list-compliance.yml            pull_request (paths) / push(main, paths)
+  isr-verification.yml           pull_request(main) / schedule(18:00 daily, 19:00 weekly) / workflow_dispatch
+  windows-msvc-build.yml         pull_request(main) / push(main) / workflow_dispatch
+  sanitizer-ci.yml               push(main, release/**) / pull_request(main)
+
+notes:
+  - push to a feature branch matches none of the push filters (they target main / release/**).
+  - pull_request-triggered workflows run only when a PR exists.
+  - windows-msvc-build and isr-verification also support workflow_dispatch.

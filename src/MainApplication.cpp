@@ -20,7 +20,8 @@
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
 #include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
-#include "audioengine/ISREvidenceExporter.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
+#include "audioengine/ISREvidenceExporter.h"
+#include "audioengine/ISRDebugRuntime.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -37,6 +38,7 @@
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #include <processthreadsapi.h> // For disabling efficiency mode
+#include "learner/LearnedStateMigration.h"
 
 // Windows 11 Efficiency Mode (EcoQoS) API definitions for older SDKs
 #ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
@@ -69,7 +71,8 @@ void MainApplication::initialise(const juce::String& commandLine)
     //   GUI は起動せず、生成後に即終了する（isr-run-runtime-evidence.ps1 の
     //   Wait-Process -Timeout 20 前提。生成物は isr-verify-evidence-provenance.ps1 が
     //   runtime モードで検証する）。
-    if (commandLine.contains("--verify-runtime-evidence"))
+    if (commandLine.contains("--verify-runtime-evidence")
+        && ! commandLine.contains("--verify-runtime-evidence-live"))
     {
         convo::isr::EvidenceExporter evidenceExporter;
         evidenceExporter.exportEvidence(nullptr, 0);
@@ -77,6 +80,33 @@ void MainApplication::initialise(const juce::String& commandLine)
         juce::JUCEApplicationBase::quit();
         return;
     }
+
+    // ★ B-15: 学習係数ファイルの明示移行。version 無しのファイルを atanh で
+    //   旧形式から戻し、version=2 として保存する（バックアップ付き・原子的置換）。
+    //   自動では行わない。ユーザー／管理者がこのフラグを明示したときだけ実行する。
+    if (commandLine.contains("--migrate-learned-state"))
+    {
+        const auto stateFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                   .getChildFile("ConvoPeq")
+                                   .getChildFile("learned_state.xml");
+        const auto result = convo::learnedstate::migrateFile(stateFile);
+        const juce::String cliLine = juce::String("[migrate-learned-state] ")
+            + (result.ok ? (result.changed ? "migrated" : "no-change") : "failed")
+            + ": " + result.message;
+        std::puts(cliLine.toRawUTF8());
+        juce::Logger::writeToLog("[migrate-learned-state] " + result.message);
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
+    // ★ B-11: 実測証跡モード。エンジンを通常どおり動かし、HB 証跡と違反レポートを
+    //   Release でも実測で出力する。--cli-run / --cli-exit-ms と組み合わせて使う。
+    if (commandLine.contains("--verify-runtime-evidence-live"))
+    {
+        convo::isr::setForceEvidenceEmission(true);
+        liveEvidenceRequested = true;
+        std::puts("[verify-runtime-evidence-live] live evidence mode enabled");
+    }
+
     {
         const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
         const auto logFile = exeDir.getChildFile("ConvoPeq.log");
@@ -201,6 +231,15 @@ void MainApplication::shutdown()
     //   ことを明示。クラッシュ時はこの行が出ない = crash phase が mainWindow.reset() 内と
     //   特定できる（D119-BLOCKER-2 診断）。
     juce::Logger::writeToLog("[D123] SHUTDOWN: mainWindow.reset() completed");
+
+    // ★ B-11: 実測証跡モードでは、エンジンが書いた artifact を manifest に反映する。
+    //   exportEvidence は既存ファイルを上書きしないため、実測値はそのまま残る。
+    if (liveEvidenceRequested)
+    {
+        convo::isr::EvidenceExporter exporter;
+        exporter.exportEvidence(nullptr, 0, true);
+        juce::Logger::writeToLog("[verify-runtime-evidence-live] manifest exported after shutdown");
+    }
 
     juce::Logger::writeToLog("MainApplication shutting down.");
     juce::Logger::writeToLog("[D123] LOGGER_DETACH / SHUTDOWN_END");

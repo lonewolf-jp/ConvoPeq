@@ -1,0 +1,39 @@
+diff --git a/src/eqprocessor/EQProcessor.h b/src/eqprocessor/EQProcessor.h
+index c65778f1..df46bbeb 100644
+--- a/src/eqprocessor/EQProcessor.h
++++ b/src/eqprocessor/EQProcessor.h
+@@ -217,6 +217,12 @@ public:
+         //----------------------------------------------------------
+     void prepareToPlay(double sampleRate, int newMaxInternalBlockSize);
+ 
++    // 笘・Gate 1: RCU 蜈･蝣ｴ縺ｫ螟ｱ謨励＠縺ｦ迥ｶ諷句盾辣ｧ繧偵せ繧ｭ繝・・縺励◆蝗樊焚・郁ｨｺ譁ｭ逕ｨ・・+    [[nodiscard]] std::uint32_t unprotectedReadCount() const noexcept
++    {
++        return unprotectedReadCount_.load(std::memory_order_relaxed);
++    }
++
+     //----------------------------------------------------------
+     // process: 繧ｪ繝ｼ繝・ぅ繧ｪ繧ｹ繝ｬ繝・ラ縺九ｉ蜻ｼ縺ｰ繧後ｋ
+     // 繝ｭ繝・け繝ｻnew繝ｻI/O繝ｻ蠕・ｩ滂ｼ・R蜀阪Ο繝ｼ繝臥ｭ会ｼ臥ｦ∵ｭ｢
+@@ -459,12 +465,12 @@ public:
+     //   guard 縺・slot 繧剃ｿ晄戟縺励※縺・ｋ髢薙・ retireEpoch < minReaderEpoch 縺梧・遶・     //   縺励↑縺・◆繧√∝ｽ楢ｩｲ繧ｪ繝悶ず繧ｧ繧ｯ繝医・隗｣謾ｾ縺輔ｌ縺ｪ縺・・     //   active()==false・・hutdown 蠕後・slot 譫ｯ貂・ｼ峨↑繧・deref 縺帙★螳牙・蛛ｴ縺ｫ蛟偵☆縺薙→縲・-    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
++    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard(const char* tag = nullptr) const noexcept
+     {
+         // The epoch domain is a synchronization primitive: entering a reader slot does not
+         // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
+         // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
+-        return convo::ScopedEpochReader (*m_epochDomain);
++        return convo::ScopedEpochReader (*m_epochDomain, tag);
+     }
+     bool getAndClearPendingAGCChange() noexcept
+     {
+@@ -591,7 +597,15 @@ private:
+     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
+     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
+     // DSP_THREAD_STATE: audio thread縺ｧ縺ｮ縺ｿ菴ｿ逕ｨ縺吶ｋRCU reader縲・+    // 笘・Gate 1 (2026-11-11, Owner 謇ｿ隱・: 繝・せ繝亥ｰら畑繧｢繧ｯ繧ｻ繧ｹ・郁｣ｽ蜩・API 縺ｯ霑ｽ蜉縺励↑縺・ｼ・+    friend struct EQProcessorGate1TestAccess;
++
+     convo::RCUReader rcuReader { *m_epochDomain };
++    std::atomic<std::uint32_t> unprotectedReadCount_ { 0 };   // 笘・Gate 1 險ｺ譁ｭ
++    // 笘・Gate 1: RT・・udio Thread・峨°繧・fetch_add 縺吶ｋ縺溘ａ縲〕ock-free 縺ｧ縺ゅｋ縺薙→繧・+    //   螳溯｡梧凾縺ｧ縺ｯ縺ｪ縺上さ繝ｳ繝代う繝ｫ譎ゅ↓菫晁ｨｼ縺吶ｋ・医径tomic 縺縺九ｉ lock-free縲阪→縺ｯ縺ｿ縺ｪ縺輔↑縺・ｼ峨・+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
++                  "Gate1: unprotectedReadCount_ must be lock-free for RT use");
+     // [work88 BUG-010] retire螟ｱ謨玲凾縺ｮ繝峨Ο繝・・繧ｫ繧ｦ繝ｳ繧ｿ・郁ｨｺ譁ｭ逕ｨ・・     std::atomic<uint64_t> m_retireDropCount{0};
+ 

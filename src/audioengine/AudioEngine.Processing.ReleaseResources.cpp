@@ -6,6 +6,7 @@
 #include "NoiseShaperLearner.h"
 #include "RuntimePublicationOrchestrator.h"  // ★ work37: clearDeferredForShutdown 完全型必要
 #include "ISRRetireOverflowRing.h"           // ★ Phase2: RetireOverflowEntry 完全型
+#include "convolver/ConvolverStopProbe.h"    // ★ gate measurement: 停止レイテンシ計測（既定 OFF）
 
 namespace {
 
@@ -146,6 +147,7 @@ void AudioEngine::releaseResources()
     if (noiseShaperLearner)
     {
         juce::Logger::writeToLog("[AudioEngine] releaseResources: stopping learner");
+        convo::probe::Span probeStopLearning ("stopLearning_terminal", 0, 0, 0);   // ★ gate measurement
         noiseShaperLearner->stopLearning();
     }
 
@@ -948,6 +950,7 @@ void AudioEngine::releaseResourcesForReconfigure() noexcept
     if (noiseShaperLearner)
     {
         juce::Logger::writeToLog("[AudioEngine] releaseResources(reconfigure): stopping learner");
+        convo::probe::Span probeStopLearning ("stopLearning_reconfigure", 0, 0, 0);   // ★ gate measurement
         noiseShaperLearner->stopLearning();
     }
     resetLearningControlState();

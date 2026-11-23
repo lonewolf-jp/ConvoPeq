@@ -1,0 +1,19 @@
+--- a/src/audioengine/ISRHB.cpp
++++ b/src/audioengine/ISRHB.cpp
+@@ -2,6 +2,7 @@
+ #include "AtomicAccess.h"
+ #include "ISRRetireLatency.h"
+ #include "WorldLifetimeRecorder.h"   // ★ A(D1): 退役遅延の集計
++#include "core/SnapshotCoordinator.h"   // ★ C2: RT 契約違反カウンタの出力
+ 
+ #include <chrono>
+ #include <filesystem>
+@@ -209,6 +210,8 @@
+     file << "  \"retireLatencyD1\": {\n";
+     file << "    \"thresholdNs\": " << convo::isr::RetireLatencyRecorder::kThresholdNs << ",\n";
+     file << "    \"required\": 59,\n";
++    // ★ C2: RT 契約違反（RT からの resetFadeStateAndRetireTarget 呼出し）の回数
++    file << "    \"snapshotRtViolations\": " << convo::SnapshotCoordinator::rtViolationCount() << ",\n";
+     {
+         const auto timingRuntime = convo::isr::RetireLatencyRecorder::instance().runtimeStage();
+         const auto timingSnapshot = convo::isr::RetireLatencyRecorder::instance().snapshot();

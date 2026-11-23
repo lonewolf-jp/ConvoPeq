@@ -1,0 +1,9 @@
+{"ts":16610252688,"ev":"mark","op":"loadIR_begin","a":4096,"b":1}
+{"ts":16610253339,"ev":"span","op":"cache_direct","us":163,"samples":0,"fft":4096,"phase":1,"cancelled":0}
+{"ts":16610303353,"ev":"span","op":"cache_low","us":48172,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16610364103,"ev":"mark","op":"upgrade_start","a":512,"b":4096}
+{"ts":16610669379,"ev":"mark","op":"perform_load","a":0,"b":0}
+{"ts":16610777158,"ev":"span","op":"minimum_phase","us":103380,"samples":192000,"fft":0,"phase":1,"cancelled":0}
+{"ts":16610983862,"ev":"span","op":"mixed_phase","us":206260,"samples":192000,"fft":0,"phase":1,"cancelled":0}
+{"ts":16611003540,"ev":"span","op":"nuc_build","us":14604,"samples":192000,"fft":2048,"phase":1,"cancelled":0}
+{"ts":16611003785,"ev":"request","w":"000000D1129FE1A0","kind":"loader","already_exited":0}

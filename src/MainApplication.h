@@ -39,4 +39,7 @@ public:
 private:
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<juce::FileLogger> fileLogger;
+    // ★ B-11: 実測証跡モード（--verify-runtime-evidence-live）。エンジンを動かして
+    //   HB 証跡・違反レポートを実測で出し、終了時に manifest を全 artifact 付きで書く。
+    bool liveEvidenceRequested = false;
 };

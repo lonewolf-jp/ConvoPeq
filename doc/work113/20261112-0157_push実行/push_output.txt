@@ -1,0 +1,7 @@
+remote: Bypassed rule violations for refs/heads/main:        
+remote: 
+remote: - Required status check "Windows MSVC / Release" is expected.        
+remote: 
+To https://github.com/lonewolf-jp/ConvoPeq.git
+   c94d3767..173e6995  main -> main
+PUSH_EXIT=0

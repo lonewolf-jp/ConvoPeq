@@ -1,0 +1,31 @@
+--- a/src/eqprocessor/EQProcessor.h
++++ b/src/eqprocessor/EQProcessor.h
+@@ -217,6 +217,12 @@
+         //----------------------------------------------------------
+     void prepareToPlay(double sampleRate, int newMaxInternalBlockSize);
+ 
++    // ★ Gate 1: RCU 入場に失敗して状態参照をスキップした回数（診断用）
++    [[nodiscard]] std::uint32_t unprotectedReadCount() const noexcept
++    {
++        return unprotectedReadCount_.load(std::memory_order_relaxed);
++    }
++
+     //----------------------------------------------------------
+     // process: オーディオスレッドから呼ばれる
+     // ロック・new・I/O・待機（IR再ロード等）禁止
+@@ -591,7 +597,15 @@
+     convo::isr::ISRRetireRouter* m_retireRouter{nullptr};
+     std::atomic<std::uintptr_t> currentStateBits { 0 }; // uintptr_t-backed lock-free handle
+     // DSP_THREAD_STATE: audio threadでのみ使用するRCU reader。
++    // ★ Gate 1 (2026-11-11, Owner 承認): テスト専用アクセス（製品 API は追加しない）
++    friend struct EQProcessorGate1TestAccess;
++
+     convo::RCUReader rcuReader { *m_epochDomain };
++    std::atomic<std::uint32_t> unprotectedReadCount_ { 0 };   // ★ Gate 1 診断
++    // ★ Gate 1: RT（Audio Thread）から fetch_add するため、lock-free であることを
++    //   実行時ではなくコンパイル時に保証する（「atomic だから lock-free」とはみなさない）。
++    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
++                  "Gate1: unprotectedReadCount_ must be lock-free for RT use");
+     // [work88 BUG-010] retire失敗時のドロップカウンタ（診断用）
+     std::atomic<uint64_t> m_retireDropCount{0};
+ 

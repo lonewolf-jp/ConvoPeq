@@ -1,0 +1,12 @@
+377	30	.github/scripts/isr-verify-proof-scope.ps1
+207	0	.github/scripts/test-isr-verify-proof-scope-lexer.ps1
+790	0	.github/scripts/test-isr-verify-proof-scope.ps1
+21	3	src/audioengine/AtomicAccess.h
+3	2	src/audioengine/ISRDebugRuntime.cpp
+3	1	src/audioengine/ISRDebugRuntime.h
+234	224	src/audioengine/ISRRetireLatency.h
+38	36	src/audioengine/WorldLifetimeRecorder.h
+1	1	src/core/EpochDomain.h
+17	15	src/core/ReaderMeasureRegistry.h
+12	11	src/core/ScopedEpochReader.h
+2	1	src/core/SnapshotCoordinator.h

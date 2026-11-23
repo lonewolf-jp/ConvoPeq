@@ -7,6 +7,7 @@
 #include "DftiHandle.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "ConvolverStopProbe.h"   // ★ gate measurement: 停止レイテンシ計測（既定 OFF・診断専用）
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_STATE_UI)
 
@@ -1048,7 +1049,16 @@ void ConvolverProcessor::forceCleanup()
     for (auto& loader : loadersToDelete)
     {
         if (loader)
-            loader->stopThread(500);
+        {
+            convo::probe::noteStopRequest (loader.get(), "loader");   // ★ gate measurement（既定 OFF）
+            bool stoppedCooperatively = false;
+            {
+                convo::probe::Span probeLoaderStop ("loader_stopThread", 0, 0, 0);   // ★ gate measurement
+                stoppedCooperatively = loader->stopThread(500);
+                probeLoaderStop.setCancelled (! stoppedCooperatively);
+            }
+            convo::probe::noteMark ("loader_stopThread_result", stoppedCooperatively ? 1 : 0, 0);   // ★ gate measurement
+        }
     }
     loadersToDelete.clear();
 }

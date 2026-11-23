@@ -1,0 +1,480 @@
+diff --git a/.github/scripts/isr-verify-proof-scope.ps1 b/.github/scripts/isr-verify-proof-scope.ps1
+index 237104a5..5dc9d7cd 100644
+--- a/.github/scripts/isr-verify-proof-scope.ps1
++++ b/.github/scripts/isr-verify-proof-scope.ps1
+@@ -57,10 +57,18 @@ function Get-LexicalRanges {
+         $c = $Text[$i]
+         $n1 = if ($i + 1 -lt $n) { $Text[$i + 1] } else { [char]0 }
+ 
+-        # --- line comment
++        # --- line comment（行末のバックスラッシュは次の行へ継続する: C++ の行連結）
+         if ($c -eq '/' -and $n1 -eq '/') {
+             $start = $i
+-            while ($i -lt $n -and $Text[$i] -ne "`n") { $i++ }
++            while ($i -lt $n) {
++                if ($Text[$i] -eq "`n") {
++                    $j = $i - 1
++                    if ($j -ge $start -and $Text[$j] -eq "`r") { $j-- }
++                    if ($j -ge $start -and $Text[$j] -eq $backslash) { $i++; continue }
++                    break
++                }
++                $i++
++            }
+             $comments.Add([PSCustomObject]@{ Start = $start; End = $i })
+             continue
+         }
+@@ -193,10 +201,18 @@ function Get-FunctionSpan {
+         [string]$Signature
+     )
+ 
+-    $m = [System.Text.RegularExpressions.Regex]::Match(
+-        $CodeText,
+-        $Signature + '\s*(?:noexcept\s*)?\{')
+-    if (-not $m.Success) {
++    # 署名は文字列リテラルの中に現れることもあるため、文字列範囲の外の最初の一致を使う。
++    $signatureRanges = (Get-LexicalRanges -Text $CodeText).Strings
++    $m = $null
++    foreach ($candidate in [System.Text.RegularExpressions.Regex]::Matches(
++                 $CodeText, $Signature + '\s*(?:noexcept\s*)?\{')) {
++        $insideString = $false
++        foreach ($r in $signatureRanges) {
++            if ($candidate.Index -ge $r.Start -and $candidate.Index -lt $r.End) { $insideString = $true; break }
++        }
++        if (-not $insideString) { $m = $candidate; break }
++    }
++    if ($null -eq $m) {
+         return $null
+     }
+ 
+@@ -254,13 +270,22 @@ function Get-FunctionBodyMasked {
+ # 条件付き早期 return を列挙する
+ #-----------------------------------------------------------------------------
+ function Get-ConditionalReturns {
+-    param([string]$Body)
++    param(
++        [string]$CodeBody,
++        [string]$MaskedBody
++    )
+ 
++    if ([string]::IsNullOrEmpty($MaskedBody)) { $MaskedBody = $CodeBody }
++
++    # 構造（if (...) { return; }）は文字列を伏せた本文で探し、条件式の文字列だけを
++    # 元の本文から取り出す。文字列に書かれた偽のガードを拾わないため。
+     $results = @()
+     $pattern = 'if\s*\((?<cond>[^{};]*?)\)\s*\{\s*return\s*;\s*\}'
+-    foreach ($m in [System.Text.RegularExpressions.Regex]::Matches($Body, $pattern)) {
++    foreach ($m in [System.Text.RegularExpressions.Regex]::Matches($MaskedBody, $pattern)) {
++        $condGroup = $m.Groups['cond']
++        $condText = $CodeBody.Substring($condGroup.Index, $condGroup.Length)
+         $results += [PSCustomObject]@{
+-            Condition = $m.Groups['cond'].Value
++            Condition = $condText
+             Index     = $m.Index
+             Text      = $m.Value
+         }
+@@ -268,6 +293,57 @@ function Get-ConditionalReturns {
+     return $results
+ }
+ 
++function Remove-OuterParens {
++    param([string]$Text)
++
++    $t = $Text.Trim()
++    while ($t.Length -ge 2 -and $t.StartsWith('(') -and $t.EndsWith(')')) {
++        $depth = 0
++        $enclosesWhole = $true
++        for ($k = 0; $k -lt $t.Length; $k++) {
++            if ($t[$k] -eq '(') { $depth++ }
++            elseif ($t[$k] -eq ')') {
++                $depth--
++                if ($depth -eq 0 -and $k -lt ($t.Length - 1)) { $enclosesWhole = $false; break }
++            }
++        }
++        if (-not $enclosesWhole) { break }
++        $t = $t.Substring(1, $t.Length - 2).Trim()
++    }
++    return $t
++}
++
++# Release ガードの条件式が意図した形かを判定する。
++#   force 実装:   mode == "Release" && ! isForceEvidenceEmission()   （項の順序は不問）
++#   旧実装:       mode == "Release"
++# 次の形は受け付けない:
++#   - "||" で結ばれた条件（強制時にも抑制してしまう）
++#   - "!" で全体を反転した条件（!(mode == "Release") など）
++#   - 項が 3 つ以上ある条件
++function Test-ReleaseGuardCondition {
++    param(
++        [string]$Condition,
++        [bool]$ForceSwitchExists
++    )
++
++    $releaseTerm = 'mode == "Release"'
++    $forceTerm = '! isForceEvidenceEmission()'
++
++    $c = ($Condition -replace '\s+', ' ')
++    $c = $c -replace '!\s*', '! '
++    $c = $c.Trim()
++
++    if ($c -match '\|\|') { return $false }
++
++    if (-not $ForceSwitchExists) {
++        return ((Remove-OuterParens -Text $c) -eq $releaseTerm)
++    }
++
++    $terms = @($c -split '&&' | ForEach-Object { Remove-OuterParens -Text $_.Trim() })
++    if ($terms.Count -ne 2) { return $false }
++    return (($terms -contains $releaseTerm) -and ($terms -contains $forceTerm))
++}
++
+ #-----------------------------------------------------------------------------
+ # 検証本体。エラーメッセージの配列を返す（空配列 = PASS）
+ #-----------------------------------------------------------------------------
+@@ -318,25 +394,21 @@ function Test-ProofScopeContract {
+     $hasForceEvidenceSwitch = $runtimeMasked -match 'isForceEvidenceEmission\s*\(\s*\)'
+ 
+     $emitCIArtifacts = Get-FunctionBody -CodeText $runtimeCode -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
++    $emitCIArtifactsMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
++        -Signature 'void\s+DebugRuntime::emitCIArtifacts\s*\(\s*\)'
+     if ($null -eq $emitCIArtifacts) {
+         $errors.Add("DebugRuntime contract violation: emitCIArtifacts() body not found")
+     }
+     else {
+-        $returns = @(Get-ConditionalReturns -Body $emitCIArtifacts)
+-        $releaseReturns = @($returns | Where-Object { $_.Condition -match 'mode\s*==\s*"Release"' })
++        $returns = @(Get-ConditionalReturns -CodeBody $emitCIArtifacts -MaskedBody $emitCIArtifactsMasked)
++        $releaseReturns = @($returns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
+ 
+         if ($releaseReturns.Count -eq 0) {
+-            $errors.Add("DebugRuntime contract violation: Release early-return not found in emitCIArtifacts()")
+-        }
+-        else {
+-            foreach ($r in $releaseReturns) {
+-                if ($hasForceEvidenceSwitch -and ($r.Condition -notmatch '!\s*isForceEvidenceEmission\s*\(\s*\)')) {
+-                    $errors.Add("DebugRuntime contract violation: Release early-return ignores isForceEvidenceEmission()")
+-                }
+-            }
++            $errors.Add("DebugRuntime contract violation: Release early-return not found or its condition is wrong in emitCIArtifacts()")
+         }
+ 
+-        $traceMatch = [System.Text.RegularExpressions.Regex]::Match($emitCIArtifacts, 'emitHBTrace\s*\(\s*\)\s*;')
++        # 呼び出しの有無は文字列を伏せた本文で見る（文字列内の "emitHBTrace();" を拾わない）。
++        $traceMatch = [System.Text.RegularExpressions.Regex]::Match($emitCIArtifactsMasked, 'emitHBTrace\s*\(\s*\)\s*;')
+         if (-not $traceMatch.Success) {
+             $errors.Add("DebugRuntime contract violation: emitCIArtifacts() does not emit the HB trace")
+         }
+@@ -348,22 +420,24 @@ function Test-ProofScopeContract {
+         }
+     }
+ 
+-    #--- R25-4: emitHBTrace() 自身の Release 抑制
++    #--- R25-4: emitHBTrace() 自身の Release 抑制（トレース発行より前にあること）
+     $emitHBTrace = Get-FunctionBody -CodeText $runtimeCode -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
++    $emitHBTraceMasked = Get-FunctionBodyMasked -CodeText $runtimeCode -MaskedText $runtimeMasked `
++        -Signature 'void\s+DebugRuntime::emitHBTrace\s*\(\s*\)'
+     if ($null -eq $emitHBTrace) {
+         $errors.Add("DebugRuntime contract violation: emitHBTrace() body not found")
+     }
+     else {
+-        $traceReturns = @(Get-ConditionalReturns -Body $emitHBTrace)
+-        $traceReleaseReturns = @($traceReturns | Where-Object { $_.Condition -match 'mode\s*==\s*"Release"' })
++        $traceReturns = @(Get-ConditionalReturns -CodeBody $emitHBTrace -MaskedBody $emitHBTraceMasked)
++        $traceReleaseReturns = @($traceReturns | Where-Object { Test-ReleaseGuardCondition -Condition $_.Condition -ForceSwitchExists $hasForceEvidenceSwitch })
+         if ($traceReleaseReturns.Count -eq 0) {
+-            $errors.Add("DebugRuntime contract violation: emitHBTrace() lost its Release suppression")
++            $errors.Add("DebugRuntime contract violation: emitHBTrace() lost its Release suppression or its condition is wrong")
+         }
+         else {
+-            foreach ($r in $traceReleaseReturns) {
+-                if ($hasForceEvidenceSwitch -and ($r.Condition -notmatch '!\s*isForceEvidenceEmission\s*\(\s*\)')) {
+-                    $errors.Add("DebugRuntime contract violation: emitHBTrace() Release suppression ignores isForceEvidenceEmission()")
+-                }
++            $emitMatch = [System.Text.RegularExpressions.Regex]::Match($emitHBTraceMasked, 'emitTrace\s*\(')
++            $firstTraceReturn = ($traceReleaseReturns | Sort-Object Index | Select-Object -First 1).Index
++            if ($emitMatch.Success -and $emitMatch.Index -lt $firstTraceReturn) {
++                $errors.Add("DebugRuntime contract violation: emitHBTrace() emits the trace before the Release suppression")
+             }
+         }
+     }
+diff --git a/.github/scripts/test-isr-verify-proof-scope-lexer.ps1 b/.github/scripts/test-isr-verify-proof-scope-lexer.ps1
+index 0420d6d3..4e776208 100644
+--- a/.github/scripts/test-isr-verify-proof-scope-lexer.ps1
++++ b/.github/scripts/test-isr-verify-proof-scope-lexer.ps1
+@@ -174,8 +174,13 @@ if ($brokenCrlf -eq $fnText) {
+     Check "mutation-crlf-continuation-observable" $false "could not mutate the CRLF skip"
+ }
+ else {
++    # 変異の前に、正しい走査器がこの入力を受け入れること（基準線）を確認する。
++    $codeN = 'const char* s = "abc\' + "`r`ndef" + '";' + "`r`nemitHBTrace();`r`n"
++    $rBase = @((Get-LexicalRanges -Text $codeN).Strings.ToArray())
++    $sliceBase = if ($rBase.Count -eq 1) { $codeN.Substring($rBase[0].Start, $rBase[0].End - $rBase[0].Start) } else { '' }
++    Check "crlf-mutation-baseline" ($rBase.Count -eq 1 -and $sliceBase.Contains("`r`n")) "baseline scanner does not accept the mutated input (test would be vacuous)"
++
+     Invoke-Expression $brokenCrlf
+-    $codeN = 'const char* s = "abc' + "`r`ndef" + '";' + "`r`nemitHBTrace();`r`n"
+     $rN = @((Get-LexicalRanges -Text $codeN).Strings.ToArray())
+     $sliceN = if ($rN.Count -eq 1) { $codeN.Substring($rN[0].Start, $rN[0].End - $rN[0].Start) } else { '' }
+     $detectedN = -not ($rN.Count -eq 1 -and $sliceN.Contains("`r`n"))
+@@ -197,6 +202,23 @@ else {
+     Invoke-Expression $fnText
+ }
+ 
++# --- 13. a line comment continued with a backslash keeps the next line commented
++$code13 = "// disabled \" + "`n" + "if (mode == `"Release`") { return; }" + "`nemitHBTrace();`n"
++$out13 = Get-CodeText $code13
++Check "comment-continuation-hides-guard" ($out13 -notmatch 'mode ==') "the continued comment line was treated as code"
++Check "comment-continuation-code-kept" ($out13 -match 'emitHBTrace\(\);') "code after the comment was blanked"
++
++# --- 13b. same with CRLF splicing
++$code13b = "// disabled \" + "`r`n" + "if (mode == `"Release`") { return; }" + "`r`nemitHBTrace();`r`n"
++$out13b = Get-CodeText $code13b
++Check "comment-continuation-crlf-hides-guard" ($out13b -notmatch 'mode ==') "the continued CRLF comment line was treated as code"
++Check "comment-continuation-crlf-code-kept" ($out13b -match 'emitHBTrace\(\);') "code after the CRLF comment was blanked"
++
++# --- 13c. a comment that ends without a backslash must not swallow the next line
++$code13c = "// note`nif (mode == `"Release`") { return; }`nemitHBTrace();`n"
++$out13c = Get-CodeText $code13c
++Check "comment-without-continuation-keeps-code" ($out13c -match 'mode ==') "a non-continued comment swallowed the next line"
++
+ if ($fail -gt 0) {
+     Write-Host ""
+     Write-Host "scanner probe: $fail check(s) failed"
+diff --git a/.github/scripts/test-isr-verify-proof-scope.ps1 b/.github/scripts/test-isr-verify-proof-scope.ps1
+index c62cfa1e..d9b02563 100644
+--- a/.github/scripts/test-isr-verify-proof-scope.ps1
++++ b/.github/scripts/test-isr-verify-proof-scope.ps1
+@@ -748,6 +748,234 @@ void DebugRuntime::emitHBTrace()
+ '@ + $commonTail
+ }
+ 
++# 21) Release guard joined with || (suppresses forced evidence as well).
++$cases += [PSCustomObject]@{
++    Name     = 'release-guard-with-or'
++    Expected = 1
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" || ! isForceEvidenceEmission()) {
++        return;
++    }
++    emitHBTrace();
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    hbTraceRuntime_.emitTrace(path);
++}
++'@ + $commonTail
++}
++
++# 22) The HB trace call exists only inside a string literal.
++$cases += [PSCustomObject]@{
++    Name     = 'hbtrace-call-only-inside-string'
++    Expected = 1
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    const char* note = "emitHBTrace();";
++    (void) note;
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    hbTraceRuntime_.emitTrace(path);
++}
++'@ + $commonTail
++}
++
++# 23) emitHBTrace() emits before its Release suppression.
++$cases += [PSCustomObject]@{
++    Name     = 'hbtrace-emit-before-guard'
++    Expected = 1
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    emitHBTrace();
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    hbTraceRuntime_.emitTrace(path);
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++}
++'@ + $commonTail
++}
++
++# 24) The Release guard is commented out with a line-continuation backslash.
++$cases += [PSCustomObject]@{
++    Name     = 'release-guard-commented-out-with-continuation'
++    Expected = 1
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    // temporarily disabled \
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    emitHBTrace();
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    hbTraceRuntime_.emitTrace(path);
++}
++'@ + $commonTail
++}
++
++# 25) A continued comment that does not hide the guard must still pass.
++$cases += [PSCustomObject]@{
++    Name     = 'comment-continuation-without-hiding-guard'
++    Expected = 0
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    // note: the guard below is real, not commented \
++    // (this line continues the comment)
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    emitHBTrace();
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    hbTraceRuntime_.emitTrace(path);
++}
++'@ + $commonTail
++}
++
++# 26) The Release test itself is negated: !(mode == "Release") && ! force.
++$cases += [PSCustomObject]@{
++    Name     = 'release-guard-negated-mode'
++    Expected = 1
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    if (!(mode == "Release") && ! isForceEvidenceEmission()) {
++        return;
++    }
++    emitHBTrace();
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    const std::string mode = currentBuildMode();
++    if (mode == "Release" && ! isForceEvidenceEmission()) {
++        return;
++    }
++    hbTraceRuntime_.emitTrace(path);
++}
++'@ + $commonTail
++}
++
++# 27) The same contract written with parentheses around each term.
++$cases += [PSCustomObject]@{
++    Name     = 'release-guard-parenthesized'
++    Expected = 0
++    Source   = @'
++namespace convo::isr
++{
++bool isForceEvidenceEmission()
++{
++    return false;
++}
++
++void DebugRuntime::emitCIArtifacts()
++{
++    const std::string mode = currentBuildMode();
++    if ((mode == "Release") && (! isForceEvidenceEmission())) {
++        return;
++    }
++    emitHBTrace();
++}
++
++void DebugRuntime::emitHBTrace()
++{
++    const std::string mode = currentBuildMode();
++    if ((mode == "Release") && (! isForceEvidenceEmission())) {
++        return;
++    }
++    hbTraceRuntime_.emitTrace(path);
++}
++'@ + $commonTail
++}
++
+ $failures = 0
+ foreach ($case in $cases) {
+     if (-not ($case.PSObject.Properties.Name -contains 'MutateExporter')) {

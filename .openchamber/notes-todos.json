@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "notes": [
+    {
+      "id": "8f920646-c93a-4ba2-bbbd-e394b0b8e344",
+      "body": "調査や検証で作成した成果物はDropBoxにもコピーすること。",
+      "createdAt": 1792684123716,
+      "updatedAt": 1792684123716,
+      "source": "manual",
+      "pinned": false
+    }
+  ],
+  "todos": [
+    {
+      "id": "7e9b3ff3-e3a2-40f5-ac55-1300314c1361",
+      "text": "WORK113 Queue/Gate/Drain: 13 コミット目 579f2662 の検証を完了。変異試験の実測: (M1) destructor を b0ec4f2e の状態へ戻す（2条件+fallback・基盤非保持）と harness が 0xC0000005（アクセス違反）で落ちる（[DQ-H5] シナリオで破棄済み domain に exit() が触れる UAF を再現）。(M2) fallback と2条件は戻すが基盤だけ active reader 中は保持すると [DQ-H5-7] deleter=1 と [DQ-H5-8] 隔離なしで checkShutdownHoldActiveReader が不合格。変異を戻すと [DQ-H]/[DQ-H2]/[DQ-H3]/[DQ-H4]/[DQ-H5] すべて PASS、[DQ-H5] は 9 項目 PASS。再ビルドは PE タイムスタンプでハッシュが変わるためハッシュ一致比較は不可（ソース同一は git clean で担保）。S1 は再実行し runs/S1_diag_on_r1_20261118-165035-815444 で checkedDrain completed=1 remaining=0、FAULT 0、exit 0、設定2復元。runs/ 17件。報告書 doc/work113/20261118-1630_active保持/report.md に変異試験を追記し Dropbox queue-gate-drain/active-reader-report.md へ再アップロード済み。HEAD 579f2662・clean。変更3は未着手。",
+      "completed": false,
+      "createdAt": 1794905591618
+    },
+    {
+      "id": "4ede6266-5f77-4d08-919b-5d5edadbccf5",
+      "text": "graphify を 0.9.111 に更新済み（MCP ハンドシェイク・実呼び出し・グラフ更新まで確認）。ただし更新時に MCP 子プロセスを停止したため、このセッションの graphify MCP は未再接続。OpenChamber を再起動すると 0.9.111 の 11 ツール（get_section 追加）で復帰する。再起動後は `mcp connected server=graphify tools=11` をサーバーログで確認する。",
+      "completed": false,
+      "createdAt": 1794906775030
+    }
+  ]
+}

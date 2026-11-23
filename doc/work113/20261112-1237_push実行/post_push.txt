@@ -1,0 +1,12 @@
+=== post-push verification ===
+2026-11-12 12:37:16
+remote_ref_before_push: (なし。新規ブランチ)
+ls_remote_after=b237f233f5ddaab9ef471bf2afe3e036ceb089b5
+local_head=b237f233f5ddaab9ef471bf2afe3e036ceb089b5
+remote_tracking=b237f233f5ddaab9ef471bf2afe3e036ceb089b5
+head_equal=yes
+worktree_entries=0
+status_branch=## ci-fix/173e6995
+ahead_of_remote=0
+origin_main=173e69957b046290f7077797782f031ed8633fd0
+fetch_refspec=+refs/heads/main:refs/remotes/origin/main 

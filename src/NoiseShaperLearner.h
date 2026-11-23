@@ -18,6 +18,8 @@
 
 #include "audioengine/AtomicAccess.h"
 #include "core/RCUReader.h"
+#include "learner/LearnedStateMigration.h"
+#include "learner/LearnerStateAuthority.h"
 
 class AudioEngine;
 struct AudioBlock;
@@ -118,6 +120,14 @@ public:
 
     const Progress& getProgress() const noexcept;
     void getState(State& outState) const noexcept;
+
+    // ★ B-15: version 属性の無い learned_state.xml を読んだ場合に true。
+    //   自動変換は行わない（明示操作のみ）。UI/ログで警告するためのフラグ。
+    [[nodiscard]] bool wasLearnedStateLegacyUnknown() const noexcept
+    {
+        return convo::consumeAtomic(learnedStateLegacyUnknown_, std::memory_order_acquire);
+    }
+
     void setState(const State& inState) noexcept;
     int copyBestScoreHistory(double* destination, int maxPoints) noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
@@ -142,7 +152,8 @@ public:
         return candidateFitness.get();
     }
 
-    bool saveLearnedState(const juce::File& file) const;
+    // ★ B-07: 保存は呼出元が取ったスナップショットを使う（job 側の再読をしない）。
+    bool saveLearnedState(const juce::File& file, const State& snapshot) const;
     bool loadLearnedState(const juce::File& file);
 
     // UI 表示用：学習ワーカーが記録したエラーメッセージを返す。
@@ -240,12 +251,21 @@ private:
                                    int numSegments,
                                    int evaluationBitDepth) noexcept;
     void precomputeMaskingThresholds(LeveledSegment& seg, double sampleRate) noexcept;
-    void publishGenerationResult(const double* coeffs, double score, int evaluatedCandidates) noexcept;
+    // ★ B-15: 引数は tanh 済みの反射係数（parcor）。再変換しない。
+    void publishGenerationResult(const double* parcor, double score, int evaluatedCandidates) noexcept;
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
     void applyPhaseParams(LearningMode mode, int phase) noexcept;
     void handleModeSwitch() noexcept;
+
+    // ★ B-07: optimizer への書き込みは 2 か所だけに集約する。
+    //   - applyRestore(): 学習スレッド（世代境界）または停止中のメッセージスレッド。
+    //   - captureState(): optimizer の状態をコピーする。学習スレッドか停止中のみ。
+    void applyRestore(const State& state) noexcept;
+    void captureState(State& outState) const noexcept;
+    void publishCurrentSnapshot() noexcept;
+    bool isWorkerActive() const noexcept;
 
     AudioEngine& engine;
     LockFreeRingBuffer<AudioBlock, 4096>& captureQueue;
@@ -269,9 +289,15 @@ private:
     std::chrono::steady_clock::time_point lastSaveTime;
     static constexpr auto kSaveInterval = std::chrono::seconds(5);
     std::atomic<bool> modeSwitchRequested {false};
-    LearningMode pendingMode {LearningMode::Short};
+    // ★ B-07: pendingMode はメッセージスレッドが書き、学習スレッドが読むため原子化した。
+    std::atomic<int> pendingModeRaw { static_cast<int>(LearningMode::Short) };
     LearningMode activeMode {LearningMode::Short};
     int currentPhase = 1;
+
+    // ★ B-07: optimizer は学習スレッドが所有する。他スレッドは復旧要求の投入と
+    //   公開スナップショットの読み取りだけを行い、optimizer の内部状態を直接触らない。
+    convo::LearnerStateAuthority<State> stateAuthority_;
+    std::atomic<bool> learnedStateLegacyUnknown_ { false };
 
     std::array<State, 6> savedStates {};
 

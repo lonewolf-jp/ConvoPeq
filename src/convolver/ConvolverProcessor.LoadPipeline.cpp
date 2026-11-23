@@ -7,6 +7,7 @@
 #include "ProgressiveUpgradeThread.h"
 
 #include "audioengine/AtomicAccess.h"
+#include "ConvolverStopProbe.h"   // ★ gate measurement: 停止レイテンシ計測（既定 OFF・診断専用）
 
 #if defined(CONVOPEQ_ENABLE_CONVOLVER_SPLIT_LOAD_PIPELINE)
 
@@ -19,6 +20,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // ファイル指定あり: 新規ロード
     // ファイル指定なし: 現在のデータでリビルド (SR変更時など)
     bool isRebuild = (irFile == juce::File());
+    convo::probe::noteMark ("load_request", isRebuild ? 1 : 0, optimizeForRealTime ? 1 : 0);   // ★ gate measurement（既定 OFF）
 
     if (isRebuild)
     {
@@ -50,6 +52,7 @@ bool ConvolverProcessor::loadImpulseResponse(const juce::File& irFile, bool opti
     // 既存のローダーを停止してゴミ箱へ退避 (即時resetによるブロックを回避)
     if (activeLoader)
     {
+        convo::probe::noteStopRequest (activeLoader.get(), "loader");   // ★ gate measurement（既定 OFF）
         activeLoader->signalThreadShouldExit();
         loaderTrashBin.push_back(std::move(activeLoader));
     }
@@ -103,7 +106,13 @@ void ConvolverProcessor::stopUpgradeThread()
     if (upgradeThread)
     {
         upgradeThread->cancel();
-        upgradeThread->stopThread(2000);
+        bool stoppedCooperatively = false;
+        {
+            convo::probe::Span probeUpgradeStop ("upgrade_stopThread", 0, 0, 0);   // ★ gate measurement
+            stoppedCooperatively = upgradeThread->stopThread(2000);
+            probeUpgradeStop.setCancelled (! stoppedCooperatively);
+        }
+        convo::probe::noteMark ("upgrade_stopThread_result", stoppedCooperatively ? 1 : 0, 0);   // ★ gate measurement
         upgradeThread.reset();
     }
 }
@@ -243,10 +252,15 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
         return;
     }
 
+    juce::File previousIrFile;
     {
         const juce::ScopedLock sl(irFileLock);
+        previousIrFile = currentIrFile;
         currentIrFile = irFile;
     }
+
+    // ★ B-01: 失敗理由を末端の報告点まで運ぶ（従来は「no FFT applied」だけだった）。
+    juce::String loadFailureReason;
 
     stopUpgradeThread();
 
@@ -259,22 +273,43 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
 
     int appliedFft = 0;
     const uint64_t targetKey = CacheManager::computeKey(irFile, targetFFT, sr, phase, targetFFT);
+    convo::probe::noteMark ("loadIR_begin", targetFFT, phase);   // ★ gate measurement（既定 OFF）
 
     if (cacheManager)
     {
-        auto directTarget = cacheManager->loadPreparedState(targetKey, targetFFT, generation);
-        if (directTarget)
+        // ★ B-01: キャッシュ読み出しの確保失敗は「キャッシュミス」として扱い、
+        //   変換へフォールバックする（例外をメッセージスレッドへ出さない）。
+        try
         {
-            directTarget->originalFileName = irFile.getFileNameWithoutExtension();
-            appliedFft = targetFFT;
-            applyComputedIR(std::move(directTarget));
+            convo::probe::Span probeCacheDirect ("cache_direct", 0, targetFFT, phase);   // ★ gate measurement
+            auto directTarget = cacheManager->loadPreparedState(targetKey, targetFFT, generation);
+            if (directTarget)
+            {
+                directTarget->originalFileName = irFile.getFileNameWithoutExtension();
+                appliedFft = targetFFT;
+                applyComputedIR(std::move(directTarget));
+            }
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] loadIR: cache read failed (bad_alloc); rebuilding");
         }
     }
 
     if (appliedFft == 0 && cacheManager && irConverter)
     {
         const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, lowResFFT);
-        auto cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);
+
+        std::unique_ptr<PreparedIRState> cachedLow;
+        try
+        {
+            convo::probe::Span probeCacheLow ("cache_low", 0, lowResFFT, phase);   // ★ gate measurement
+            cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] loadIR: low-res cache read failed (bad_alloc); rebuilding");
+        }
 
         if (cachedLow)
         {
@@ -292,30 +327,53 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
             cfg.generationId = generation;
             cfg.cacheKey = lowResKey;
 
-            auto prepared = irConverter->convertFile(irFile, cfg, [this, generation]()
+            convo::probe::Span probeConvertLow ("convert_low_outer", 0, lowResFFT, phase);   // ★ gate measurement
+            auto prepared = [&]()
             {
-                return !convolverStateGeneration.isCurrentGeneration(generation);
-            });
+                convo::probe::Span probeConvertOnly ("convert_low", 0, lowResFFT, phase);   // ★ gate measurement
+                return irConverter->convertFile(irFile, cfg, [this, generation]()
+                {
+                    return !convolverStateGeneration.isCurrentGeneration(generation);
+                }, &loadFailureReason);
+            }();
 
             if (prepared == nullptr)
             {
                 juce::Logger::writeToLog("[DIAG_IR] loadIR: convertFile returned null for "
-                    + irFile.getFileName());
+                    + irFile.getFileName()
+                    + (loadFailureReason.isNotEmpty() ? (" / " + loadFailureReason) : juce::String()));
             }
 
             if (prepared)
             {
                 prepared->originalFileName = irFile.getFileNameWithoutExtension();
-                cacheManager->save(lowResKey, lowResFFT, *prepared);
-                cacheManager->evictLRU(cacheLimit);
+
+                // ★ B-01: キャッシュ書き込みの失敗は IR 適用を止めない（キャッシュは
+                //   最適化であり、失敗しても今回の IR は有効）。例外はここで封じる。
+                try
+                {
+                    convo::probe::Span probeCacheSaveLow ("cache_save_low", 0, lowResFFT, phase);   // ★ gate measurement
+                    cacheManager->save(lowResKey, lowResFFT, *prepared);
+                    cacheManager->evictLRU(cacheLimit);
+                }
+                catch (const std::exception& e)
+                {
+                    juce::Logger::writeToLog("[DIAG_IR] loadIR: cache save failed: "
+                        + juce::String(e.what()));
+                }
+
                 appliedFft = lowResFFT;
-                applyComputedIR(std::move(prepared));
+                {
+                    convo::probe::Span probeApply ("apply_ir", 0, lowResFFT, phase);   // ★ gate measurement
+                    applyComputedIR(std::move(prepared));
+                }
             }
         }
     }
 
     if (appliedFft > 0)
     {
+        convo::probe::noteMark ("upgrade_start", appliedFft, targetFFT);   // ★ gate measurement（既定 OFF）
         startProgressiveUpgrade(irFile, sr, appliedFft, generation, targetKey);
     }
     else
@@ -324,8 +382,22 @@ void ConvolverProcessor::loadIR(const juce::File& irFile)
             + juce::String(static_cast<int>(cacheManager != nullptr))
             + " irConverter=" + juce::String(static_cast<int>(irConverter != nullptr))
             + " sr=" + juce::String(sr, 1) + ")");
+
+        // ★ B-01: 変換自体が失敗した場合のみ、currentIrFile を直前の値へ戻す。
+        //   失敗ファイルを指したままだと、以後のリビルド（setState / サンプルレート変更）
+        //   が同じ失敗を繰り返す。別世代が進行中のときはその世代の値が正であり触らない。
+        if (loadFailureReason.isNotEmpty()
+            && convolverStateGeneration.isCurrentGeneration(generation))
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = previousIrFile;
+        }
+
         // ★ STG-6-D1: convert null を含む未適用終端を報告する（単一報告点）。
-        handleLoadError("IR load failed (no FFT applied): " + irFile.getFileName());
+        //   ★ B-01: 変換側の具体的な理由があればそれを優先して表示する。
+        handleLoadError(loadFailureReason.isNotEmpty()
+                            ? loadFailureReason
+                            : ("IR load failed (no FFT applied): " + irFile.getFileName()));
     }
 }
 
@@ -541,6 +613,13 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
                ? prepared->originalFileName
                : currentIrFile.getFileNameWithoutExtension();
     }
+
+    // ★ B-10: ここから先が実際の適用（commit）。この経路（IRConverter とキャッシュ）は
+    //   最小位相／混合位相の変換を行わないため、実効値は AsIs（線形）である。
+    //   検証で中断した場合は以前の表示を保つよう、commit の直前に公開する。
+    //   ローダ経由で変換した場合は、ローダが実効値を上書きする。
+    setEffectivePhaseModeForLastLoad(PhaseMode::AsIs);
+    setLastPhaseWarning({});
 
     convo::publishAtomic(currentSampleRate, prepared->sampleRate, std::memory_order_release); // release: Runtime/UI 側 acquire と HB
     convo::publishAtomic(irLength, prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0, std::memory_order_release); // release: UI 側 acquire と HB

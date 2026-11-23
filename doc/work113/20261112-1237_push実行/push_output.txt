@@ -1,0 +1,7 @@
+remote: 
+remote: Create a pull request for 'ci-fix/173e6995' on GitHub by visiting:        
+remote:      https://github.com/lonewolf-jp/ConvoPeq/pull/new/ci-fix/173e6995        
+remote: 
+To https://github.com/lonewolf-jp/ConvoPeq.git
+ * [new branch]        HEAD -> ci-fix/173e6995
+PUSH_EXIT=0

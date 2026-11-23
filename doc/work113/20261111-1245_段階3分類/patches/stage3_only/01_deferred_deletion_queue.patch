@@ -1,0 +1,106 @@
+diff --git a/src/DeferredDeletionQueue.h b/src/DeferredDeletionQueue.h
+index 9d496970..5de3b51e 100644
+--- a/src/DeferredDeletionQueue.h
++++ b/src/DeferredDeletionQueue.h
+@@ -40,12 +43,16 @@ struct DeletionEntry {
+     void* ptr = nullptr;
+     void (*deleter)(void*) = nullptr;
+     uint64_t epoch = 0;
+     DeletionEntryType type = DeletionEntryType::Generic;
+     uint64_t publicationSequenceId{0};  // ★ P2-2: 出版-退役の因果追跡用
+     uint64_t generation{0};             // ★ P2-2: generation 追跡
++    // ★ 段階③ (2026-11-11, Owner 承認): 最初にreclaim走査で評価された時刻（ns・0 = 未走査）
++    //   producer（enqueue）が 0 で初期化し、consumer（reclaim）が最初に 1 回だけ書く。
++    //   seq の publish 後にのみ書かれるため、データ競合は無い。
++    uint64_t firstScanTsNs{0};
+ #if CONVOPEQ_ENABLE_RUNTIME_DIAGNOSTICS
+     size_t objectBytes{0};  // ★ work70: Retire 対象のオブジェクトバイト数（sizeof、診断のみ）
+ #endif
+ };
+ 
+ // B23: リアルタイム安全性のための静的チェック
+@@ -103,12 +110,13 @@ public:
+                     entry.ptr = ptr;
+                     entry.deleter = deleter;
+                     entry.epoch = epoch;
+                     entry.type = type;
+                     entry.publicationSequenceId = publicationSequenceId;
+                     entry.generation = generation;
++                    entry.firstScanTsNs = 0;   // ★ 段階③: スロット再利用時の残留を防ぐ
+                     convo::publishAtomic(seq_atom, pos + 1, std::memory_order_release); // release: dequeue の seq acquire と HB しエントリ書き込み完了を公知
+                     return true;
+                 }
+             } else if (diff < 0) {
+                 return false; // Full
+             } else {
+@@ -135,12 +143,16 @@ public:
+ 
+             if (diff != 0) {
+                 break; // Empty
+             }
+ 
+             auto& entry = ringBuffer[scanPos & kMask];
++            // ★ 段階③: この entry が最初にreclaim走査で評価された時刻を一度だけ記録する。
++            //   consumer（この関数）だけが書くため CAS は不要（seq の acquire 後）。
++            if (entry.firstScanTsNs == 0)
++                entry.firstScanTsNs = steadyNowNs();
+             bool canDelete = false;
+ 
+             if (isOlder(entry.epoch, minReaderEpoch)) {
+                 canDelete = true;
+             }
+ 
+@@ -150,12 +162,16 @@ public:
+                                                  deqPos,
+                                                  static_cast<uint32_t>(deqPos + 1),
+                                                  std::memory_order_release,  // 成功時 release: 次回 dequeue/drainAllUnsafe の acquire と HB しスロット解放を公知
+                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して再試行
+                     if (entry.deleter && entry.ptr) {
+                         const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
++                        convo::isr::RetireLatencyRecorder::instance().recordSafe (entry.ptr);   // ★ A(D1): epoch 安全到達
++                        convo::isr::RetireLatencyRecorder::instance().recordComplete (
++                            entry.ptr, convo::isr::RetireLatencyRecorder::Path::Queue,
++                            entry.firstScanTsNs);   // ★ A(D1) + 段階③: 初回走査時刻
+                         entry.deleter(entry.ptr);
+                         // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（release observation・案 B）。
+                         //   telemetry 識別 metadata のみ・lifetime authority にしない（D86 非交渉条件 2）。
+                         if (entryType == DeletionEntryType::World)
+                         {
+                             convo::fetchAddAtomic(worldReclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+@@ -202,12 +218,15 @@ public:
+                                                  pos,
+                                                  static_cast<uint32_t>(pos + 1),
+                                                  std::memory_order_acq_rel,  // 成功時 acq_rel: acquire で enqueue acq_rel と HB; release で次回ドレインの acquire と HB
+                                                  std::memory_order_acquire)) { // 失敗時 acquire: 最新 dequeuePos を観測して retry
+                     if (entry.deleter && entry.ptr) {
+                         const auto entryType = entry.type;   // deleter 実行後に entry がクリアされるため事前保持
++                        convo::isr::RetireLatencyRecorder::instance().recordComplete (
++                            entry.ptr, convo::isr::RetireLatencyRecorder::Path::DrainAll,
++                            entry.firstScanTsNs);   // ★ A(D1)
+                         entry.deleter(entry.ptr);
+                         // ★ T1 (D86): type==World の terminal deleter 実行後 → world 破棄観測（shutdown drain 含む）。
+                         if (entryType == DeletionEntryType::World)
+                         {
+                             convo::fetchAddAtomic(worldReclaimCount_, std::uint64_t{1}, std::memory_order_acq_rel);
+                             // ★ T1 (D98): reference observer に release event を通知（shutdown drain 含む・D95 固定点 3）。
+@@ -267,12 +286,20 @@ public:
+ private:
+     static inline bool isOlder(uint64_t a, uint64_t b) noexcept
+     {
+         return static_cast<int64_t>(a - b) < 0;
+     }
+ 
++    // ★ 段階③: RetireLatencyRecorder::nowNs() と同じ時計（steady_clock）。
++    //   firstScanTs と enqueueTs / safeTs を同一基準で比較するため必須。
++    static inline uint64_t steadyNowNs() noexcept
++    {
++        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count());
++    }
++
+     static constexpr uint32_t kQueueSize = 4096;
+     static constexpr uint32_t kMask = kQueueSize - 1;
+ 
+     alignas(64) std::array<DeletionEntry, kQueueSize> ringBuffer;
+     alignas(64) std::array<std::atomic<uint32_t>, kQueueSize> sequences;
+     alignas(64) std::atomic<uint32_t> enqueuePos{0};

@@ -1,0 +1,18 @@
+Mutation experiment: break ONLY the character-literal escape check
+date: 2026-11-12 12:06:56
+
+--- 1) baseline (unmutated verifier) ---
+[PASS] char-literal-escaped-quote               expected=accept exit=0
+proof-scope self-test: all 20 cases passed
+
+--- 2) mutate: replace '-eq $charEscape' with a comparison that never matches ---
+mutated
+140:            $charEscape = $backslash
+[FAIL] char-literal-escaped-quote               expected=accept exit=1
+proof-scope self-test: 1 case(s) failed
+
+--- 3) restore and re-run ---
+140:            $charEscape = $backslash
+143:                if ($ch -eq $charEscape) { $i += 2; continue }
+[PASS] char-literal-escaped-quote               expected=accept exit=0
+proof-scope self-test: all 20 cases passed

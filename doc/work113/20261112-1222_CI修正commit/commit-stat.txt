@@ -1,0 +1,42 @@
+commit b237f233f5ddaab9ef471bf2afe3e036ceb089b5
+Author: lonewolf-jp <lonewolf-jp@users.noreply.github.com>
+Date:   Thu Nov 12 12:22:33 2026 +0900
+
+    fix(isr): restore the lint, atomic-access and proof-scope gates
+    
+    The domain tag commit (173e6995) broke three CI checks: LINT-AE-011
+    (mutable/thread_local), the strict atomic dot-call scan, and the
+    proof-scope contract check.
+    
+    - drop the unnecessary `mutable` on the HB verifier (only the non-const
+      emitFinalViolationReport and emitCIArtifacts touch it) and keep the
+      thread-local range assignment with a documented RT-SAFE exception
+    - route the remaining atomic operations through convo::consumeAtomic,
+      publishAtomic, fetchAddAtomic and compareExchangeAtomic, and add
+      compareExchangeWeakAtomic so weak CAS keeps spurious-failure
+      semantics; the reset() counters move from the implicit seq_cst
+      default to release, which the quiescent-state contract allows
+    - rewrite isr-verify-proof-scope.ps1 to check the emitCIArtifacts /
+      emitHBTrace control flow per function and the A(D1) call inside
+      emitFinalViolationReport's body, with a lexer that understands
+      strings, raw strings, character literals, escapes and LF/CRLF
+      line continuations
+    - add fixture self-tests (20 cases) and a lexer boundary test
+      (38 checks, including mutation controls)
+    
+    Verified with the static gates, the ISR standard tier, and the Release
+    and ASan ctest suites (57/57 each). Debug keeps the two known failures.
+
+ .github/scripts/isr-verify-proof-scope.ps1         | 407 ++++++++++-
+ .../scripts/test-isr-verify-proof-scope-lexer.ps1  | 207 ++++++
+ .github/scripts/test-isr-verify-proof-scope.ps1    | 790 +++++++++++++++++++++
+ src/audioengine/AtomicAccess.h                     |  24 +-
+ src/audioengine/ISRDebugRuntime.cpp                |   5 +-
+ src/audioengine/ISRDebugRuntime.h                  |   4 +-
+ src/audioengine/ISRRetireLatency.h                 | 458 ++++++------
+ src/audioengine/WorldLifetimeRecorder.h            |  74 +-
+ src/core/EpochDomain.h                             |   2 +-
+ src/core/ReaderMeasureRegistry.h                   |  32 +-
+ src/core/ScopedEpochReader.h                       |  23 +-
+ src/core/SnapshotCoordinator.h                     |   3 +-
+ 12 files changed, 1705 insertions(+), 324 deletions(-)

@@ -1,0 +1,55 @@
+HEAD: c94d3767 Merge pull request #206 from lonewolf-jp/impl/part8-e-f-h-i
+
+Generated: 2026-11-10T22:13:00Z
+
+Source hashes:
+ M .github/scripts/isr-generate-runtime-evidence.ps1
+ M .github/scripts/isr-run-runtime-evidence.ps1
+ M .github/scripts/isr-run-tiered-verification.ps1
+ M .github/scripts/isr-seed-evidence.ps1
+ M .github/scripts/isr-verify-common.ps1
+ M .github/scripts/isr-verify-v5.ps1
+ M AGENTS.md
+ M CMakeLists.txt
+ M ConvoPeq.md
+ M src/CacheManager.cpp
+ M src/CacheManager.h
+ M src/ConvolverControlPanel.cpp
+ M src/ConvolverProcessor.h
+ M src/DeferredDeletionQueue.h
+ M src/DeviceSettings.cpp
+ M src/IRConverter.cpp
+ M src/IRConverter.h
+ M src/MKLNonUniformConvolver.cpp
+ M src/MKLNonUniformConvolver.h
+ M src/MainApplication.cpp
+ M src/MainApplication.h
+ M src/MainWindow.cpp
+ M src/MainWindow.h
+ M src/NoiseShaperLearner.cpp
+ M src/NoiseShaperLearner.h
+ M src/ProgressiveUpgradeThread.cpp
+ M src/audioengine/AudioEngine.Commit.cpp
+ M src/audioengine/AudioEngine.CtorDtor.cpp
+ M src/audioengine/AudioEngine.EQResponse.cpp
+ M src/audioengine/AudioEngine.Learning.cpp
+ M src/audioengine/AudioEngine.Reader.cpp
+ M src/audioengine/AudioEngine.RebuildDispatch.cpp
+ M src/audioengine/AudioEngine.h
+ M src/audioengine/ISRDebugRuntime.cpp
+ M src/audioengine/ISRDebugRuntime.h
+ M src/audioengine/ISREvidenceExporter.cpp
+ M src/audioengine/ISREvidenceExporter.h
+ M src/audioengine/ISRHB.cpp
+ M src/audioengine/ISRHB.h
+ M src/audioengine/ISRRetireRouter.cpp
+ M src/audioengine/ISRRuntimePublicationCoordinator.cpp
+ M src/audioengine/RetireQuarantineStore.h
+ M src/convolver/ConvolverProcessor.LoadPipeline.cpp
+ M src/convolver/ConvolverProcessor.LoaderThread.cpp
+ M src/convolver/ConvolverProcessor.ResampleAndFallback.cpp
+ M src/convolver/ConvolverProcessor.Runtime.cpp
+ M src/core/DeletionQueue.cpp
+ M src/core/EpochDomain.h
+ M src/core/IReaderEpochProvider.h
+ M src/core/RCUReader.h

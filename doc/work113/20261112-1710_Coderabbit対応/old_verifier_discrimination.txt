@@ -1,0 +1,9 @@
+=== new self-test cases vs OLD verifier (b237f233) ===
+expectation: the 4 regression fixtures must FAIL on the old verifier
+
+[FAIL] release-guard-with-or                    expected=reject exit=0
+[FAIL] hbtrace-call-only-inside-string          expected=reject exit=0
+[FAIL] hbtrace-emit-before-guard                expected=reject exit=0
+[FAIL] release-guard-commented-out-with-continuation expected=reject exit=0
+[PASS] comment-continuation-without-hiding-guard expected=accept exit=0
+proof-scope self-test: 4 case(s) failed

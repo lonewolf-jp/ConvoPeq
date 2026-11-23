@@ -731,9 +731,37 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
     m_tailEnabled = true; // Part 8 F: L1/L2 の出力を常に加算する（Bypass はゲイン 1.0）
     m_tailStrength = tailStrength;
     m_maxBlockSize = blockSize;
+
+    // ★ B-12: テール整形ゲインを「層」ではなく「IR 上の時間位置」で定義する。
+    //   層ゲインとして掛けると、層の被覆区間が block サイズで変わるため、同じ IR でも
+    //   block によって実効ゲインが変わっていた（実測で +3.15 dB / +0.83 dB / 0 dB）。
+    //   IR の各サンプルへ先に掛けておけば、どの分割で畳み込んでも同じ実効 IR になる。
+    const double tailGainSampleRate = (sampleRateForTail > 0.0) ? sampleRateForTail : 48000.0;
+    const int tailGainBoundary1 = juce::jlimit(
+        1, irLen, static_cast<int>(std::llround(tailStartSec * tailGainSampleRate)));
+
+    // 参照ジオメトリ（block 256）の L1 被覆長を時間境界として使う。block に依存しない。
+    constexpr int kRefL0Part = 256;
+    int refL1Mult = 1;
+    while (refL1Mult * 2 <= tailL1L2Mult && refL1Mult * 2 <= 4
+           && refL1Mult * 2 * kRefL0Part <= std::max(kRefL0Part, tailGainBoundary1))
+    {
+        refL1Mult *= 2;
+    }
+    const int tailGainBoundary2 = tailGainBoundary1 + kL1MaxParts * kRefL0Part * refL1Mult;
+
+    const auto tailGainAt = [tailGainBoundary1, tailGainBoundary2, layer1Gain, layer2Gain]
+                            (int index) noexcept -> double
+    {
+        if (index < tailGainBoundary1) return 1.0;
+        if (index < tailGainBoundary2) return layer1Gain;
+        return layer2Gain;
+    };
+
+    // 読み出し側の層ゲインは 1.0 にする（IR に掛けたゲインとの二重適用を避ける）。
     m_tailLayerGain[0] = 1.0;
-    m_tailLayerGain[1] = layer1Gain;
-    m_tailLayerGain[2] = layer2Gain;
+    m_tailLayerGain[1] = 1.0;
+    m_tailLayerGain[2] = 1.0;
 
     // ────────────────────────────────────────────────
     // 先頭 Direct Form 設定
@@ -766,7 +794,11 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         memset(m_directOutBuf, 0, static_cast<size_t>(m_directMaxBlock) * sizeof(double));
 
         for (int i = 0; i < m_directTapCount; ++i)
-            m_directIRRev[i] = impulse[m_directTapCount - 1 - i] * scale;
+        {
+            // ★ B-12: Direct ヘッドにも同じ時間基準ゲインを掛ける。
+            const int irIndex = m_directTapCount - 1 - i;
+            m_directIRRev[i] = impulse[irIndex] * scale * tailGainAt(irIndex);
+        }
     }
 
     convo::ScopedAlignedPtr<double> impulseForFft(
@@ -777,7 +809,9 @@ bool MKLNonUniformConvolver::SetImpulse(const double* impulse, int irLen, int bl
         return false;
     }
 
-    memcpy(impulseForFft.get(), impulse, static_cast<size_t>(irLen) * sizeof(double));
+    // ★ B-12: テール整形ゲインを IR そのものへ適用する（block 非依存の実効 IR にする）。
+    for (int i = 0; i < irLen; ++i)
+        impulseForFft.get()[i] = impulse[i] * tailGainAt(i);
 
     if (m_directEnabled)
         memset(impulseForFft.get(), 0, static_cast<size_t>(m_directTapCount) * sizeof(double));

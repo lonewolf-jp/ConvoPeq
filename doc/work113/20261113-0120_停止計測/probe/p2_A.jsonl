@@ -1,0 +1,5 @@
+{"ts":15717882796,"ev":"mark","op":"perform_load","a":0,"b":0}
+{"ts":15718412070,"ev":"span","op":"mixed_phase","us":330996,"samples":192000,"fft":0,"phase":1,"cancelled":0}
+{"ts":15718412233,"ev":"span","op":"minimum_phase","us":525608,"samples":192000,"fft":0,"phase":1,"cancelled":0}
+{"ts":15718433367,"ev":"span","op":"nuc_build","us":14399,"samples":192000,"fft":2048,"phase":1,"cancelled":0}
+{"ts":15718433513,"ev":"request","w":"000000532160E3B0","kind":"loader","already_exited":0}

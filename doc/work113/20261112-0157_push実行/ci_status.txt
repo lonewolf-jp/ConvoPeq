@@ -1,0 +1,14 @@
+CI status snapshot: 2026-11-12 03:09:56
+commit: 173e69957b046290f7077797782f031ed8633fd0
+
+ISR Verification                 completed   failure    43073663375  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43073663375
+list-compliance                  completed   failure    43063320048  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43063320048
+Push on main                     completed   success    43063318767  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43063318767
+audioengine-lint                 completed   failure    43063319811  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43063319811
+Sanitizer CI                     in_progress -          43063319846  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43063319846
+ISR Authority Compliance v6.4    completed   success    43063319902  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43063319902
+Windows MSVC Build               completed   success    43063319686  https://github.com/lonewolf-jp/ConvoPeq/actions/runs/43063319686
+
+Sanitizer CI jobs (run 43063319846):
+  Debug TSan (Clang, best-effort)          completed   success
+  RelWithDebInfo ASan (MSVC, /MD)          in_progress -

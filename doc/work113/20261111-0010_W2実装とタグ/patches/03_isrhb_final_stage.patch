@@ -1,0 +1,38 @@
+--- a/src/audioengine/ISRHB.cpp
++++ b/src/audioengine/ISRHB.cpp
+@@ -2,6 +2,7 @@
+ #include "AtomicAccess.h"
+ #include "ISRRetireLatency.h"
+ #include "WorldLifetimeRecorder.h"   // ★ A(D1): 退役遅延の集計
++#include "core/SnapshotCoordinator.h"   // ★ C2: RT 契約違反カウンタの出力
+ 
+ #include <chrono>
+ #include <filesystem>
+@@ -139,6 +140,10 @@
+ 
+ void HBVerifierRuntime::emitViolationReport(const std::filesystem::path& outputPath) const
+ {
++    // ★ W-2 (2026-11-10): レポート生成時点（final 段）の累積値を保持する。
++    //   postTeardown との差分を取るためだけに使い、判定には使わない。
++    convo::isr::RetireLatencyRecorder::instance().captureFinalStage();
++
+     std::error_code ec;
+     std::filesystem::create_directories(outputPath.parent_path(), ec);
+ 
+@@ -209,6 +214,8 @@
+     file << "  \"retireLatencyD1\": {\n";
+     file << "    \"thresholdNs\": " << convo::isr::RetireLatencyRecorder::kThresholdNs << ",\n";
+     file << "    \"required\": 59,\n";
++    // ★ C2: RT 契約違反（RT からの resetFadeStateAndRetireTarget 呼出し）の回数
++    file << "    \"snapshotRtViolations\": " << convo::SnapshotCoordinator::rtViolationCount() << ",\n";
+     {
+         const auto timingRuntime = convo::isr::RetireLatencyRecorder::instance().runtimeStage();
+         const auto timingSnapshot = convo::isr::RetireLatencyRecorder::instance().snapshot();
+@@ -259,6 +266,7 @@
+         file << "      \"overflow\": " << stage.overflow << ",\n";
+         file << "      \"idExhausted\": " << stage.idExhausted << ",\n";
+         file << "      \"postShutdownRequests\": " << stage.postShutdownRequests << ",\n";
++        file << "      \"postShutdownCompletions\": " << stage.postShutdownCompletions << ",\n";
+     file << "      \"recordMisses\": " << stage.recordMisses << ",\n";
+         file << "      \"paths\": [";
+ 

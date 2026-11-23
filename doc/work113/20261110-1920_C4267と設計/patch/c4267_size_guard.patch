@@ -1,0 +1,27 @@
+--- src/InputInspection.cpp
++++ src/InputInspection.cpp
+@@ -1,6 +1,8 @@
+ #include "InputInspection.h"
+ 
++#include <cstddef>
+ #include <cstring>
++#include <limits>
+ 
+ namespace convo::safeinput
+ {
+@@ -15,7 +17,14 @@
+     // ★ B 修正案 A: 文字位置参照（O(n^2)）をやめ、UTF-8 バイト列をポインタで走査する。
+     //   判定条件・分岐順序・戻り値は現行実装と同一。
+     const char* d = text.toRawUTF8();
+-    const int n = text.getNumBytesAsUTF8();
++    const std::size_t numBytes = text.getNumBytesAsUTF8();
++
++    // C4267: size_t -> int の変換前に範囲を検査する。8 MiB の上限（kMaxXmlFileBytes）では
++    // 到達しないが、公開 API が limits を差し替え可能なため、契約として明示的に弾く。
++    if (numBytes > static_cast<std::size_t> (std::numeric_limits<int>::max()))
++        return -1;
++
++    const int n = static_cast<int> (numBytes);
+     int depth = 0;
+     int maxDepth = 0;
+     int i = 0;

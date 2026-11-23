@@ -1,0 +1,8 @@
+{"ts":16600196863,"ev":"mark","op":"loadIR_begin","a":4096,"b":2}
+{"ts":16600197335,"ev":"span","op":"cache_direct","us":123,"samples":0,"fft":4096,"phase":2,"cancelled":0}
+{"ts":16600198350,"ev":"span","op":"cache_low","us":90,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16600214105,"ev":"span","op":"convert_low","us":15700,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16600244803,"ev":"span","op":"cache_save_low","us":30650,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16600299224,"ev":"span","op":"apply_ir","us":54376,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16600299307,"ev":"span","op":"convert_low_outer","us":100905,"samples":0,"fft":512,"phase":2,"cancelled":0}
+{"ts":16600299445,"ev":"mark","op":"upgrade_start","a":512,"b":4096}

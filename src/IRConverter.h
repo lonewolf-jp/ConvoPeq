@@ -29,7 +29,8 @@ public:
 
     std::unique_ptr<PreparedIRState> convertFile(const juce::File& irFile,
                                                  const ConvertConfig& config,
-                                                 const std::function<bool()>& shouldCancel) const;
+                                                 const std::function<bool()>& shouldCancel,
+                                                 juce::String* errorOut = nullptr) const;
 
     std::unique_ptr<PreparedIRState> convertToHighRes(const juce::File& irFile,
                                                       double sampleRate,
@@ -49,5 +50,6 @@ public:
 private:
     static bool loadAudioFile(const juce::File& file,
                               juce::AudioBuffer<double>& out,
-                              double& sampleRateOut);
+                              double& sampleRateOut,
+                              juce::String* errorOut = nullptr);
 };

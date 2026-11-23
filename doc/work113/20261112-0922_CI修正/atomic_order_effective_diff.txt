@@ -1,0 +1,60 @@
+Effective memory-order comparison (implicit defaults included)
+before = git HEAD (173e6995), after = working tree
+
+src/audioengine/ISRRetireLatency.h: ops=253 order_changes=23
+    before line   873  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   873  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   873  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   874  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   874  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   875  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   875  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   875  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   879  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   879  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   880  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   880  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   881  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   881  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   882  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   882  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   883  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   883  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   884  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   884  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   885  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   885  op=store                    seq_cst/None -> release/None
+        .store (0)
+    before line   886  op=store                    seq_cst/None -> release/None
+        .store (0)
+src/audioengine/WorldLifetimeRecorder.h: ops=41 order_changes=0
+src/core/ReaderMeasureRegistry.h: ops=37 order_changes=0
+src/core/ScopedEpochReader.h: ops=28 order_changes=0
+src/audioengine/ISRDebugRuntime.cpp: ops=2 order_changes=0
+src/core/EpochDomain.h: ops=70 order_changes=0
+src/core/SnapshotCoordinator.h: ops=4 order_changes=0
+
+TOTAL_OPS=435 TOTAL_ORDER_CHANGES=23
+NOTE: every reported change must be reviewed; a change outside reset() would
+      mean the reset-exclusivity argument does not cover it.

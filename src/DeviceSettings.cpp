@@ -4,6 +4,7 @@
 #include "DeviceSettings.h"
 #include "NoiseShaperLearningComponent.h"
 #include "OversamplingPolicy.h"
+#include "InputInspection.h"   // ★ B-05: XML のサイズ・深さ・DOCTYPE 検査
 #include <cmath>
 
 namespace
@@ -851,7 +852,7 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
     // Load existing to preserve other banks/modes
     std::unique_ptr<juce::XmlElement> root;
     if (file.existsAsFile())
-        root = juce::XmlDocument::parse(file);
+        root = convo::safeinput::parseXmlFile(file);
 
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
@@ -902,8 +903,40 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
         }
     }
 
-    if (root->toString().length() < 10 * 1024 * 1024)
-        root->writeTo(file);
+    // ★ BUG-3（案 A）: 直列化は 1 回だけ。結果をそのまま書き、二重直列化を解消する。
+    const juce::String xmlText = root->toString();
+
+    // ★ XML 上限の対称性: 読込側（kMaxXmlFileBytes）で拒否されるサイズは書かない。
+    //   判定は UTF-8 のバイト数（＝ファイルサイズ）で行う。
+    if (convo::safeinput::isXmlTextWithinLimit (xmlText))
+    {
+        // ★ BUG-3b: 一時ファイルへ書き、書き込み状態を検査してから置換する。
+        //   File::replaceWithText は appendText の戻り値と getStatus() を捨てるため
+        //   書き込み途中の失敗を検出できない（juce_File.cpp:798-803）。
+        //   lineEndings=nullptr は writeText の改行変換を止め、旧 writeTo と同じバイト列にする。
+        juce::TemporaryFile tempFile (file);
+        bool saved = false;
+
+        {
+            juce::FileOutputStream out (tempFile.getFile());
+
+            if (out.openedOk())
+            {
+                saved = out.writeText (xmlText, false, false, nullptr);
+                out.flush();   // バッファを書き出し、失敗は status に載る
+                if (out.getStatus().failed())
+                    saved = false;
+            }
+        }
+
+        if (saved)
+            saved = tempFile.overwriteTargetFileWithTemporary();
+
+        // ★ W-1: 保存失敗を無言にしない（成功時の挙動は不変）。
+        if (! saved)
+            juce::Logger::writeToLog("Warning: failed to write noise shaper state file: "
+                                     + file.getFullPathName());
+    }
     else
         juce::Logger::writeToLog("Noise shaper state file too large, skipping save.");
 }
@@ -914,7 +947,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
     if (!file.existsAsFile())
         return;
 
-    auto root = juce::XmlDocument::parse(file);
+    auto root = convo::safeinput::parseXmlFile(file);
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
         juce::Logger::writeToLog("Failed to parse noise shaper state file.");
@@ -988,6 +1021,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
             }
         }
     }
+
 }
 
 // ★ [work63] preloadThreadPriorityMode — オーディオスレッド開始前に設定を先読み
@@ -999,7 +1033,7 @@ void DeviceSettings::preloadThreadPriorityMode (AudioEngine& engine)
     if (! file.existsAsFile())
         return; // デフォルト MMCSS のまま
 
-    if (auto xml = juce::XmlDocument::parse(file))
+    if (auto xml = convo::safeinput::parseXmlFile(file))
     {
         const juce::String mode = xml->getStringAttribute("threadPriorityMode", "MMCSS");
         engine.setAudioThreadPriorityMode(mode == "MMCSS");
@@ -1050,7 +1084,10 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
             }
         }
 
-        xml->writeTo (getSettingsFile());
+        // ★ W-1: 保存失敗を無言にしない（成功時の挙動は不変）。
+        if (! xml->writeTo (getSettingsFile()))
+            juce::Logger::writeToLog("Warning: failed to write device settings: "
+                                     + getSettingsFile().getFullPathName());
     }
 }
 
@@ -1082,7 +1119,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
     if (file.existsAsFile())
     {
-        if (auto xml = juce::XmlDocument::parse (file))
+        if (auto xml = convo::safeinput::parseXmlFile (file))
         {
             // 保存された設定でデバイスを初期化する（入力2ch、出力2chを要求）
             juce::String error = deviceManager.initialise (2, 2, xml.get(), false);

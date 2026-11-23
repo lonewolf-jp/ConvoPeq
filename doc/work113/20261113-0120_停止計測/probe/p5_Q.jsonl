@@ -1,0 +1,8 @@
+{"ts":16590145563,"ev":"mark","op":"loadIR_begin","a":4096,"b":1}
+{"ts":16590146063,"ev":"span","op":"cache_direct","us":125,"samples":0,"fft":4096,"phase":1,"cancelled":0}
+{"ts":16590149712,"ev":"span","op":"cache_low","us":105,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16590169510,"ev":"span","op":"convert_low","us":19751,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16590230429,"ev":"span","op":"cache_save_low","us":60829,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16590289476,"ev":"span","op":"apply_ir","us":58987,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16590289597,"ev":"span","op":"convert_low_outer","us":139843,"samples":0,"fft":512,"phase":1,"cancelled":0}
+{"ts":16590289782,"ev":"mark","op":"upgrade_start","a":512,"b":4096}

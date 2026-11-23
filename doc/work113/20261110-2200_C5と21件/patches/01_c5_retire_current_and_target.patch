@@ -1,0 +1,29 @@
+--- a/src/core/SnapshotCoordinator.h
++++ b/src/core/SnapshotCoordinator.h
+@@ -15,6 +15,7 @@
+ #include "IEpochProvider.h"
+ #include "SnapshotFactory.h"
+ #include "audioengine/ISRAuthorityClass.h"
++#include "../audioengine/ISRRetireLatency.h"   // ★ C5: retireCurrentAndTarget の要求記録
+ 
+ namespace convo {
+ namespace isr {
+@@ -173,11 +174,18 @@
+         const uint64_t retireEpoch = m_epochProvider->publishEpoch();
+         GlobalSnapshot* snap = m_slots.exchangeCurrent(nullptr, std::memory_order_acq_rel);
+         if (snap) {
++            // ★ C5 (2026-11-10): 退役の直前に要求を記録する（完了フックと同じ object で対応）。
++            //   格納失敗時は quarantineRetireSink が Q→E→T で必ず受領するため取り消さない。
++            convo::isr::RetireLatencyRecorder::instance().recordRequest (
++                snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
+             if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
+         }
+         snap = m_slots.exchangeTarget(nullptr, std::memory_order_acq_rel);
+         if (snap) {
++            // ★ C5 (2026-11-10): target も同じ規則で記録する。
++            convo::isr::RetireLatencyRecorder::instance().recordRequest (
++                snap, retireEpoch, m_epochProvider->getMinReaderEpoch(), 0xFFFFFFFFu);
+             if (!enqueueWithRetry(*m_epochProvider, snap, deleter, retireEpoch))
+                 quarantineRetireSink(snap, deleter, retireEpoch, "retireCurrentAndTarget:queueFull");
+         }

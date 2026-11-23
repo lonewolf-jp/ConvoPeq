@@ -1,0 +1,17 @@
+--- a/src/eqprocessor/EQProcessor.h
++++ b/src/eqprocessor/EQProcessor.h
+@@ -459,12 +459,12 @@
+     //   guard が slot を保持している間は retireEpoch < minReaderEpoch が成立
+     //   しないため、当該オブジェクトは解放されない。
+     //   active()==false（shutdown 後・slot 枯渇）なら deref せず安全側に倒すこと。
+-    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard() const noexcept
++    [[nodiscard]] convo::ScopedEpochReader acquireReadGuard(const char* tag = nullptr) const noexcept
+     {
+         // The epoch domain is a synchronization primitive: entering a reader slot does not
+         // mutate the observable EQ state. A const unique_ptr still yields a non-const T&,
+         // so neither mutable (LINT-AE-011) nor const_cast (LINT-AE-013) is needed.
+-        return convo::ScopedEpochReader (*m_epochDomain);
++        return convo::ScopedEpochReader (*m_epochDomain, tag);
+     }
+     bool getAndClearPendingAGCChange() noexcept
+     {

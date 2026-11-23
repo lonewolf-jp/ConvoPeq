@@ -1053,6 +1053,12 @@ void ConvolverProcessor::setSmoothingTime(float timeSec)
 
 void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 {
+    // ★ B-03: 非有限値の格納を拒否。jlimit は NaN を素通しするため、破損 session の
+    //   NaN が格納されると mixed 遷移周波数が NaN 化し、再構築後の IR が非有限になる。
+    //   以前値を維持する。isFinite は bit-pattern 判定（fp:fast 安全）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(hz)))
+        return;
+
     const float clamped = juce::jlimit(MIXED_F1_MIN_HZ, MIXED_F1_MAX_HZ, hz);
     float currentEnd;
     {
@@ -1088,6 +1094,10 @@ void ConvolverProcessor::setMixedTransitionStartHz(float hz)
 
 void ConvolverProcessor::setMixedTransitionEndHz(float hz)
 {
+    // ★ B-03: start 側と同じ理由で非有限値を拒否する（以前値維持）。
+    if (!convo::numeric_policy::isFinite(static_cast<double>(hz)))
+        return;
+
     float currentStart;
     {
         pendingOverrideLock.enter();
