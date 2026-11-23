@@ -1154,6 +1154,26 @@ void eqDirectLog(const std::string& line)
     std::fflush(stderr);
 }
 
+// ★ #266: snprintf の戻り値は「書いた長さ」ではなく「書こうとした長さ」である。
+//   そのまま加算すると、切り詰め時に残量が size_t でアンダーフローし、境界外書き込みに
+//   なり得る。1 片ずつ組み立て、実際に写した長さだけを足す。
+void appendClamped(char* buffer, size_t capacity, size_t& used, const char* text) noexcept
+{
+    if (buffer == nullptr || capacity == 0 || text == nullptr)
+        return;
+
+    if (used >= capacity - 1)
+        return;
+
+    const size_t len = std::strlen(text);
+    const size_t room = capacity - 1 - used;
+    const size_t copy = (len < room) ? len : room;
+
+    std::memcpy(buffer + used, text, copy);
+    used += copy;
+    buffer[used] = '\0';
+}
+
 } // namespace
 
 // ── B-1-R2-B1: 実 EQProcessor 単体の wet 出力 attribution（test-only・独立測定）──
@@ -2435,19 +2455,24 @@ int runBassBuzzMeasurement(int argc, char* argv[])
 
         // タップダンプ（有意タップの先頭 16 個 + ピーク近傍 ±5）
         {
-            char buf[4096]; int n = 0; int shown = 0;
-            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), "[PROBE] firstTaps:");
+            char buf[4096]; size_t n = 0; int shown = 0; char piece[96];
+            buf[0] = '\0';
+            appendClamped(buf, sizeof(buf), n, "[PROBE] firstTaps:");
             for (size_t i = 0; i < out.size() && shown < 16; ++i)
                 if (std::abs(out[i]) > 1.0e-4)
                 {
-                    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %zu:%.6f", i, static_cast<double>(out[i]));
+                    std::snprintf(piece, sizeof(piece), " %zu:%.6f", i, static_cast<double>(out[i]));
+                    appendClamped(buf, sizeof(buf), n, piece);
                     ++shown;
                 }
-            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " | nearPeak:");
+            appendClamped(buf, sizeof(buf), n, " | nearPeak:");
             if (peakIdx >= 5)
                 for (long long i = peakIdx - 5; i <= peakIdx + 5 && i < static_cast<long long>(out.size()); ++i)
-                    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %lld:%.6f",
-                                       i, static_cast<double>(out[static_cast<size_t>(i)]));
+                {
+                    std::snprintf(piece, sizeof(piece), " %lld:%.6f",
+                                  i, static_cast<double>(out[static_cast<size_t>(i)]));
+                    appendClamped(buf, sizeof(buf), n, piece);
+                }
             std::fprintf(stderr, "%s\n", buf);
         }
         if (!useRealIr)
