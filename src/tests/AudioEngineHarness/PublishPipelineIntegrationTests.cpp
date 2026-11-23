@@ -1500,6 +1500,9 @@ int runN1BypassAudioAnalysis(const juce::String& outDir, const juce::String& mod
 
 int main(int argc, char* argv[])
 {
+    // 出力を無バッファにする。Debug で中断したとき、どの検査まで進んだかを失わないため。
+    std::setvbuf (stdout, nullptr, _IONBF, 0);
+
     // N1 (PR #168): オフライン音声分析モード。エンジンやスレッドを起動せず、
     //   AudioEngineHarness --n1-analysis <出力先> <post|pre>
     if (argc >= 4 && std::string(argv[1]) == "--n1-analysis")
