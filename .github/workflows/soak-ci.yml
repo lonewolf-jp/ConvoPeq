@@ -15,6 +15,11 @@
 
 name: Soak CI
 
+# ★ #266: GitHub Advanced Security の指摘（workflow permissions 未指定）に対応。
+#   このワークフローはビルドと実行だけで、書き込み権限は要らない。
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
