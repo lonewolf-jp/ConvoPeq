@@ -104,5 +104,9 @@ private:
     double cliRequestedSampleRateHz { 0.0 };
     std::unique_ptr<juce::DocumentWindow> settingsWindow;
 
+    // ★ B-14: --cli-log-file 用の FileLogger。Logger::setCurrentLogger は
+    //   所有権を取らないため、自前で保持してデストラクタで外す。
+    std::unique_ptr<juce::FileLogger> cliLogFileLogger;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
 };

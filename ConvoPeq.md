@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-23 18:38:41
+> Generated: 2026-11-23 19:51:06
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -165,6 +165,7 @@
         │   ├── ConvolverProcessor.Runtime.cpp
         │   ├── ConvolverProcessor.StateAndUI.cpp
         │   ├── IRLoadAdmission.h
+        │   ├── IRTrailingSilence.h
         │   └── IRTrimTestHooks.h
         ├── ConvolverBuilder.h
         ├── ConvolverControlPanel.cpp
@@ -266,6 +267,8 @@
         ├── FixedNoiseShaper.h
         ├── GenerationManager.h
         ├── InputBitDepthTransform.h
+        ├── InputInspection.cpp
+        ├── InputInspection.h
         ├── IRAnalyzer.cpp
         ├── IRAnalyzer.h
         ├── IRConverter.cpp
@@ -273,6 +276,9 @@
         ├── IRDSP.cpp
         ├── IRDSP.h
         ├── LatticeNoiseShaper.h
+        ├── learner/
+        │   ├── LearnedStateMigration.cpp
+        │   └── LearnedStateMigration.h
         ├── LockFreeAudioRingBuffer.h
         ├── LockFreeRingBuffer.h
         ├── LoudnessMeter.cpp
@@ -328,6 +334,7 @@
         │   │   ├── EngineInstanceCountTests.cpp
         │   │   ├── IRLoadAdmissionTests.cpp
         │   │   ├── N1BypassAudioAnalysis.cpp
+        │   │   ├── NoiseShaperStateRaceTests.cpp
         │   │   ├── OdenomCampaignTests.cpp
         │   │   ├── P1PolyphaseGainCharacterization.cpp
         │   │   ├── PolyphaseGainCandidateRef.h
@@ -336,6 +343,7 @@
         │   │   ├── RtAllocProbe.cpp
         │   │   ├── RtAllocProbe.h
         │   │   ├── RtMeasureRingTests.cpp
+        │   │   ├── RuntimeParameterGuardTests.cpp
         │   │   ├── SoakPublishIntegrationTests.cpp
         │   │   ├── STG11D10EQEnumGuardTests.cpp
         │   │   ├── STG11D11TotalGainFiniteTests.cpp
@@ -362,6 +370,7 @@
         │   ├── AudioSegmentBufferTests.cpp
         │   ├── BuildErrorClassificationTests.cpp
         │   ├── BuildInputSemanticContractTests.cpp
+        │   ├── CacheManagerHeaderValidationTests.cpp
         │   ├── CorruptSampleGuardTests.cpp
         │   ├── CrossfadeExecutorLocalContractTests.cpp
         │   ├── D8_1_WrapperCacheTests.cpp
@@ -376,11 +385,13 @@
         │   ├── FFTBackendTests.cpp
         │   ├── Fix55ContractTests.cpp
         │   ├── GainStagingContractTests.cpp
+        │   ├── InputInspectionTests.cpp
         │   ├── invariant_INV3_INV5.cpp
         │   ├── IRRuntimeContractTests.cpp
         │   ├── ISRRuntimeIdentityGeneratorsTests.cpp
         │   ├── ISRSemanticValidationTests.cpp
         │   ├── ISRSoakTests.cpp
+        │   ├── LearnedStateMigrationTests.cpp
         │   ├── LoaderCurrencyContractTests.cpp
         │   ├── MpscBoundedRingTests.cpp
         │   ├── MT-NUPC-Measurement.cpp
@@ -2468,6 +2479,118 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 endif()
 
 #------------------------------------------------------------
+# B-02: CacheManager ヘッダ検証（時間領域ディスクリプタ）の回帰
+#   細工キャッシュによるマップ外読み出しを防ぐ検査の回帰。
+#------------------------------------------------------------
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(CacheManagerHeaderValidationTests)
+    target_sources(CacheManagerHeaderValidationTests PRIVATE
+        src/tests/CacheManagerHeaderValidationTests.cpp
+        src/CacheManager.cpp
+    )
+    target_include_directories(CacheManagerHeaderValidationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(CacheManagerHeaderValidationTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(CacheManagerHeaderValidationTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CacheManagerHeaderValidationTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(CacheManagerHeaderValidationTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CacheManagerHeaderValidationTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    target_link_libraries(CacheManagerHeaderValidationTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+    add_test(NAME CacheManagerHeaderValidationTests COMMAND CacheManagerHeaderValidationTests)
+    juce_generate_juce_header(CacheManagerHeaderValidationTests)
+endif()
+
+#------------------------------------------------------------
+# B-04 / B-05: 入力ファイルの事前検査（RIFF チャンク境界・XML 上限）
+#   JUCE 本体は改修せず、入口で拒否できることを確認する。
+#------------------------------------------------------------
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(InputInspectionTests)
+    target_sources(InputInspectionTests PRIVATE
+        src/tests/InputInspectionTests.cpp
+        src/InputInspection.cpp
+    )
+    target_include_directories(InputInspectionTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(InputInspectionTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(InputInspectionTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(InputInspectionTests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(InputInspectionTests PRIVATE
+        juce::juce_core juce::juce_events
+    )
+    add_test(NAME InputInspectionTests COMMAND InputInspectionTests)
+    juce_generate_juce_header(InputInspectionTests)
+
+    #------------------------------------------------------------
+    # ★ B-15: 学習係数ファイルの version 管理と明示移行
+    #------------------------------------------------------------
+    juce_add_console_app(LearnedStateMigrationTests)
+    target_sources(LearnedStateMigrationTests PRIVATE
+        src/tests/LearnedStateMigrationTests.cpp
+        src/learner/LearnedStateMigration.cpp
+        src/InputInspection.cpp
+    )
+    target_include_directories(LearnedStateMigrationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(LearnedStateMigrationTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(LearnedStateMigrationTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(LearnedStateMigrationTests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(LearnedStateMigrationTests PRIVATE
+        juce::juce_core juce::juce_events
+    )
+    add_test(NAME LearnedStateMigrationTests COMMAND LearnedStateMigrationTests)
+    juce_generate_juce_header(LearnedStateMigrationTests)
+endif()
+
+#------------------------------------------------------------
 # work113 D-1R-2L: PersistentCache v3 Phase 0 Executable Contract (P0-1..P0-6)
 #------------------------------------------------------------
 # Owner instruction "Owner 回答 — D-1R-2K Phase 0 GO / Production
@@ -2596,6 +2719,7 @@ endif()
 # ソースファイル
 #------------------------------------------------------------
 set(CONVOPEQ_ALL_SOURCES
+    src/learner/LearnedStateMigration.cpp
     src/MainApplication.cpp
     src/MainWindow.cpp
     src/audioengine/AudioEngine.RebuildDispatch.cpp
@@ -2715,6 +2839,7 @@ set(CONVOPEQ_ALL_SOURCES
     src/MixedPhaseOptimizationComponent.cpp
     src/IRConverter.cpp
     src/IRAnalyzer.cpp  # ★ v14.0
+    src/InputInspection.cpp  # ★ B-04/B-05: 入力ファイルの事前検査
     src/ProgressiveUpgradeThread.cpp
     src/MixedPhasePersistentCache.cpp
     src/CacheManager.cpp
@@ -3200,6 +3325,20 @@ if(ENABLE_ASAN)
         set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
             "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     endif()
+
+    # B-02 / B-04 / B-05 / B-12 の回帰テストも同じ構成で ASan 化する。
+    # RelWithDebInfo を想定。Debug では /RTC1 を外す。
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        foreach(_asanTarget CacheManagerHeaderValidationTests InputInspectionTests TailLayerIntegrityTests)
+            if(TARGET ${_asanTarget})
+                target_compile_options(${_asanTarget} PRIVATE
+                    $<$<CONFIG:Debug>:/RTC1-> /fsanitize=address)
+                target_link_options(${_asanTarget} PRIVATE /fsanitize=address)
+                set_property(TARGET ${_asanTarget} PROPERTY MSVC_RUNTIME_LIBRARY
+                    "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+            endif()
+        endforeach()
+    endif()
 endif()
 
 #------------------------------------------------------------
@@ -3421,6 +3560,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/BulkParameterRestoreTests.cpp
         src/tests/AudioEngineHarness/STG11D12NoiseShaperEnumGuardTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
+        # BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
+        src/tests/AudioEngineHarness/NoiseShaperStateRaceTests.cpp
+        src/tests/AudioEngineHarness/RuntimeParameterGuardTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
         src/tests/AudioEngineHarness/T2Measurement.cpp
@@ -5966,9 +6108,7 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     const bool diagTickDue = (diagLastTicks == 0 || (diagNowTicks - diagLastTicks) >= diagIntervalTicks);
     if (diagTickDue)
     {
-#if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
         debugRuntime_.emitCIArtifacts();
-#endif
         debugRuntime_.emitHBTrace();
     }
     emitEvidenceTickNonRt(false);
@@ -10596,7 +10736,7 @@ public:
         std::atomic<int> activeIndex { 0 };   // 0 = A, 1 = B
         std::atomic<uint32_t> generation { 1u };
         convo::NoiseShaperLearnerState state {};
-        std::mutex stateMutex;
+        mutable std::mutex stateMutex;   // ★ BUG-1: const getter からも lock する
         std::atomic<bool> writeLock { false };  // CAS用書き込みロック
     };
 
@@ -13996,6 +14136,7 @@ void AudioEngine::debugAssertAudioThread() const
 ```
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "DspNumericPolicy.h"   // ★ B-09: convo::numeric_policy::isFinite
 #include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 
@@ -14490,8 +14631,22 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const 
     getAdaptiveCoefficientsForSampleRate(sampleRate, stagedCoefficients, kAdaptiveNoiseShaperOrder);
 
     const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
+    bool acceptedAny = false;
+
     for (int i = 0; i < limit; ++i)
+    {
+        // ★ B-09: 非有限値は bank へ入れない（staged には現在値が入っているため、
+        //   その index は以前値を維持する）。clampCoeff でも 0 に落ちるが、
+        //   保存→再読で NaN が固定化するのをここで断つ。
+        if (!convo::numeric_policy::isFinite(coeffs[i]))
+            continue;
+
         stagedCoefficients[i] = coeffs[i];
+        acceptedAny = true;
+    }
+
+    if (!acceptedAny)
+        return;
 
     storeLearnedCoeffsToBank(bankIndex, stagedCoefficients);
 }
@@ -14545,8 +14700,22 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     getAdaptiveCoefficientsForSampleRateAndBitDepth(sampleRate, bitDepth, stagedCoefficients, kAdaptiveNoiseShaperOrder);
 
     const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
+    bool acceptedAny = false;
+
     for (int i = 0; i < limit; ++i)
+    {
+        // ★ B-09: 非有限値は bank へ入れない（staged には現在値が入っているため、
+        //   その index は以前値を維持する）。clampCoeff でも 0 に落ちるが、
+        //   保存→再読で NaN が固定化するのをここで断つ。
+        if (!convo::numeric_policy::isFinite(coeffs[i]))
+            continue;
+
         stagedCoefficients[i] = coeffs[i];
+        acceptedAny = true;
+    }
+
+    if (!acceptedAny)
+        return;
 
     storeLearnedCoeffsToBank(bankIndex, stagedCoefficients);
 }
@@ -14615,6 +14784,9 @@ void AudioEngine::storeLearnedCoeffsToBank(int bankIndex, const double* coeffs)
 [[nodiscard]] bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept
 {
     const auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
+    // ★ BUG-1: 書き手（setAdaptiveNoiseShaperState）と同じ mutex を取る。
+    //   取らないと 560 B の構造体コピーが書き込みと重なり、世代混在の torn read になる。
+    std::lock_guard<std::mutex> lock(bank.stateMutex);
     outState = bank.state;
     return true;
 }
@@ -21553,6 +21725,7 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "ISRRetireRouter.h"
+#include "core/ReaderMeasureRegistry.h"   // ★ 計測 (2026-11-11)
 
 //==============================================================================
 // [P0-15] Reader PR: RCU reader operations
@@ -21560,14 +21733,36 @@ uint64_t AudioEngine::advanceRetireEpoch() noexcept
 //         Part of AudioEngine.Threading.cpp 3-way split.
 //==============================================================================
 
+namespace {
+// ★ 計測 (2026-11-11 Owner 限定承認): 音声 reader の最外層入退場のみを 1 区画として記録。
+//   RT 側は atomic のみ（確保・mutex・出力なし）。ネストは深さで数え、二重計上しない。
+thread_local std::uint32_t tlAudioReaderDepth = 0;
+thread_local int tlAudioReaderMeasure = -1;
+}
+
 void AudioEngine::enterRcuReader(int readerIndex) noexcept
 {
     m_retireRouter->enterReader(readerIndex);
+
+    if (tlAudioReaderDepth++ == 0)
+    {
+        tlAudioReaderMeasure = convo::ReaderMeasureRegistry::claim (
+            "AudioReader", static_cast<std::uint32_t>(readerIndex), 1u, this, m_retireRouter.get());
+    }
 }
 
 void AudioEngine::exitRcuReader(int readerIndex) noexcept
 {
     m_retireRouter->exitReader(readerIndex);
+
+    if (tlAudioReaderDepth > 0 && --tlAudioReaderDepth == 0)
+    {
+        if (tlAudioReaderMeasure >= 0)
+        {
+            convo::ReaderMeasureRegistry::close (tlAudioReaderMeasure);
+            tlAudioReaderMeasure = -1;
+        }
+    }
 }
 
 [[nodiscard]] uint32_t AudioEngine::activeEpochObserverCount() const noexcept
@@ -55216,11 +55411,13 @@ static_assert(sizeof(AudioSegmentBuffer) < 1024,
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <mkl.h>
 #include <mkl_cblas.h>
 #include "DiagnosticsConfig.h"
+#include "convolver/IRLoadAdmission.h"
 
 namespace
 {
@@ -55253,6 +55450,7 @@ uint64_t crc64Update(uint64_t crc, const uint8_t* data, size_t size)
     }
     return crc;
 }
+
 }
 
 uint64_t CacheManager::hashCombine(uint64_t seed, uint64_t value)
@@ -55298,9 +55496,14 @@ uint64_t CacheManager::computeKey(const juce::File& file,
                                   int fftSize,
                                   double sampleRate,
                                   int phaseMode,
-                                  int partitionSize)
+                                  int partitionSize,
+                                  uint64_t schemaVersion)
 {
-    uint64_t seed = computeFileContentCRC(file);
+    // version 1 はトリム導入前のキー（CRC から開始）。version 2 以降は
+    // バージョン値を混ぜて、意味論が変わったキャッシュを再利用しない。
+    uint64_t seed = (schemaVersion >= 2)
+        ? hashCombine(schemaVersion, computeFileContentCRC(file))
+        : computeFileContentCRC(file);
     seed = hashCombine(seed, static_cast<uint64_t>(fftSize));
     seed = hashCombine(seed, static_cast<uint64_t>(phaseMode));
     seed = hashCombine(seed, static_cast<uint64_t>(partitionSize));
@@ -55313,11 +55516,21 @@ uint64_t CacheManager::computeKey(const juce::File& file,
     return seed;
 }
 
+CacheManager::CacheManager(juce::File cacheDirOverride)
+    : cacheDirectoryOverride(std::move(cacheDirOverride))
+{
+    // ★ B-08: 跨セッションで増え続ける IRCache を、起動時に一度だけ上限まで剪定する。
+    //   セッション中の evictLRU（件数上限）とは別の、総量の歯止め。
+    pruneDirectory();
+}
+
 juce::File CacheManager::getCacheDirectory() const
 {
-    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                   .getChildFile("ConvoPeq")
-                   .getChildFile("IRCache");
+    auto dir = (cacheDirectoryOverride != juce::File())
+                   ? cacheDirectoryOverride
+                   : juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                         .getChildFile("ConvoPeq")
+                         .getChildFile("IRCache");
     if (!dir.exists())
      {
          auto result = dir.createDirectory();
@@ -55390,6 +55603,9 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     //   checked that header+dataSize+timeDomain matched the file length, so a crafted
     //   cache could declare channels*samples far beyond timeDomainSizeBytes and make the
     //   time-domain memcpy read past the mapping.
+    // ★ 統合 (2026-11-23): 標本数の上限だけ WIP の凍結値 2^21+1 を採る。upstream の
+    //   2^28 は 48 kHz で約 93 分に相当し、キャッシュが保持する準備済み IR には緩い。
+    //   2^21+1 は IRLoadAdmission の kMaxIRResampleOutputSamples（MAX_IR_LATENCY + 1）。
     const uint64_t fileSize = static_cast<uint64_t>(juce::jmax<int64_t>(0, file.getSize()));
     const uint64_t headerSizeU = (headerOut.version == 1)
                                ? static_cast<uint64_t>(sizeof(CacheHeaderV1))
@@ -55415,7 +55631,9 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     {
         if (headerOut.timeDomainChannels < 1 || headerOut.timeDomainChannels > 8)
             return false;
-        if (headerOut.timeDomainNumSamples < 1 || headerOut.timeDomainNumSamples > (uint64_t{1} << 28))
+        if (headerOut.timeDomainNumSamples < 1
+            || headerOut.timeDomainNumSamples
+                   > static_cast<uint64_t>(convo::irload::kMaxIRResampleOutputSamples))
             return false;
         if (headerOut.timeDomainChannels * headerOut.timeDomainNumSamples * sizeof(double)
             != headerOut.timeDomainSizeBytes)
@@ -55467,10 +55685,26 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
 
 std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, int fftSize, uint64_t generationId)
 {
+    return loadPreparedStateFromFile(getCacheFile(key, fftSize), key, fftSize, generationId);
+}
+
+std::unique_ptr<PreparedIRState> CacheManager::loadPreparedStateFromFile(const juce::File& file,
+                                                                        uint64_t key,
+                                                                        int fftSize,
+                                                                        uint64_t generationId)
+{
     CacheHeader header{};
-    const auto file = getCacheFile(key, fftSize);
     if (!validateCacheFile(file, key, fftSize, header))
+    {
+        // B-02: 構造的に不正なエントリは再構築可能なので削除する（毎回の再試行を避ける）。
+        // ファイル名はキーから決まるため、キー不一致もこの名前のエントリが不正であることを意味する。
+        if (file.existsAsFile())
+        {
+            juce::Logger::writeToLog("[CACHE] rejected and removed invalid cache entry: " + file.getFileName());
+            file.deleteFile();
+        }
         return nullptr;
+    }
 
     juce::MemoryMappedFile mmap(file, juce::MemoryMappedFile::readOnly);
     const size_t headerSize = (header.version == 1) ? sizeof(CacheHeaderV1) : sizeof(CacheHeader);
@@ -55514,29 +55748,47 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
     prepared->generationId = generationId;
     prepared->cacheKey = key;
 
-    // timeDomainIR があれば復元
+    // timeDomainIR があれば復元（B-02: 確保の直前にもう一度ディスクリプタを検証する）
     if (header.timeDomainSizeBytes > 0 && header.timeDomainChannels > 0 && header.timeDomainNumSamples > 0)
     {
-        const uint8_t* tdStart = dataStart + header.dataSize;
-        const size_t expectedTdBytes = static_cast<size_t>(header.timeDomainSizeBytes);
-        if (static_cast<size_t>(mmap.getSize() - headerSize - header.dataSize) >= expectedTdBytes)
+        // 確保の直前にもう一度、凍結値の範囲と整合を確かめる（防御の二重化）。
+        const bool tdOk = header.timeDomainChannels <= static_cast<uint64_t>(convo::irload::kMaxIRLoadChannels)
+            && header.timeDomainNumSamples <= static_cast<uint64_t>(convo::irload::kMaxIRResampleOutputSamples)
+            && header.timeDomainChannels * header.timeDomainNumSamples * sizeof(double)
+                   == header.timeDomainSizeBytes;
+        if (! tdOk)
         {
-            auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(
-                static_cast<int>(header.timeDomainChannels),
-                static_cast<int>(header.timeDomainNumSamples));
-            // ★ work92 C-4 (big 2-4): strict-aliasing 違反の解消。
-            //   mmap 先頭は uint8_t バッファであり double としての有効型を持たないため
-            //   reinterpret_cast<const double*> の逆参照は UB。バイトオフセット + memcpy
-            //   （逆参照なしのコピー）に置換する。数値は bit 単位で同一。
-            const uint8_t* tdCursor = tdStart;
-            const size_t rowBytes = static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double);
-            for (int ch = 0; ch < static_cast<int>(header.timeDomainChannels); ++ch)
-            {
-                std::memcpy(tdBuffer->getWritePointer(ch), tdCursor, rowBytes);
-                tdCursor += rowBytes;
-            }
-            prepared->timeDomainIR = std::move(tdBuffer);
+            juce::Logger::writeToLog("[CACHE] rejected invalid time-domain descriptor before allocation");
+            return nullptr;
         }
+
+        // 符号なしで境界を先に確かめる（減算の桁あふれを作らない）。
+        const uint64_t mappedSize = static_cast<uint64_t>(juce::jmax<juce::int64>(0, mmap.getSize()));
+        const uint64_t tdOffset = static_cast<uint64_t>(headerSize) + header.dataSize;
+        const uint64_t expectedTdBytes = header.timeDomainSizeBytes;
+        if (mappedSize < tdOffset || mappedSize - tdOffset < expectedTdBytes)
+        {
+            juce::Logger::writeToLog("[CACHE] truncated time-domain payload");
+            return nullptr;
+        }
+
+        const uint8_t* tdStart = mapped + tdOffset;
+        const auto tdChannels = static_cast<int>(header.timeDomainChannels);
+        const auto tdSamples = static_cast<int>(header.timeDomainNumSamples);
+
+        auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(tdChannels, tdSamples);
+        // ★ work92 C-4 (big 2-4): strict-aliasing 違反の解消。
+        //   mmap 先頭は uint8_t バッファであり double としての有効型を持たないため
+        //   reinterpret_cast<const double*> の逆参照は UB。バイトオフセット + memcpy
+        //   （逆参照なしのコピー）に置換する。数値は bit 単位で同一。
+        const uint8_t* tdCursor = tdStart;
+        const size_t rowBytes = static_cast<size_t>(tdSamples) * sizeof(double);
+        for (int ch = 0; ch < tdChannels; ++ch)
+        {
+            std::memcpy(tdBuffer->getWritePointer(ch), tdCursor, rowBytes);
+            tdCursor += rowBytes;
+        }
+        prepared->timeDomainIR = std::move(tdBuffer);
     }
 
     if (header.version < 2)
@@ -55690,6 +55942,87 @@ void CacheManager::setSafeDeleteChecker(SafeDeleteFn checker)
     safeDeleteChecker = std::move(checker);
 }
 
+void CacheManager::pruneDirectory(juce::int64 maxTotalBytes)
+{
+    if (maxTotalBytes <= 0)
+        return;
+
+    const auto dir = getCacheDirectory();
+
+    struct Entry
+    {
+        juce::File file;
+        juce::int64 size = 0;
+        juce::Time modified;
+        uint64_t key = 0;
+        int fftSize = 0;
+    };
+
+    std::vector<Entry> entries;
+    juce::int64 total = 0;
+
+    // 対象はこのクラスが書く命名（<16 桁 hex>_<fft>.bin）に一致するものだけ。
+    // 他のアプリや他バージョンのファイルには触れない。
+    for (const auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.bin"))
+    {
+        const auto base = f.getFileNameWithoutExtension();
+        const int sep = base.lastIndexOfChar ('_');
+
+        if (sep <= 0 || sep + 1 >= base.length())
+            continue;
+
+        const auto hexPart = base.substring (0, sep);
+        const auto fftPart = base.substring (sep + 1);
+
+        if (hexPart.length() != 16 || ! hexPart.containsOnly ("0123456789abcdefABCDEF"))
+            continue;
+
+        if (fftPart.isEmpty() || ! fftPart.containsOnly ("0123456789"))
+            continue;
+
+        Entry entry;
+        entry.file = f;
+        entry.size = f.getSize();
+        entry.modified = f.getLastModificationTime();
+        entry.key = static_cast<uint64_t> (hexPart.getHexValue64());
+        entry.fftSize = fftPart.getIntValue();
+
+        total += entry.size;
+        entries.push_back (std::move (entry));
+    }
+
+    if (total <= maxTotalBytes)
+        return;
+
+    std::sort (entries.begin(), entries.end(), [] (const Entry& a, const Entry& b)
+    {
+        return a.modified < b.modified; // 古い順
+    });
+
+    int removed = 0;
+
+    for (const auto& entry : entries)
+    {
+        if (total <= maxTotalBytes)
+            break;
+
+        if (! isEntrySafeToDelete (entry.key, entry.fftSize))
+            continue;
+
+        // Windows で mmap 中のファイルは deleteFile が false を返すため、
+        // 使用中エントリを巻き込むことはない。
+        if (entry.file.deleteFile())
+        {
+            total -= entry.size;
+            ++removed;
+        }
+    }
+
+    juce::Logger::writeToLog ("[CACHE] prune: removed " + juce::String (removed)
+                              + " entries, total now " + juce::String (total)
+                              + " bytes (limit " + juce::String (maxTotalBytes) + ")");
+}
+
 void CacheManager::clear()
 {
     const auto dir = getCacheDirectory();
@@ -55763,6 +56096,7 @@ void CacheManager::evictLRU(size_t maxEntries)
 #include <JuceHeader.h>
 
 #include "PreparedIRState.h"
+#include "convolver/IRLoadAdmission.h"   // ★ B-08: 総量上限はロード予算を再利用する
 
 struct CacheHeader
 {
@@ -55788,11 +56122,21 @@ class CacheManager
 public:
     using SafeDeleteFn = std::function<bool(uint64_t, int)>;
 
+    // 既定はユーザーのアプリデータ配下。テストは任意のディレクトリを渡して隔離する。
+    explicit CacheManager(juce::File cacheDirectoryOverride = {});
+
+    // ★ B-01 / B-02: キャッシュキーの意味論バージョン。
+    //   末尾無音トリムを同期経路にも適用したため、同じファイルから作られる IR の長さが
+    //   変わる。version 1 のキー（トリム導入前）とは別キーにして、古い無トリム IR を
+    //   再利用しない。version 1 を指定すると従来と同じキーになる（移行・検証用）。
+    static constexpr uint64_t kCacheKeySchemaVersion = 2;
+
     static uint64_t computeKey(const juce::File& file,
-                               int fftSize,
-                               double sampleRate,
-                               int phaseMode,
-                               int partitionSize);
+                             int fftSize,
+                             double sampleRate,
+                             int phaseMode,
+                             int partitionSize,
+                             uint64_t schemaVersion = kCacheKeySchemaVersion);
 
     std::unique_ptr<PreparedIRState> loadPreparedState(uint64_t key, int fftSize, uint64_t generationId);
     void save(uint64_t key, int fftSize, const PreparedIRState& state);
@@ -55801,6 +56145,15 @@ public:
 
     void clear();
     void evictLRU(size_t maxEntries = 10);
+
+    // ★ B-08: ディレクトリ総量の上限。新しい値を発明せず、IR admission のロード予算
+    //   （1 GiB）を再利用する。キャッシュは IR データの派生物であり、「同時に保持して
+    //   よい IR 量」を超えて残す利点がない。
+    static constexpr juce::int64 kMaxCacheDirectoryBytes = convo::irload::kMaxIRLoadBytes;
+
+    // ディレクトリ総量を上限以下へ剪定する（冪等）。最終更新の古い順に削除し、
+    // safeDeleteChecker が拒否する使用中エントリは残す。コンストラクタから 1 回呼ぶ。
+    void pruneDirectory(juce::int64 maxTotalBytes = kMaxCacheDirectoryBytes);
 
 private:
     struct CacheEntry
@@ -55823,12 +56176,18 @@ private:
     juce::File getCacheFile(uint64_t key, int fftSize) const;
     bool validateCacheFile(const juce::File& file, uint64_t expectedKey, int expectedFftSize, CacheHeader& headerOut) const;
 
+    std::unique_ptr<PreparedIRState> loadPreparedStateFromFile(const juce::File& file,
+                                                               uint64_t key,
+                                                               int fftSize,
+                                                               uint64_t generationId);
+
     bool isEntrySafeToDelete(uint64_t key, int fftSize);
 
     std::unordered_map<uint64_t, CacheEntry> cacheMap;
     std::list<uint64_t> lruList;
     std::mutex cacheMutex;
     SafeDeleteFn safeDeleteChecker;
+    juce::File cacheDirectoryOverride;
 };
 
 ```
@@ -57053,11 +57412,13 @@ void ConvolverProcessor::reset()
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "convolver/IRLoadAdmission.h"
 #include "convolver/IRTrimTestHooks.h"   // ★ WORK111: test/measurement-only hook
+#include "InputInspection.h"             // ★ B-04: RIFF チャンク境界検査
 #include "AlignedAllocation.h"
 #include <mkl.h>
 #include <limits>   // ★ WORK112: std::numeric_limits (subnormal 判定)
 
 #include "audioengine/AtomicAccess.h"
+#include "convolver/IRTrailingSilence.h"
 
 // IR ロード経路の診断出力（既定 OFF）。stderr が未ドレインのパイプの場合に
 // LoaderThread の書き込みが止まり IR ロードが失敗するため、通常ビルドでは出力しない。
@@ -57188,8 +57549,11 @@ ConvolverProcessor::LoaderThread::LoadResult ConvolverProcessor::LoaderThread::p
     std::function<bool()> savedCheck = externalCancellationCheck;
     if (thread != nullptr)
     {
-        externalCancellationCheck = [thread, saved = savedCheck]() -> bool {
-            if (thread->threadShouldExit()) return true;
+        externalCancellationCheck = [this, thread, saved = savedCheck]() -> bool {
+            if (thread->threadShouldExit())
+            {
+                return true;
+            }
             return saved && saved();
         };
     }
@@ -57463,6 +57827,18 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
             return false;
         }
 
+        // ★ B-04: JUCE の WAV リーダーはメタデータチャンクの宣言長で calloc する。
+        //   createReaderFor の前に、宣言長が実ファイル残量を超えていないことを確認する。
+        {
+            juce::String why;
+
+            if (!convo::safeinput::inspectRiffChunkBounds(file, &why))
+            {
+                stepResult.errorMessage = why;
+                return false;
+            }
+        }
+
         juce::AudioFormatManager formatManager;
         formatManager.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -57635,47 +58011,13 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         const int numChannels = stepResult.loadedIR.getNumChannels();
         const double threshold = 1.0e-15;
 
-        int newLength = 0;
-        if (numChannels > 0)
-        {
-            const double* ch0 = stepResult.loadedIR.getReadPointer(0);
-            const double* ch1 = (numChannels > 1) ? stepResult.loadedIR.getReadPointer(1) : nullptr;
+        // ★ B-01 / B-02: 同期経路（IRConverter）と同じ規則の共通関数を使う。
+        const int newLength = convo::irtrim::computeTrimmedLength(
+            stepResult.loadedIR.getReadPointer(0),
+            (numChannels > 1) ? stepResult.loadedIR.getReadPointer(1) : nullptr,
+            numSamples,
+            threshold);
 
-            const __m256d vThreshold = _mm256_set1_pd(threshold);
-            const __m256d vSignMask = _mm256_set1_pd(-0.0);
-
-            int i = numSamples;
-            bool found = false;
-            for (; i >= 4; i -= 4)
-            {
-                __m256d v0 = _mm256_loadu_pd(ch0 + i - 4);
-                __m256d abs0 = _mm256_andnot_pd(vSignMask, v0);
-                __m256d mask = _mm256_cmp_pd(abs0, vThreshold, _CMP_GT_OQ);
-                if (ch1)
-                {
-                    __m256d v1 = _mm256_loadu_pd(ch1 + i - 4);
-                    __m256d abs1 = _mm256_andnot_pd(vSignMask, v1);
-                    mask = _mm256_or_pd(mask, _mm256_cmp_pd(abs1, vThreshold, _CMP_GT_OQ));
-                }
-                if (_mm256_testz_pd(mask, mask) == 0)
-                {
-                    for (int j = i - 1; j >= i - 4; --j)
-                    {
-                        if (std::abs(ch0[j]) > threshold || (ch1 && std::abs(ch1[j]) > threshold))
-                        { newLength = j + 1; found = true; break; }
-                    }
-                    if (found) break;
-                }
-            }
-            if (!found)
-            {
-                for (int j = i - 1; j >= 0; --j)
-                {
-                    if (std::abs(ch0[j]) > threshold || (ch1 && std::abs(ch1[j]) > threshold))
-                    { newLength = j + 1; break; }
-                }
-            }
-        }
         if (newLength < numSamples)
         {
             stepResult.loadedIR.setSize(numChannels, std::max(1, newLength), true);
@@ -57943,37 +58285,62 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
         return maxAbs > 1.0e-12;
     };
 
-    if (phaseMode == ConvolverProcessor::PhaseMode::Minimum ||
-        phaseMode == ConvolverProcessor::PhaseMode::Mixed)
+    // ★ B-10: 実効位相モードを記録する。最小位相変換が FFT 上限でスキップされた場合は、
+    //   要求値ではなく「線形位相で適用した」事実を残す（silent skip を禁止する）。
     {
-        bool wasCancelled = false;
-        // ★ C-18: convertToMinimumPhase() is best-effort. It returns an empty buffer when
-        //   the FFT would exceed the size limit or the MKL plan fails; validateBuffer()
-        //   below then rejects it and the linear IR is kept. That fallback is intentional
-        //   (the filter stays usable), but it means Minimum mode can silently run linear.
-        auto minPhaseIR = ConvolverProcessorInternal::convertToMinimumPhase(stepTrimmed, shouldStop, &wasCancelled);
-        if (wasCancelled) return false;
+        using PhaseMode = ConvolverProcessor::PhaseMode;
+        const bool wantsConversion = (phaseMode == PhaseMode::Minimum || phaseMode == PhaseMode::Mixed);
+        auto applied = wantsConversion ? PhaseMode::AsIs : phaseMode;
 
-        if (validateBuffer(minPhaseIR))
+        if (wantsConversion)
         {
-            if (phaseMode == ConvolverProcessor::PhaseMode::Minimum)
+            bool wasCancelled = false;
+            // ★ C-18: convertToMinimumPhase() is best-effort. It returns an empty buffer when
+            //   the FFT would exceed the size limit or the MKL plan fails; validateBuffer()
+            //   below then rejects it and the linear IR is kept. That fallback is intentional
+            //   (the filter stays usable), but it means Minimum mode can silently run linear.
+            auto minPhaseIR = ConvolverProcessorInternal::convertToMinimumPhase(stepTrimmed, shouldStop, &wasCancelled);
+            if (wasCancelled) return false;
+
+            if (validateBuffer(minPhaseIR))
             {
-                stepTrimmed = std::move(minPhaseIR);
+                if (phaseMode == PhaseMode::Minimum)
+                {
+                    stepTrimmed = std::move(minPhaseIR);
+                    applied = PhaseMode::Minimum;
+                }
+                else
+                {
+                    bool mixedCancelled = false;
+                    auto progressCb = [this](float p) { owner.setLoadingProgress(p); };
+                    auto mixedIR = convertToMixedPhase(&owner, stepFileHash, stepTrimmed, minPhaseIR,
+                                                       sampleRate,
+                                                       static_cast<double>(mixedTransitionStartHz),
+                                                       static_cast<double>(mixedTransitionEndHz),
+                                                       32.0,  // tau (dummy, unused in DSP)
+                                                       shouldStop, &mixedCancelled, progressCb);
+                    if (mixedCancelled) return false;
+                    if (validateBuffer(mixedIR))
+                    {
+                        stepTrimmed = std::move(mixedIR);
+                        applied = PhaseMode::Mixed;
+                    }
+                }
             }
-            else
-            {
-                bool mixedCancelled = false;
-                auto progressCb = [this](float p) { owner.setLoadingProgress(p); };
-                auto mixedIR = convertToMixedPhase(&owner, stepFileHash, stepTrimmed, minPhaseIR,
-                                                   sampleRate,
-                                                   static_cast<double>(mixedTransitionStartHz),
-                                                   static_cast<double>(mixedTransitionEndHz),
-                                                   32.0,  // tau (dummy, unused in DSP)
-                                                   shouldStop, &mixedCancelled, progressCb);
-                if (mixedCancelled) return false;
-                if (validateBuffer(mixedIR))
-                    stepTrimmed = std::move(mixedIR);
-            }
+        }
+
+        owner.setEffectivePhaseModeForLastLoad(applied);
+
+        if (applied != phaseMode)
+        {
+            const juce::String requested = (phaseMode == PhaseMode::Minimum) ? "Minimum" : "Mixed";
+
+            owner.setLastPhaseWarning(requested + " phase could not be applied to this IR "
+                                      "(it exceeds the processing FFT limit). Linear phase is in use.");
+        }
+        else
+        {
+            owner.setLastPhaseWarning({});
         }
     }
 
@@ -58372,10 +58739,15 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
         return;
     }
 
+    juce::File previousIrFile;
     {
         const juce::ScopedLock sl(irFileLock);
+        previousIrFile = currentIrFile;
         currentIrFile = irFile;
     }
+
+    // ★ B-01: 失敗理由を末端の報告点まで運ぶ（従来は「no FFT applied」だけだった）。
+    juce::String loadFailureReason;
 
     stopUpgradeThread();
 
@@ -58395,19 +58767,37 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
 
     if (cacheManager)
     {
-        auto directTarget = cacheManager->loadPreparedState(targetKey, targetFFT, generation);
-        if (directTarget)
+        // ★ B-01: キャッシュ読み出しの確保失敗は「キャッシュミス」として扱い、
+        //   変換へフォールバックする（例外をメッセージスレッドへ出さない）。
+        try
         {
-            directTarget->originalFileName = irFile.getFileNameWithoutExtension();
-            appliedFft = targetFFT;
-            applyComputedIR(std::move(directTarget));
+            auto directTarget = cacheManager->loadPreparedState(targetKey, targetFFT, generation);
+            if (directTarget)
+            {
+                directTarget->originalFileName = irFile.getFileNameWithoutExtension();
+                appliedFft = targetFFT;
+                applyComputedIR(std::move(directTarget));
+            }
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] loadIR: cache read failed (bad_alloc); rebuilding");
         }
     }
 
     if (appliedFft == 0 && cacheManager && irConverter)
     {
         const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, lowResFFT);
-        auto cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);
+
+        std::unique_ptr<PreparedIRState> cachedLow;
+        try
+        {
+            cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] loadIR: low-res cache read failed (bad_alloc); rebuilding");
+        }
 
         if (cachedLow)
         {
@@ -58425,24 +58815,42 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
             cfg.generationId = generation;
             cfg.cacheKey = lowResKey;
 
-            auto prepared = irConverter->convertFile(irFile, cfg, [this, generation]()
+            auto prepared = [&]()
             {
-                return !convolverStateGeneration.isCurrentGeneration(generation);
-            });
+                return irConverter->convertFile(irFile, cfg, [this, generation]()
+                {
+                    return !convolverStateGeneration.isCurrentGeneration(generation);
+                }, &loadFailureReason);
+            }();
 
             if (prepared == nullptr)
             {
                 juce::Logger::writeToLog("[DIAG_IR] loadIR: convertFile returned null for "
-                    + irFile.getFileName());
+                    + irFile.getFileName()
+                    + (loadFailureReason.isNotEmpty() ? (" / " + loadFailureReason) : juce::String()));
             }
 
             if (prepared)
             {
                 prepared->originalFileName = irFile.getFileNameWithoutExtension();
-                cacheManager->save(lowResKey, lowResFFT, *prepared);
-                cacheManager->evictLRU(cacheLimit);
+
+                // ★ B-01: キャッシュ書き込みの失敗は IR 適用を止めない（キャッシュは
+                //   最適化であり、失敗しても今回の IR は有効）。例外はここで封じる。
+                try
+                {
+                    cacheManager->save(lowResKey, lowResFFT, *prepared);
+                    cacheManager->evictLRU(cacheLimit);
+                }
+                catch (const std::exception& e)
+                {
+                    juce::Logger::writeToLog("[DIAG_IR] loadIR: cache save failed: "
+                        + juce::String(e.what()));
+                }
+
                 appliedFft = lowResFFT;
-                applyComputedIR(std::move(prepared));
+                {
+                    applyComputedIR(std::move(prepared));
+                }
             }
         }
     }
@@ -58457,8 +58865,22 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
             + juce::String(static_cast<int>(cacheManager != nullptr))
             + " irConverter=" + juce::String(static_cast<int>(irConverter != nullptr))
             + " sr=" + juce::String(sr, 1) + ")");
+
+        // ★ B-01: 変換自体が失敗した場合のみ、currentIrFile を直前の値へ戻す。
+        //   失敗ファイルを指したままだと、以後のリビルド（setState / サンプルレート変更）
+        //   が同じ失敗を繰り返す。別世代が進行中のときはその世代の値が正であり触らない。
+        if (loadFailureReason.isNotEmpty()
+            && convolverStateGeneration.isCurrentGeneration(generation))
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = previousIrFile;
+        }
+
         // ★ STG-6-D1: convert null を含む未適用終端を報告する（単一報告点）。
-        handleLoadError("IR load failed (no FFT applied): " + irFile.getFileName());
+        //   ★ B-01: 変換側の具体的な理由があればそれを優先して表示する。
+        handleLoadError(loadFailureReason.isNotEmpty()
+                            ? loadFailureReason
+                            : ("IR load failed (no FFT applied): " + irFile.getFileName()));
     }
 }
 
@@ -58677,6 +59099,13 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
                ? prepared->originalFileName
                : currentIrFile.getFileNameWithoutExtension();
     }
+
+    // ★ B-10: ここから先が実際の適用（commit）。この経路（IRConverter とキャッシュ）は
+    //   最小位相／混合位相の変換を行わないため、実効値は AsIs（線形）である。
+    //   検証で中断した場合は以前の表示を保つよう、commit の直前に公開する。
+    //   ローダ経由で変換した場合は、ローダが実効値を上書きする。
+    setEffectivePhaseModeForLastLoad(PhaseMode::AsIs);
+    setLastPhaseWarning({});
 
     convo::publishAtomic(currentSampleRate, prepared->sampleRate, std::memory_order_release); // release: Runtime/UI 側 acquire と HB
     convo::publishAtomic(irLength, prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0, std::memory_order_release); // release: UI 側 acquire と HB
@@ -60321,6 +60750,7 @@ void ConvolverProcessor::invalidatePendingLoads()
 #include "ConvolverProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "convolver/IRLoadAdmission.h"
+#include "InputInspection.h"             // ★ B-04: RIFF チャンク境界検査
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
@@ -60597,6 +61027,17 @@ bool loadImpulseResponsePreviewFile(const juce::File& file,
     {
         errorMessage = "IR file not found: " + file.getFullPathName();
         return false;
+    }
+
+    // ★ B-04: メタデータチャンクの宣言長による確保を、createReaderFor の前に拒否する。
+    {
+        juce::String why;
+
+        if (!convo::safeinput::inspectRiffChunkBounds(file, &why))
+        {
+            errorMessage = why;
+            return false;
+        }
     }
 
     juce::AudioFormatManager formatManager;
@@ -63201,7 +63642,9 @@ void ConvolverProcessor::forceCleanup()
     for (auto& loader : loadersToDelete)
     {
         if (loader)
+        {
             loader->stopThread(500);
+        }
     }
     loadersToDelete.clear();
 }
@@ -63439,6 +63882,57 @@ inline constexpr int64_t kMaxIRResampleOutputSamples = 2097153; // 2^21 + 1
 
 ```
 
+### 📄 `src\convolver\IRTrailingSilence.h`
+
+```
+#pragma once
+
+// ★ B-01 / B-02: 末尾無音トリムの共通規則。
+//
+//   LoaderThread（非同期・本適用）と IRConverter（同期・プレビュー/キャッシュ）で
+//   同じ規則を使う。規則は従来の LoaderThread 実装と同じ:
+//     - 閾値より大きい絶対値を持つ最後のサンプル位置 + 1 を長さとする
+//     - 1 チャネル目（index 0）と 2 チャネル目（存在すれば）の大きい方を採る
+//     - 該当が無ければ 1 サンプルを残す
+//
+//   JUCE に依存しない（単体テストで境界値を直接叩ける）。
+
+#include <cmath>
+
+namespace convo::irtrim
+{
+
+template <typename Sample>
+int computeTrimmedLength (const Sample* channel0,
+                          const Sample* channel1,
+                          int numSamples,
+                          double threshold = 1.0e-15) noexcept
+{
+    if (channel0 == nullptr || numSamples <= 0)
+        return 0;
+
+    for (int i = numSamples - 1; i >= 0; --i)
+    {
+        const double a0 = std::abs (static_cast<double> (channel0[i]));
+        if (a0 > threshold)
+            return i + 1;
+
+        if (channel1 != nullptr)
+        {
+            const double a1 = std::abs (static_cast<double> (channel1[i]));
+            if (a1 > threshold)
+                return i + 1;
+        }
+    }
+
+    // 全サンプルが閾値以下でも 1 サンプルは残す（0 長にしない）。
+    return 1;
+}
+
+} // namespace convo::irtrim
+
+```
+
 ### 📄 `src\convolver\IRTrimTestHooks.h`
 
 ```
@@ -63606,6 +64100,17 @@ ConvolverProcessor::PhaseMode comboIdToPhaseMode(int id)
         case 2:  return ConvolverProcessor::PhaseMode::Mixed;
         case 3:  return ConvolverProcessor::PhaseMode::Minimum;
         default: return ConvolverProcessor::PhaseMode::AsIs;
+    }
+}
+
+// ★ B-10: 実効位相モードの表示名（要求と実効が食い違う場合に UI へ出す）。
+const char* phaseModeShortName(ConvolverProcessor::PhaseMode mode)
+{
+    switch (mode)
+    {
+        case ConvolverProcessor::PhaseMode::Minimum: return "Minimum";
+        case ConvolverProcessor::PhaseMode::Mixed:   return "Mixed";
+        default:                                      return "Linear";
     }
 }
 
@@ -64990,9 +65495,29 @@ void ConvolverControlPanel::updateIRInfo()
         else
             info += " Lat A: " + juce::String(algorithmMs) + "ms / T: " + juce::String(totalMs) + "ms";
 
-        irInfoLabel.setText(info, juce::dontSendNotification);
-        irInfoLabel.setColour(juce::Label::textColourId,
-                             juce::Colours::lightgreen);
+        // ★ B-10: 実際に適用された位相モードを併記する。要求と異なる場合は、線形位相で
+        //   動いている事実を警告として出す（最小位相化が FFT 上限でスキップされた場合）。
+        const int effectivePhaseRaw = convolver.getEffectivePhaseModeForLastLoad();
+
+        if (effectivePhaseRaw >= 0)
+            info += juce::String(" · Phase: ")
+                  + phaseModeShortName(static_cast<ConvolverProcessor::PhaseMode>(effectivePhaseRaw));
+
+        const juce::String phaseWarning = convolver.getLastPhaseWarning();
+
+        if (phaseWarning.isNotEmpty())
+        {
+            irInfoLabel.setText(phaseWarning, juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+            irInfoLabel.setTooltip(info);
+        }
+        else
+        {
+            irInfoLabel.setText(info, juce::dontSendNotification);
+            irInfoLabel.setColour(juce::Label::textColourId,
+                                 juce::Colours::lightgreen);
+            irInfoLabel.setTooltip("");
+        }
     }
     else if (const float progress = convolver.getLoadProgress(); convolver.isLoadingIR() && progress >= 0.0f && progress < 1.0f)
     {
@@ -75322,6 +75847,7 @@ private:
 #include "DeviceSettings.h"
 #include "NoiseShaperLearningComponent.h"
 #include "OversamplingPolicy.h"
+#include "InputInspection.h"   // ★ B-05: XML のサイズ・深さ・DOCTYPE 検査
 #include <cmath>
 
 namespace
@@ -76175,7 +76701,7 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
     // Load existing to preserve other banks/modes
     std::unique_ptr<juce::XmlElement> root;
     if (file.existsAsFile())
-        root = juce::XmlDocument::parse(file);
+        root = convo::safeinput::parseXmlFile(file);
 
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
@@ -76226,8 +76752,40 @@ void DeviceSettings::saveNoiseShaperState(const AudioEngine& engine)
         }
     }
 
-    if (root->toString().length() < 10 * 1024 * 1024)
-        root->writeTo(file);
+    // ★ BUG-3（案 A）: 直列化は 1 回だけ。結果をそのまま書き、二重直列化を解消する。
+    const juce::String xmlText = root->toString();
+
+    // ★ XML 上限の対称性: 読込側（kMaxXmlFileBytes）で拒否されるサイズは書かない。
+    //   判定は UTF-8 のバイト数（＝ファイルサイズ）で行う。
+    if (convo::safeinput::isXmlTextWithinLimit (xmlText))
+    {
+        // ★ BUG-3b: 一時ファイルへ書き、書き込み状態を検査してから置換する。
+        //   File::replaceWithText は appendText の戻り値と getStatus() を捨てるため
+        //   書き込み途中の失敗を検出できない（juce_File.cpp:798-803）。
+        //   lineEndings=nullptr は writeText の改行変換を止め、旧 writeTo と同じバイト列にする。
+        juce::TemporaryFile tempFile (file);
+        bool saved = false;
+
+        {
+            juce::FileOutputStream out (tempFile.getFile());
+
+            if (out.openedOk())
+            {
+                saved = out.writeText (xmlText, false, false, nullptr);
+                out.flush();   // バッファを書き出し、失敗は status に載る
+                if (out.getStatus().failed())
+                    saved = false;
+            }
+        }
+
+        if (saved)
+            saved = tempFile.overwriteTargetFileWithTemporary();
+
+        // ★ W-1: 保存失敗を無言にしない（成功時の挙動は不変）。
+        if (! saved)
+            juce::Logger::writeToLog("Warning: failed to write noise shaper state file: "
+                                     + file.getFullPathName());
+    }
     else
         juce::Logger::writeToLog("Noise shaper state file too large, skipping save.");
 }
@@ -76238,7 +76796,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
     if (!file.existsAsFile())
         return;
 
-    auto root = juce::XmlDocument::parse(file);
+    auto root = convo::safeinput::parseXmlFile(file);
     if (root == nullptr || !root->hasTagName("NoiseShaperLearningData"))
     {
         juce::Logger::writeToLog("Failed to parse noise shaper state file.");
@@ -76312,6 +76870,7 @@ void DeviceSettings::loadNoiseShaperState(AudioEngine& engine)
             }
         }
     }
+
 }
 
 // ★ [work63] preloadThreadPriorityMode — オーディオスレッド開始前に設定を先読み
@@ -76323,7 +76882,7 @@ void DeviceSettings::preloadThreadPriorityMode (AudioEngine& engine)
     if (! file.existsAsFile())
         return; // デフォルト MMCSS のまま
 
-    if (auto xml = juce::XmlDocument::parse(file))
+    if (auto xml = convo::safeinput::parseXmlFile(file))
     {
         const juce::String mode = xml->getStringAttribute("threadPriorityMode", "MMCSS");
         engine.setAudioThreadPriorityMode(mode == "MMCSS");
@@ -76374,7 +76933,10 @@ void DeviceSettings::saveSettings (const juce::AudioDeviceManager& deviceManager
             }
         }
 
-        xml->writeTo (getSettingsFile());
+        // ★ W-1: 保存失敗を無言にしない（成功時の挙動は不変）。
+        if (! xml->writeTo (getSettingsFile()))
+            juce::Logger::writeToLog("Warning: failed to write device settings: "
+                                     + getSettingsFile().getFullPathName());
     }
 }
 
@@ -76406,7 +76968,7 @@ void DeviceSettings::loadSettings (juce::AudioDeviceManager& deviceManager, Audi
 
     if (file.existsAsFile())
     {
-        if (auto xml = juce::XmlDocument::parse (file))
+        if (auto xml = convo::safeinput::parseXmlFile (file))
         {
             // 保存された設定でデバイスを初期化する（入力2ch、出力2chを要求）
             juce::String error = deviceManager.initialise (2, 2, xml.get(), false);
@@ -85639,6 +86201,388 @@ namespace convo::input_transform
 
 ```
 
+### 📄 `src\InputInspection.cpp`
+
+```
+#include "InputInspection.h"
+
+#include <cstddef>
+#include <cstring>
+#include <limits>
+
+namespace convo::safeinput
+{
+namespace
+{
+
+// String 内のタグ構造を走査して最大の入れ子深さを返す。
+// 解釈できない構造（未終端のコメント/タグ等）は -1 を返す。
+// 引用符内の '>' はタグ終端として扱わない。
+int computeMaxElementDepth (const juce::String& text)
+{
+    // ★ B 修正案 A: 文字位置参照（O(n^2)）をやめ、UTF-8 バイト列をポインタで走査する。
+    //   判定条件・分岐順序・戻り値は現行実装と同一。
+    const char* d = text.toRawUTF8();
+    const std::size_t numBytes = text.getNumBytesAsUTF8();
+
+    // C4267: size_t -> int の変換前に範囲を検査する。8 MiB の上限（kMaxXmlFileBytes）では
+    // 到達しないが、公開 API が limits を差し替え可能なため、契約として明示的に弾く。
+    if (numBytes > static_cast<std::size_t> (std::numeric_limits<int>::max()))
+        return -1;
+
+    const int n = static_cast<int> (numBytes);
+    int depth = 0;
+    int maxDepth = 0;
+    int i = 0;
+    const auto at = [d] (int k) { return static_cast<unsigned char> (d[k]); };
+
+    while (i < n)
+    {
+        if (at (i) != '<')
+        {
+            ++i;
+            continue;
+        }
+
+        // コメント
+        if (i + 3 < n && at (i + 1) == '!' && at (i + 2) == '-' && at (i + 3) == '-')
+        {
+            int commentEnd = -1;
+
+            for (int k = i + 4; k + 2 < n; ++k)
+                if (at (k) == '-' && at (k + 1) == '-' && at (k + 2) == '>') { commentEnd = k; break; }
+
+            if (commentEnd < 0)
+                return -1;
+
+            i = commentEnd + 3;
+            continue;
+        }
+
+        // CDATA（大文字小文字を区別しない）
+        if (i + 8 < n)
+        {
+            static const char* kCdata = "<![CDATA[";
+            bool isCdata = true;
+
+            for (int k = 0; k < 9; ++k)
+            {
+                unsigned char c = at (i + k);
+                const unsigned char t = static_cast<unsigned char> (kCdata[k]);
+
+                if (c >= static_cast<unsigned char> ('a') && c <= static_cast<unsigned char> ('z'))
+                    c = static_cast<unsigned char> (c - 'a' + 'A');
+
+                if (c != t) { isCdata = false; break; }
+            }
+
+            if (isCdata)
+            {
+                int cdataEnd = -1;
+
+                for (int k = i + 9; k + 2 < n; ++k)
+                    if (at (k) == ']' && at (k + 1) == ']' && at (k + 2) == '>') { cdataEnd = k; break; }
+
+                if (cdataEnd < 0)
+                    return -1;
+
+                i = cdataEnd + 3;
+                continue;
+            }
+        }
+
+        // DOCTYPE / 宣言 / 処理命令
+        if (i + 1 < n && (at (i + 1) == '!' || at (i + 1) == '?'))
+        {
+            int declEnd = -1;
+
+            for (int k = i + 1; k < n; ++k)
+                if (at (k) == '>') { declEnd = k; break; }
+
+            if (declEnd < 0)
+                return -1;
+
+            i = declEnd + 1;
+            continue;
+        }
+
+        const bool isClosing = (i + 1 < n && at (i + 1) == '/');
+
+        // タグ終端を引用符を考慮して探す
+        unsigned char quote = 0;
+        int tagEnd = -1;
+
+        for (int j = i + 1; j < n; ++j)
+        {
+            const unsigned char c = at (j);
+
+            if (quote != 0)
+            {
+                if (c == quote)
+                    quote = 0;
+
+                continue;
+            }
+
+            if (c == static_cast<unsigned char> ('"') || c == static_cast<unsigned char> ('\''))
+            {
+                quote = c;
+                continue;
+            }
+
+            if (c == '>')
+            {
+                tagEnd = j;
+                break;
+            }
+        }
+
+        if (tagEnd < 0)
+            return -1;
+
+        bool selfClosing = false;
+
+        if (! isClosing)
+        {
+            int k = tagEnd - 1;
+
+            while (k > i && (at (k) == static_cast<unsigned char> (' ')
+                             || at (k) == static_cast<unsigned char> ('\t')
+                             || at (k) == static_cast<unsigned char> ('\n')
+                             || at (k) == static_cast<unsigned char> ('\r')))
+                --k;
+
+            selfClosing = (at (k) == '/');
+        }
+
+        if (isClosing)
+        {
+            if (depth > 0)
+                --depth;
+        }
+        else if (! selfClosing)
+        {
+            ++depth;
+
+            if (depth > maxDepth)
+                maxDepth = depth;
+        }
+
+        i = tagEnd + 1;
+    }
+
+    return maxDepth;
+}
+
+
+juce::String describe (const juce::File& file)
+{
+    return file.getFileName();
+}
+
+} // namespace
+
+bool inspectRiffChunkBounds (const juce::File& file, juce::String* reason)
+{
+    const auto fail = [reason, &file] (const juce::String& why)
+    {
+        if (reason != nullptr)
+            *reason = why + " (" + describe (file) + ")";
+
+        return false;
+    };
+
+    if (! file.existsAsFile())
+        return fail ("IR file not found");
+
+    const juce::int64 fileSize = file.getSize();
+
+    if (fileSize < 12)
+        return true; // RIFF ではない（他フォーマットの可能性）
+
+    juce::FileInputStream in (file);
+
+    if (! in.openedOk())
+        return fail ("cannot open file for inspection");
+
+    char header[12] = {};
+
+    if (in.read (header, 12) != 12)
+        return true;
+
+    const bool isRiff = std::memcmp (header, "RIFF", 4) == 0
+                     || std::memcmp (header, "RF64", 4) == 0;
+
+    if (! isRiff || std::memcmp (header + 8, "WAVE", 4) != 0)
+        return true; // RIFF/WAVE 以外は対象外
+
+    constexpr int kMaxChunks = 4096;
+    juce::int64 pos = 12;
+
+    for (int chunk = 0; chunk < kMaxChunks && pos + 8 <= fileSize; ++chunk)
+    {
+        if (! in.setPosition (pos))
+            return true;
+
+        juce::uint8 header8[8] = {};
+
+        if (in.read (header8, 8) != 8)
+            return true;
+
+        const juce::uint32 declared = static_cast<juce::uint32> (header8[4])
+                                    | (static_cast<juce::uint32> (header8[5]) << 8)
+                                    | (static_cast<juce::uint32> (header8[6]) << 16)
+                                    | (static_cast<juce::uint32> (header8[7]) << 24);
+
+        const juce::int64 payloadStart = pos + 8;
+
+        if (declared == 0xFFFFFFFFu)
+        {
+            // RF64: 実サイズは ds64 チャンク側。ここでは境界を断定しない。
+            pos = payloadStart;
+            continue;
+        }
+
+        const juce::int64 remaining = fileSize - payloadStart;
+
+        if (static_cast<juce::int64> (declared) > remaining)
+            return fail ("declared chunk size exceeds the file size");
+
+        pos = payloadStart + static_cast<juce::int64> (declared)
+            + ((declared & 1u) != 0u ? 1 : 0);
+    }
+
+    return true;
+}
+
+bool inspectXmlFile (const juce::File& file, juce::String* reason, const XmlLimits& limits)
+{
+    const auto fail = [reason, &file] (const juce::String& why)
+    {
+        if (reason != nullptr)
+            *reason = why + " (" + describe (file) + ")";
+
+        return false;
+    };
+
+    if (! file.existsAsFile())
+        return fail ("XML file not found");
+
+    const juce::int64 size = file.getSize();
+
+    if (size <= 0)
+        return fail ("XML file is empty");
+
+    if (size > limits.maxBytes)
+        return fail ("XML file is too large (" + juce::String (size)
+                     + " bytes; limit is " + juce::String (limits.maxBytes) + " bytes)");
+
+    const juce::String text = file.loadFileAsString();
+
+    if (limits.rejectDoctype)
+    {
+        if (text.containsIgnoreCase ("<!DOCTYPE"))
+            return fail ("XML with DOCTYPE is not accepted");
+
+        if (text.containsIgnoreCase ("<!ENTITY"))
+            return fail ("XML with ENTITY declarations is not accepted");
+    }
+
+    const int maxDepth = computeMaxElementDepth (text);
+
+    if (maxDepth < 0)
+        return fail ("XML structure could not be inspected");
+
+    if (maxDepth > limits.maxDepth)
+        return fail ("XML nesting is too deep (depth " + juce::String (maxDepth)
+                     + "; limit is " + juce::String (limits.maxDepth) + ")");
+
+    return true;
+}
+
+std::unique_ptr<juce::XmlElement> parseXmlFile (const juce::File& file,
+                                                juce::String* reason,
+                                                const XmlLimits& limits)
+{
+    if (! inspectXmlFile (file, reason, limits))
+        return nullptr;
+
+    auto xml = juce::XmlDocument::parse (file);
+
+    if (xml == nullptr && reason != nullptr && reason->isEmpty())
+        *reason = "XML could not be parsed (" + describe (file) + ")";
+
+    return xml;
+}
+
+} // namespace convo::safeinput
+
+```
+
+### 📄 `src\InputInspection.h`
+
+```
+#pragma once
+
+#include <JuceHeader.h>
+
+#include <cstdint>
+#include <memory>
+
+// B-04 / B-05: 入力ファイルの事前検査。
+//
+//   JUCE 本体（vendored）は改修せず、ConvoPeq 側の入口で上限を課す。
+//   - RIFF/WAVE: 宣言チャンク長が実ファイルの残量を超えないこと（B-04）
+//   - XML: サイズ・要素の深さ・DOCTYPE/ENTITY の不在（B-05）
+//
+//   どちらも「アプリの admission より前に確保・再帰が走る」経路への対処で、
+//   ファイル内容の正当性までは判定しない。判定は後段のパーサと各 admission が行う。
+
+namespace convo::safeinput
+{
+
+// B-05 の既定上限。8 MiB はプリセット・セッション・学習状態の実測最大
+// （数百 KiB 規模）に対して十分な余裕があり、深さ 64 は JUCE の
+// readChildElements 再帰が安全に扱える範囲として置いている。
+inline constexpr juce::int64 kMaxXmlFileBytes = 8 * 1024 * 1024;
+inline constexpr int kMaxXmlDepth = 64;
+
+struct XmlLimits
+{
+    juce::int64 maxBytes = kMaxXmlFileBytes;
+    int maxDepth = kMaxXmlDepth;
+    bool rejectDoctype = true;
+};
+
+// B-04: RIFF/WAVE のチャンク境界検査。
+//   RIFF/WAVE 以外（他フォーマット・短すぎるファイル）は対象外として true を返す。
+bool inspectRiffChunkBounds (const juce::File& file, juce::String* reason = nullptr);
+
+// B-05: XML のサイズ・深さ・DOCTYPE/ENTITY を事前検査する。
+bool inspectXmlFile (const juce::File& file, juce::String* reason = nullptr,
+                     const XmlLimits& limits = {});
+
+// B-05 / B-06: 事前検査を通ったものだけを JUCE のパーサへ渡す。
+//   失敗時は nullptr を返し、reason に理由を入れる（既存の parse と同型）。
+std::unique_ptr<juce::XmlElement> parseXmlFile (const juce::File& file,
+                                                juce::String* reason = nullptr,
+                                                const XmlLimits& limits = {});
+
+// 保存側と読込側の上限を一致させるための判定。
+//   読込（inspectXmlFile）はファイルサイズを maxBytes と比較するので、保存側も
+//   UTF-8 のバイト数で同じ上限と比較する。文字数で比較すると、非 ASCII を含む
+//   文書で保存は通るが次回起動時に読込拒否される組み合わせが生じ得る。
+//   （JUCE の XML 出力は非 ASCII を &#NNNN; へエスケープするため実測では一致するが、
+//     契約としてはバイト数で揃える。）
+inline bool isXmlTextWithinLimit (const juce::String& text, const XmlLimits& limits = {})
+{
+    return static_cast<juce::int64> (text.getNumBytesAsUTF8()) <= limits.maxBytes;
+}
+
+} // namespace convo::safeinput
+
+```
+
 ### 📄 `src\IRAnalyzer.cpp`
 
 ```
@@ -85869,12 +86813,56 @@ namespace IRAnalyzer
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
+#include <new>
 
 #include <mkl.h>
 #include <mkl_cblas.h>
 #include "DiagnosticsConfig.h"
+#include "convolver/IRLoadAdmission.h"
+#include "InputInspection.h"
+#include "convolver/IRTrailingSilence.h"
+
+namespace
+{
+// LoaderThread の kStreamChunk と同一。入力の float 一時バッファを固定長に抑える。
+constexpr int kIRStreamChunk = 256 * 1024;
+
+// B-01: 同時に確保する double/float バッファの合計を、既存の kMaxIRLoadBytes（1 GiB）で
+// 制約する。bytesPerSample はその経路で同時に生きる double 本数（8 = 1 本、16 = 2 本、
+// 24 = 3 本）。除算形で評価し、未検証値の積を作らない。
+bool admitWorkingSet (int64_t channels, int64_t samples, int64_t bytesPerSample,
+                      int64_t extraBytes, juce::String& why)
+{
+    if (channels < 1 || samples < 1 || bytesPerSample < 1 || extraBytes < 0)
+        return false;
+
+    const int64_t budget = convo::irload::kMaxIRLoadBytes;
+
+    if (extraBytes > budget)
+    {
+        why = "IR too large: transient buffers exceed the load budget";
+        return false;
+    }
+
+    const int64_t perSample = channels * bytesPerSample;
+    if (perSample <= 0)
+        return false;
+
+    if (samples > (budget - extraBytes) / perSample)
+    {
+        why = "IR too large: working set (" + juce::String (channels * samples * bytesPerSample
+                                                           + extraBytes)
+              + " bytes) exceeds the load budget (" + juce::String (budget) + " bytes)";
+        return false;
+    }
+
+    return true;
+}
+} // namespace
 
 //==============================================================================
 // ★ v14.0: 第1段 — Energy 補正（基本 scaleFactor + safetyMargin）
@@ -86062,53 +87050,114 @@ IRConverter::ScaleFactorResult IRConverter::computeScaleFactor(const juce::Audio
 
 bool IRConverter::loadAudioFile(const juce::File& file,
                                 juce::AudioBuffer<double>& out,
-                                double& sampleRateOut)
+                                double& sampleRateOut,
+                                juce::String* errorOut)
 {
-    if (!file.existsAsFile())
+    const auto fail = [errorOut](const juce::String& why)
+    {
+        if (errorOut != nullptr)
+            *errorOut = why;
+
         return false;
+    };
+
+    if (!file.existsAsFile())
+        return fail ("IR file not found: " + file.getFileName());
+
+    // ★ B-04: JUCE の WAV リーダーはメタデータチャンクの宣言長で確保するため、
+    //   createReaderFor の前にチャンク境界を検査する。
+    {
+        juce::String riffReason;
+
+        if (!convo::safeinput::inspectRiffChunkBounds (file, &riffReason))
+            return fail (riffReason);
+    }
 
     juce::AudioFormatManager fm;
     fm.registerBasicFormats();
 
-    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
-    if (!reader)
-        return false;
+    std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor(file));
+    if (reader == nullptr)
+        return fail ("Unsupported or unreadable IR file: " + file.getFileName());
 
-    const int64 n = reader->lengthInSamples;
-    // ★ C-06: a declared length alone must not drive an unbounded allocation. 2^24
-    //   samples is ~5.8 minutes at 48 kHz and far beyond any usable IR; larger files are
-    //   rejected before the work buffers are created.
-    static constexpr int64 kMaxIrSamples = int64{1} << 24;
-    if (n <= 0 || n > kMaxIrSamples)
+    // ★ B-01: 同期経路にも凍結済み admission を適用する（LoaderThread と同一契約）。
+    //   narrow する前に unsigned / int64 の値で判定する（FC-INV-9 の順序）。
+    const unsigned numChannels = reader->numChannels;
+    const juce::int64 fileLength = reader->lengthInSamples;
+
+    if (! convo::irload::admitChannelCountNonZero (numChannels))
+        return fail (convo::irload::diagnosticChannelLimit (numChannels));
+
+    if (! convo::irload::admitFileLengthNonZero (fileLength))
+        return fail (convo::irload::diagnosticLengthLimit (fileLength));
+
+    if (! convo::irload::admitFileLengthRepresentable (fileLength))
+        return fail (convo::irload::diagnosticLengthLimit (fileLength));
+
+    if (! convo::irload::admitChannelCount (numChannels))
+        return fail (convo::irload::diagnosticChannelLimit (numChannels));
+
+    if (! convo::irload::admitByteBudget (numChannels, fileLength))
+        return fail (convo::irload::diagnosticByteLimit (numChannels, fileLength));
+
+    // ★ C-06: 宣言長だけで無制限に確保させない。2^24 標本は 48 kHz で約 5.8 分で、
+    //   実用的な IR より十分に長い。作業バッファを作る前に拒否する。
+    static constexpr juce::int64 kMaxIrSamples = juce::int64{1} << 24;
+    if (fileLength > kMaxIrSamples)
     {
-        juce::Logger::writeToLog("[DIAG_IR] loadAudioFile: rejected length=" + juce::String(n));
-        return false;
+        juce::Logger::writeToLog("[DIAG_IR] loadAudioFile: rejected length=" + juce::String(fileLength));
+        return fail ("IR file is too long: " + file.getFileName());
     }
 
-    const int channels = static_cast<int>(reader->numChannels);
-    if (channels <= 0 || channels > 8)
-        return false;
+    // ★ B-01: 実行時に同時に確保する量（double IR 8·ch·N ＋ float chunk 4·ch·chunk）も
+    //   既存の kMaxIRLoadBytes で制約する。新しい上限値は導入しない。
+    const juce::int64 chunkSamples = std::min<juce::int64> (fileLength, kIRStreamChunk);
+    {
+        juce::String why;
+
+        if (! admitWorkingSet (static_cast<int64_t> (numChannels), fileLength, 8,
+                               static_cast<int64_t> (numChannels) * chunkSamples * 4, why))
+            return fail (why);
+    }
+
+    const int channels = static_cast<int> (numChannels);
+    const int totalSamples = static_cast<int> (fileLength);
 
     try
     {
-        juce::AudioBuffer<float> temp(channels, static_cast<int>(n));
-        if (!reader->read(&temp, 0, static_cast<int>(n), 0, true, true))
-            return false;
+        // ★ B-01: 256K サンプル単位で float→double 変換する（LoaderThread の
+        //   kStreamChunk と同一）。float 一時バッファはチャンク分に固定され、
+        //   fileLength に比例しない。
+        juce::AudioBuffer<float> temp (channels, static_cast<int> (chunkSamples));
+        out.setSize (channels, totalSamples);
 
-        out.setSize(channels, static_cast<int>(n));
-        for (int ch = 0; ch < channels; ++ch)
+        for (juce::int64 offset = 0; offset < fileLength; offset += kIRStreamChunk)
         {
-            const float* src = temp.getReadPointer(ch);
-            double* dst = out.getWritePointer(ch);
-            for (int i = 0; i < static_cast<int>(n); ++i)
-                dst[i] = static_cast<double>(src[i]);
+            const int chunk = static_cast<int> (std::min<juce::int64> (kIRStreamChunk,
+                                                                      fileLength - offset));
+
+            if (! reader->read (&temp, 0, chunk, offset, true, true))
+                return fail ("Failed to read audio data from IR file: " + file.getFileName());
+
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                const float* src = temp.getReadPointer (ch);
+                double* dst = out.getWritePointer (ch);
+
+                for (int i = 0; i < chunk; ++i)
+                    dst[offset + i] = static_cast<double> (src[i]);
+            }
         }
     }
     catch (const std::bad_alloc&)
     {
-        juce::Logger::writeToLog("[DIAG_IR] loadAudioFile: out of memory for " + juce::String(n) + " samples");
-        return false;
+        return fail ("Not enough memory to load IR file: " + file.getFileName());
     }
+    catch (const std::exception& e)
+    {
+        return fail ("Failed to load IR file: " + file.getFileName() + " (" + e.what() + ")");
+    }
+
 
     sampleRateOut = reader->sampleRate;
     return true;
@@ -86116,15 +87165,37 @@ bool IRConverter::loadAudioFile(const juce::File& file,
 
 std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFile,
                                                           const ConvertConfig& config,
-                                                          const std::function<bool()>& shouldCancel) const
+                                                          const std::function<bool()>& shouldCancel,
+                                                          juce::String* errorOut) const
 {
+    const auto fail = [errorOut](const juce::String& why)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] convertFile: " + why);
+
+        if (errorOut != nullptr)
+            *errorOut = why;
+
+        return std::unique_ptr<PreparedIRState>();
+    };
+
     juce::AudioBuffer<double> ir;
     double sourceRate = 0.0;
-    if (!loadAudioFile(irFile, ir, sourceRate))
+    juce::String loadError;
+
+    try
     {
-        juce::Logger::writeToLog("[DIAG_IR] convertFile: loadAudioFile failed for "
-            + irFile.getFullPathName());
-        return nullptr;
+        if (! loadAudioFile (irFile, ir, sourceRate, &loadError))
+            return fail (loadError.isNotEmpty()
+                             ? loadError
+                             : ("Failed to load IR file: " + irFile.getFileName()));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return fail ("Not enough memory to load IR file: " + irFile.getFileName());
+    }
+    catch (const std::exception& e)
+    {
+        return fail ("Failed to load IR file: " + irFile.getFileName() + " (" + e.what() + ")");
     }
 
     if (shouldCancel && shouldCancel())
@@ -86133,29 +87204,101 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
         return nullptr;
     }
 
-    juce::AudioBuffer<double> converted = ir;
-    double actualSampleRate = sourceRate;
-    if (config.targetSampleRate > 0.0 && sourceRate > 0.0 && std::abs(sourceRate - config.targetSampleRate) > 1.0e-6)
+    const int loadedChannels = ir.getNumChannels();
+    const int rawSamples = ir.getNumSamples();
+
+    if (loadedChannels <= 0 || rawSamples <= 0)
+        return fail ("IR file contains no audio data: " + irFile.getFileName());
+
+    // ★ B-01 / B-02: 末尾無音トリムを本適用（LoaderThread）と同じ規則で行う。
+    //   トリム後の長さで FC-FORM-5 を評価し、resample するのもトリム後のバッファにする。
+    //   従来は同期経路だけトリムせず、全体長で判定していたため、無音テールの長い IR で
+    //   「プレビューは拒否、本適用は受理」という差が出ていた。
     {
-        converted = IRDSP::resampleIR(ir, sourceRate, config.targetSampleRate, shouldCancel);
+        const int trimmed = convo::irtrim::computeTrimmedLength (
+            ir.getReadPointer (0),
+            loadedChannels > 1 ? ir.getReadPointer (1) : nullptr,
+            rawSamples);
+        if (trimmed > 0 && trimmed < rawSamples)
+        {
+            ir.setSize (loadedChannels, trimmed, true);
+            juce::Logger::writeToLog ("[DIAG_IR] trailing silence trimmed: "
+                                      + juce::String (rawSamples) + " -> " + juce::String (trimmed));
+        }
+    }
+
+    const int loadedSamples = ir.getNumSamples();
+
+    const bool needsResample = config.targetSampleRate > 0.0 && sourceRate > 0.0
+                            && std::abs (sourceRate - config.targetSampleRate) > 1.0e-6;
+
+    // ★ B-01: resample 出力長の上限（FC-FORM-5）を resample の前に評価する。
+    //   この経路は末尾無音トリムを行わないため、評価対象は実際に resample する長さ
+    //   そのもの（loadedSamples）になる（設計書 §7.4 / §7.6）。
+    if (needsResample
+        && ! convo::irload::admitResampleOutput (loadedSamples, sourceRate, config.targetSampleRate))
+    {
+        return fail (convo::irload::diagnosticResampleLimit (loadedSamples, sourceRate,
+                                                             config.targetSampleRate));
+    }
+
+    juce::AudioBuffer<double> converted;
+    double actualSampleRate = sourceRate;
+
+    if (needsResample)
+    {
+        // 入力 8·ch·N と出力 8·ch·N′ が同時に生きるため、その合計を既存予算で制約する。
+        const juce::int64 estimatedOut =
+            static_cast<juce::int64> (std::ceil (static_cast<double> (loadedSamples)
+                                                 * config.targetSampleRate / sourceRate)) + 2;
+        {
+            juce::String why;
+
+            if (! admitWorkingSet (loadedChannels, estimatedOut, 8,
+                                   static_cast<int64_t> (loadedChannels) * loadedSamples * 8, why))
+                return fail (why);
+        }
+
+        try
+        {
+            converted = IRDSP::resampleIR (ir, sourceRate, config.targetSampleRate, shouldCancel);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return fail ("Not enough memory to resample IR file: " + irFile.getFileName());
+        }
+        catch (const std::exception& e)
+        {
+            return fail ("Failed to resample IR file: " + irFile.getFileName() + " (" + e.what() + ")");
+        }
+
         if (converted.getNumSamples() <= 0)
         {
             // ★ r8brain resample failed. IR data is at sourceRate, so label it
             //   accordingly. Previously this mislabeled as targetSampleRate,
             //   corrupting downstream frequency analysis.
             juce::Logger::writeToLog("[DIAG_IR] convertFile: resampleIR failed, "
-                "falling back to original IR (srcSr=" + juce::String(sourceRate, 1)
-                + " targetSr=" + juce::String(config.targetSampleRate, 1) + ")");
-            converted = ir;
+                "falling back to original IR (srcSr=" + juce::String (sourceRate, 1)
+                + " targetSr=" + juce::String (config.targetSampleRate, 1) + ")");
+            converted = std::move (ir);
             actualSampleRate = sourceRate;
         }
         else
         {
+            // ★ B-01: r8brain の丸め差があるため、実長でも上限を確認する。
+            if (converted.getNumSamples() > convo::irload::kMaxIRResampleOutputSamples)
+                return fail (convo::irload::diagnosticResampleLimit (converted.getNumSamples(),
+                                                                     config.targetSampleRate,
+                                                                     config.targetSampleRate));
+
             actualSampleRate = config.targetSampleRate;
+
+            ir = juce::AudioBuffer<double>(); // 入力はもう不要（後段の同時確保量を減らす・noexcept）
         }
     }
     else
     {
+        converted = std::move (ir);
         actualSampleRate = (config.targetSampleRate > 0.0) ? config.targetSampleRate : sourceRate;
     }
 
@@ -86165,87 +87308,129 @@ std::unique_ptr<PreparedIRState> IRConverter::convertFile(const juce::File& irFi
         return nullptr;
     }
 
-    const int fftSize = juce::jmax(32, config.fftSize);
-    const int usableChannels = juce::jmax(1, converted.getNumChannels());
+    const int fftSize = juce::jmax (32, config.fftSize);
+    const int usableChannels = juce::jmax (1, converted.getNumChannels());
     const int samples = converted.getNumSamples();
 
-    const int numPartitions = juce::jmax(1, (samples + fftSize - 1) / fftSize);
-    const size_t totalSamples = static_cast<size_t>(numPartitions) * static_cast<size_t>(fftSize) * static_cast<size_t>(usableChannels);
-    const size_t bytes = totalSamples * sizeof(double);
+    if (samples <= 0)
+        return fail ("IR file contains no samples: " + irFile.getFileName());
 
-    double* data = static_cast<double*>(DIAG_MKL_MALLOC(bytes, 64));
-    if (!data)
+    const int numPartitions = juce::jmax (1, (samples + fftSize - 1) / fftSize);
+    const juce::uint64 totalSamples = static_cast<juce::uint64> (numPartitions)
+                                    * static_cast<juce::uint64> (fftSize)
+                                    * static_cast<juce::uint64> (usableChannels);
+    const juce::uint64 bytes64 = totalSamples * static_cast<juce::uint64> (sizeof (double));
+
+    if (bytes64 > static_cast<juce::uint64> (std::numeric_limits<size_t>::max()))
+        return fail ("IR partition buffer size overflows: " + irFile.getFileName());
+
+    const size_t bytes = static_cast<size_t> (bytes64);
+
+    // ★ B-01: ピーク時に同時に生きるのは converted/IR(8·ch·N′)＋packed(8·ch·N′)＋
+    //   解析用コピー(8·ch·N′)。その合計を既存予算で制約する。
     {
-        juce::Logger::writeToLog("[DIAG_IR] convertFile: MKL_MALLOC failed bytes=" + juce::String(static_cast<int>(bytes)));
-        return nullptr;
+        juce::String why;
+
+        if (! admitWorkingSet (usableChannels, samples,
+                               static_cast<int64_t> (sizeof (double)) * 2,
+                               static_cast<int64_t> (bytes), why))
+            return fail (why);
+    }
+
+    double* data = static_cast<double*> (DIAG_MKL_MALLOC (bytes, 64));
+    if (data == nullptr)
+    {
+        juce::Logger::writeToLog("[DIAG_IR] convertFile: MKL_MALLOC failed bytes=" + juce::String (static_cast<int> (bytes)));
+        return fail ("Not enough memory for the IR partition buffer: " + irFile.getFileName());
     }
 
     std::memset(data, 0, bytes);
 
     for (int ch = 0; ch < usableChannels; ++ch)
     {
-        const double* src = converted.getReadPointer(ch);
+        const double* src = converted.getReadPointer (ch);
         for (int i = 0; i < samples; ++i)
         {
             if ((i & 0xF) == 0 && shouldCancel && shouldCancel())
             {
-                mkl_free(data);
+                DIAG_MKL_FREE (data, bytes);
                 return nullptr;
             }
 
-            const size_t idx = static_cast<size_t>(ch) * static_cast<size_t>(numPartitions) * static_cast<size_t>(fftSize)
-                             + static_cast<size_t>(i);
+            const size_t idx = static_cast<size_t> (ch) * static_cast<size_t> (numPartitions) * static_cast<size_t> (fftSize)
+                             + static_cast<size_t> (i);
             data[idx] = src[i];
         }
     }
 
-    auto prepared = std::make_unique<PreparedIRState>();
-    prepared->partitionData = data;
-    prepared->partitionSizeBytes = bytes;
-    prepared->numPartitions = numPartitions * usableChannels;
-    prepared->fftSize = fftSize;
-    prepared->numChannels = usableChannels;
-    prepared->sampleRate = actualSampleRate;
-    prepared->generationId = config.generationId;
-    prepared->cacheKey = config.cacheKey;
+    std::unique_ptr<PreparedIRState> prepared;
+    bool partitionOwned = false;
 
-    // 時間領域 IR を保持（UI 表示用）
-    // converted はリサンプリング済みの加工済み IR
-    prepared->timeDomainIR = std::make_unique<juce::AudioBuffer<double>>(std::move(converted));
-
-    if (prepared->timeDomainIR && prepared->timeDomainIR->getNumSamples() > 0)
+    try
     {
-        const auto scaleInfo = computeScaleFactor(*prepared->timeDomainIR);
-        prepared->scaleFactor = scaleInfo.scaleFactor;
-        prepared->hasScaleFactor = scaleInfo.hasScaleFactor;
-        prepared->additionalAttenuationDb = scaleInfo.additionalAttenuationDb;
+        prepared = std::make_unique<PreparedIRState>();
+        prepared->partitionData = data;
+        partitionOwned = true; // 以降の解放は PreparedIRState が担う
+        prepared->partitionSizeBytes = bytes;
+        prepared->numPartitions = numPartitions * usableChannels;
+        prepared->fftSize = fftSize;
+        prepared->numChannels = usableChannels;
+        prepared->sampleRate = actualSampleRate;
+        prepared->generationId = config.generationId;
+        prepared->cacheKey = config.cacheKey;
 
-        // ★ v14.2: IRAnalyzer による周波数ピークゲイン推定
-        //   scaledIR = timeDomainIR × scaleFactor を解析
-        juce::AudioBuffer<double> scaledIR(*prepared->timeDomainIR);
-        scaledIR.applyGain(prepared->scaleFactor);
+        // 時間領域 IR を保持（UI 表示用）
+        // converted はリサンプリング済みの加工済み IR
+        prepared->timeDomainIR = std::make_unique<juce::AudioBuffer<double>> (std::move (converted));
 
-        // Diagnostic: check if scaled IR has any data
+        if (prepared->timeDomainIR != nullptr && prepared->timeDomainIR->getNumSamples() > 0)
         {
-            double peak = 0.0;
-            for (int ch = 0; ch < scaledIR.getNumChannels(); ++ch) {
-                const double* d = scaledIR.getReadPointer(ch);
-                for (int i = 0; i < std::min(100, scaledIR.getNumSamples()); ++i)
-                    peak = std::max(peak, std::abs(d[i]));
-            }
-            juce::Logger::writeToLog("[DIAG_SCALE] scaleFactor=" + juce::String(prepared->scaleFactor, 6)
-                + " scaledPeak=" + juce::String(peak, 8)
-                + " timeDomainSamples=" + juce::String(prepared->timeDomainIR->getNumSamples()));
-        }
+            const auto scaleInfo = computeScaleFactor (*prepared->timeDomainIR);
+            prepared->scaleFactor = scaleInfo.scaleFactor;
+            prepared->hasScaleFactor = scaleInfo.hasScaleFactor;
+            prepared->additionalAttenuationDb = scaleInfo.additionalAttenuationDb;
 
-        const double freqPeakLin = IRAnalyzer::estimateMaxFrequencyResponseGain(scaledIR);
-        prepared->irFreqPeakGainDb = (freqPeakLin > 1e-18)
-            ? static_cast<float>(20.0 * std::log10(freqPeakLin))
-            : 0.0f;
-        juce::Logger::writeToLog("[DIAG_IR_FREQ] freqPeakLin=" + juce::String(freqPeakLin, 8)
-            + " irFreqPeakGainDb=" + juce::String(prepared->irFreqPeakGainDb, 2)
-            + " scaleFactor=" + juce::String(prepared->scaleFactor, 6)
-            + " sampleRate=" + juce::String(prepared->sampleRate, 1));
+            // ★ v14.2: IRAnalyzer による周波数ピークゲイン推定
+            //   scaledIR = timeDomainIR × scaleFactor を解析
+            juce::AudioBuffer<double> scaledIR (*prepared->timeDomainIR);
+            scaledIR.applyGain (prepared->scaleFactor);
+
+            // Diagnostic: check if scaled IR has any data
+            {
+                double peak = 0.0;
+                for (int ch = 0; ch < scaledIR.getNumChannels(); ++ch) {
+                    const double* d = scaledIR.getReadPointer (ch);
+                    for (int i = 0; i < std::min (100, scaledIR.getNumSamples()); ++i)
+                        peak = std::max (peak, std::abs (d[i]));
+                }
+                juce::Logger::writeToLog("[DIAG_SCALE] scaleFactor=" + juce::String (prepared->scaleFactor, 6)
+                    + " scaledPeak=" + juce::String (peak, 8)
+                    + " timeDomainSamples=" + juce::String (prepared->timeDomainIR->getNumSamples()));
+            }
+
+            const double freqPeakLin = IRAnalyzer::estimateMaxFrequencyResponseGain (scaledIR);
+            prepared->irFreqPeakGainDb = (freqPeakLin > 1e-18)
+                ? static_cast<float> (20.0 * std::log10 (freqPeakLin))
+                : 0.0f;
+            juce::Logger::writeToLog("[DIAG_IR_FREQ] freqPeakLin=" + juce::String (freqPeakLin, 8)
+                + " irFreqPeakGainDb=" + juce::String (prepared->irFreqPeakGainDb, 2)
+                + " scaleFactor=" + juce::String (prepared->scaleFactor, 6)
+                + " sampleRate=" + juce::String (prepared->sampleRate, 1));
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        if (! partitionOwned)
+            DIAG_MKL_FREE (data, bytes);
+
+        return fail ("Not enough memory to prepare the IR (partition/analysis): " + irFile.getFileName());
+    }
+    catch (const std::exception& e)
+    {
+        if (! partitionOwned)
+            DIAG_MKL_FREE (data, bytes);
+
+        return fail ("Failed to prepare the IR: " + irFile.getFileName() + " (" + e.what() + ")");
     }
 
     return prepared;
@@ -86313,7 +87498,8 @@ public:
 
     std::unique_ptr<PreparedIRState> convertFile(const juce::File& irFile,
                                                  const ConvertConfig& config,
-                                                 const std::function<bool()>& shouldCancel) const;
+                                                 const std::function<bool()>& shouldCancel,
+                                                 juce::String* errorOut = nullptr) const;
 
     std::unique_ptr<PreparedIRState> convertToHighRes(const juce::File& irFile,
                                                       double sampleRate,
@@ -86333,7 +87519,8 @@ public:
 private:
     static bool loadAudioFile(const juce::File& file,
                               juce::AudioBuffer<double>& out,
-                              double& sampleRateOut);
+                              double& sampleRateOut,
+                              juce::String* errorOut = nullptr);
 };
 
 ```
@@ -86825,6 +88012,217 @@ private:
 #if defined(_MSC_VER)
 #pragma warning(pop) // C4324 suppression scope end: Intentional alignas padding for cache-line isolation / alignas による意図的なパディングを許容
 #endif
+
+```
+
+### 📄 `src\learner\LearnedStateMigration.cpp`
+
+```
+#include "learner/LearnedStateMigration.h"
+
+#include <cmath>
+
+#include "InputInspection.h"
+
+namespace convo::learnedstate
+{
+
+VersionInfo readVersion (const juce::XmlElement& root) noexcept
+{
+    VersionInfo info;
+
+    if (root.hasAttribute (kVersionAttribute))
+    {
+        info.version = root.getIntAttribute (kVersionAttribute, 0);
+        info.legacyV1 = (info.version == 1);
+        return info;
+    }
+
+    // version 属性が無い = 旧形式か新形式かを値から決められない。
+    info.version = 0;
+    info.legacyUnknown = true;
+    return info;
+}
+
+namespace
+{
+bool convertCoefficient (double stored, double& parcorOut) noexcept
+{
+    // 旧形式は c = tanh(parcor)。|c| >= 1 は旧形式ではあり得ず、atanh も取れない。
+    if (! std::isfinite (stored) || std::abs (stored) >= 1.0)
+        return false;
+
+    const double parcor = std::atanh (stored);
+    if (! std::isfinite (parcor))
+        return false;
+
+    // 逆変換の検証（浮動小数の丸め誤差のみ許す）。
+    if (std::abs (std::tanh (parcor) - stored) > 1.0e-12)
+        return false;
+
+    parcorOut = parcor;
+    return true;
+}
+} // namespace
+
+MigrationResult migrateFile (const juce::File& file)
+{
+    MigrationResult result;
+
+    if (! file.existsAsFile())
+    {
+        result.message = "learned state file not found: " + file.getFullPathName();
+        return result;
+    }
+
+    juce::String reason;
+    auto xml = convo::safeinput::parseXmlFile (file, &reason);
+    if (xml == nullptr || ! xml->hasTagName ("ConvoPeqLearnedState"))
+    {
+        result.message = "not a ConvoPeq learned state file: "
+                         + (reason.isNotEmpty() ? reason : file.getFileName());
+        return result;
+    }
+
+    const auto info = readVersion (*xml);
+    if (info.version > kCurrentVersion)
+    {
+        result.message = "unknown version " + juce::String (info.version)
+                         + " (supported: <= " + juce::String (kCurrentVersion) + "); refusing to modify";
+        return result;
+    }
+
+    if (info.version >= kCurrentVersion)
+    {
+        result.ok = true;
+        result.changed = false;
+        result.message = "already version " + juce::String (kCurrentVersion) + "; nothing to do";
+        return result;
+    }
+
+    // 係数の変換（BestCoefficients のみ。CmaMean は対象外）。
+    double converted[kMaxCoefficients] {};
+    int convertedCount = 0;
+
+    if (auto* coeffs = xml->getChildByName ("BestCoefficients"))
+    {
+        for (int i = 0; i < kMaxCoefficients; ++i)
+        {
+            const juce::String name = "c" + juce::String (i);
+            if (! coeffs->hasAttribute (name))
+                break;
+
+            if (! convertCoefficient (coeffs->getDoubleAttribute (name), converted[i]))
+            {
+                result.message = "coefficient " + name
+                                 + " cannot be converted (value out of range or not finite); file left unchanged";
+                return result;
+            }
+            ++convertedCount;
+        }
+    }
+
+    // 変換結果を書き戻す。
+    if (auto* coeffs = xml->getChildByName ("BestCoefficients"))
+    {
+        for (int i = 0; i < convertedCount; ++i)
+            coeffs->setAttribute ("c" + juce::String (i), converted[i]);
+    }
+
+    xml->setAttribute (kVersionAttribute, kCurrentVersion);
+    xml->setAttribute (kConversionAttribute, kConversionParcor);
+
+    // バックアップ（元データを失わない）。
+    const auto backup = file.getSiblingFile (
+        file.getFileName() + ".bak-" + juce::String (juce::Time::currentTimeMillis()));
+    if (! file.copyFileTo (backup))
+    {
+        result.message = "failed to create backup: " + backup.getFullPathName();
+        return result;
+    }
+
+    // 一時ファイルへ書いてから原子的に置換する。
+    const auto temp = file.getParentDirectory()
+                          .getNonexistentChildFile (file.getFileNameWithoutExtension() + "-migrate", ".tmp", false);
+    if (! temp.replaceWithText (xml->toString()))
+    {
+        temp.deleteFile();
+        result.message = "failed to write temporary file: " + temp.getFullPathName();
+        return result;
+    }
+
+    if (! temp.replaceFileIn (file))
+    {
+        temp.deleteFile();
+        result.message = "failed to replace the original file atomically; original kept, backup at "
+                         + backup.getFullPathName();
+        return result;
+    }
+
+    result.ok = true;
+    result.changed = true;
+    result.message = "migrated to version " + juce::String (kCurrentVersion)
+                     + " (backup: " + backup.getFileName() + ")";
+    return result;
+}
+
+} // namespace convo::learnedstate
+
+```
+
+### 📄 `src\learner\LearnedStateMigration.h`
+
+```
+#pragma once
+
+// ★ B-15: 学習係数ファイル（learned_state.xml）の version 管理と明示移行。
+//
+//   背景:
+//     - B-15 の修正前は、公開係数に tanh を二重に掛けていた。修正後は parcor を
+//       そのまま保存する。保存形式に version が無かったため、既存ファイルが
+//       旧形式（二重 tanh 済み）か新形式（parcor）かを値だけでは識別できない。
+//     - 旧形式の値域は |c| < tanh(1) = 0.7616、新形式は |c| < 1.0 であり重なる。
+//       したがって version 無しのファイルを自動変換してはいけない。
+//
+//   方針:
+//     - 新規保存は version="2" / conversion="parcor" を付ける。
+//     - version 無しは legacyUnknown として読み込み、値は変更せず警告する。
+//     - 変換はユーザー／管理者の明示操作（migrateFile）でのみ行う。
+//       変換は可逆（parcor = atanh(c)）で、検証とバックアップを伴う。
+//     - CmaMean（optimizer の平均）は二重変換の影響を受けないため変換しない。
+
+#include <JuceHeader.h>
+
+namespace convo::learnedstate
+{
+
+inline constexpr int kCurrentVersion = 2;
+inline constexpr const char* kVersionAttribute = "version";
+inline constexpr const char* kConversionAttribute = "conversion";
+inline constexpr const char* kConversionParcor = "parcor";
+inline constexpr int kMaxCoefficients = 16;   // 学習器の kOrder(9) に対する安全上限
+
+struct VersionInfo
+{
+    int version = 0;             // 0 = version 属性なし
+    bool legacyUnknown = false;  // 属性なし: 旧形式か新形式か不明
+    bool legacyV1 = false;       // version="1" が明示されている
+};
+
+VersionInfo readVersion (const juce::XmlElement& root) noexcept;
+
+struct MigrationResult
+{
+    bool ok = false;
+    bool changed = false;
+    juce::String message;
+};
+
+// 明示操作専用。version < 2 のファイルだけを対象に、係数を atanh で戻して
+// version=2 として保存する。失敗時は元ファイルを変更しない。
+MigrationResult migrateFile (const juce::File& file);
+
+} // namespace convo::learnedstate
 
 ```
 
@@ -87481,7 +88879,8 @@ static constexpr double kRlbBiquad[5] = {
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
 #include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
-#include "audioengine/ISREvidenceExporter.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
+#include "audioengine/ISREvidenceExporter.h"
+#include "audioengine/ISRDebugRuntime.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -87503,6 +88902,7 @@ static constexpr double kRlbBiquad[5] = {
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #include <processthreadsapi.h> // For disabling efficiency mode
+#include "learner/LearnedStateMigration.h"
 
 // Windows 11 Efficiency Mode (EcoQoS) API definitions for older SDKs
 #ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
@@ -87593,10 +88993,29 @@ void MainApplication::initialise(const juce::String& commandLine)
     }
 
     if (! liveRuntimeEvidenceRequested && commandLine.contains("--verify-runtime-evidence"))
+
     {
         convo::isr::EvidenceExporter evidenceExporter;
         evidenceExporter.exportEvidence(nullptr, 0);
         juce::Logger::writeToLog("[verify-runtime-evidence] runtime evidence exported");
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
+
+    // ★ B-15: 学習係数ファイルの明示移行。version 無しのファイルを atanh で
+    //   旧形式から戻し、version=2 として保存する（バックアップ付き・原子的置換）。
+    //   自動では行わない。ユーザー／管理者がこのフラグを明示したときだけ実行する。
+    if (commandLine.contains("--migrate-learned-state"))
+    {
+        const auto stateFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                   .getChildFile("ConvoPeq")
+                                   .getChildFile("learned_state.xml");
+        const auto result = convo::learnedstate::migrateFile(stateFile);
+        const juce::String cliLine = juce::String("[migrate-learned-state] ")
+            + (result.ok ? (result.changed ? "migrated" : "no-change") : "failed")
+            + ": " + result.message;
+        std::puts(cliLine.toRawUTF8());
+        juce::Logger::writeToLog("[migrate-learned-state] " + result.message);
         juce::JUCEApplicationBase::quit();
         return;
     }
@@ -87904,6 +89323,7 @@ private:
 #include "MainApplication.h"
 #include <cmath>
 #include <limits>
+#include "InputInspection.h"   // ★ B-05/B-06: XML のサイズ・深さ検査
 #include "audioengine/AtomicAccess.h"
 
 namespace
@@ -88205,20 +89625,45 @@ MainWindow::MainWindow (const juce::String& name)
 
     // デフォルトのブラックリストファイルを作成（存在しない場合）
     // シングルクライアントASIOや不安定なドライバをデフォルトで除外
-    if (! blacklistFile.existsAsFile())
+    constexpr const char* kDefaultAsioBlacklist =
+        "# ASIO Driver Blacklist\n"
+        "# Add partial driver names to exclude them from the list.\n"
+        "BRAVO-HD\n"
+        "ASIO4ALL\n";
+
+    // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
+    //   作成に失敗する。従来は無言で空リストのまま起動していた。ユーザー領域へ
+    //   フォールバックし、それも失敗したら UI に通知する。
+    bool blacklistReady = blacklistFile.existsAsFile()
+                          || (blacklistFile.replaceWithText (kDefaultAsioBlacklist)
+                              && blacklistFile.existsAsFile());
+
+    if (! blacklistReady)
     {
         // ★ C-16: 書込み失敗を無視すると、存在しないファイルを loadFromFile して
         //   「ブラックリストが空」のまま起動する。失敗はログに残す。
-        const bool created = blacklistFile.replaceWithText ("# ASIO Driver Blacklist\n"
-                                                            "# Add partial driver names to exclude them from the list.\n"
-                                                            "BRAVO-HD\n"
-                                                            "ASIO4ALL\n");
-        if (! created)
-            juce::Logger::writeToLog ("[ASIO] blacklist file could not be created: "
-                                      + blacklistFile.getFullPathName());
+        juce::Logger::writeToLog ("[ASIO] blacklist file could not be created: "
+                                  + blacklistFile.getFullPathName());
+
+        // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
+        //   作成に失敗する。ユーザー領域へフォールバックし、それも失敗したら UI に通知する。
+        auto userFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                            .getChildFile ("ConvoPeq")
+                            .getChildFile ("asio_blacklist.txt");
+
+        userFile.getParentDirectory().createDirectory();
+        blacklistReady = userFile.existsAsFile()
+                         || (userFile.replaceWithText (kDefaultAsioBlacklist)
+                             && userFile.existsAsFile());
+
+        if (blacklistReady)
+        {
+            blacklistFile = userFile;
+            juce::Logger::writeToLog ("[MainWindow] ASIO blacklist fell back to: "
+                                      + userFile.getFullPathName());
+        }
     }
 
-    asioBlacklist.loadFromFile (blacklistFile);
     DeviceSettings::applyAsioBlacklist (audioDeviceManager, asioBlacklist);
 
     // エンジンを先に初期化してデフォルトのサンプルレート(48kHz)を設定
@@ -88345,7 +89790,15 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         || !findValue("--cli-ir-alt-a").isEmpty()
         || !findValue("--cli-ir-alt-b").isEmpty()
         || !findValue("--cli-exit-ms").isEmpty()
-        || !findValue("--cli-log-file").isEmpty();
+        || !findValue("--cli-log-file").isEmpty()
+        || !findValue("--cli-measure-ir").isEmpty()
+        || !findValue("--cli-measure-async-load-count").isEmpty()
+        || !findValue("--cli-measure-late-load-at-ms").isEmpty()
+        || !findValue("--cli-measure-bypass-from-ms").isEmpty()
+        || !findValue("--cli-measure-bypass-span-ms").isEmpty()
+        || !findValue("--cli-measure-eq-from-ms").isEmpty()
+        || !findValue("--cli-measure-eq-span-ms").isEmpty()
+        || hasFlag("--cli-measure-enable-upgrade");
 
     // ★ v14.47: --cli-log-file <path> — 診断ログをファイルに出力
     if (const auto logFileValue = findValue("--cli-log-file"); !logFileValue.isEmpty())
@@ -88379,6 +89832,111 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
         cliRequestedBufferSamples = 0;
         cliRequestedSampleRateHz = 0.0;
         return;
+    }
+
+    // ★ 計測専用（既定 OFF）: 走行中 Worker を作る opt-in 経路。
+    //   --cli-measure-ir / --cli-measure-async-load-count / --cli-measure-enable-upgrade を
+    //   指定したときだけ動く。通常実行では何もしない（production 挙動不変）。
+    if (const auto measureIr = findValue("--cli-measure-ir"); !measureIr.isEmpty())
+    {
+        const auto irFile = juce::File::getCurrentWorkingDirectory().getChildFile (measureIr);
+        const int asyncCount = findValue("--cli-measure-async-load-count").getIntValue();
+        const int asyncIntervalMs = juce::jmax (50, findValue("--cli-measure-async-load-interval-ms").getIntValue());
+        const bool enableUpgrade = hasFlag ("--cli-measure-enable-upgrade");
+        juce::Component::SafePointer<MainWindow> safeThis (this);
+
+        if (enableUpgrade)
+            audioEngine.getConvolverProcessor().setEnableProgressiveUpgrade (true);
+
+        for (int i = 0; asyncCount > 0 && i < juce::jlimit (1, 64, asyncCount); ++i)
+        {
+            juce::Timer::callAfterDelay (300 + i * asyncIntervalMs, [safeThis, irFile, enableUpgrade]()
+            {
+                if (auto* w = safeThis.getComponent())
+                {
+                    auto& proc = w->getAudioEngine()->getConvolverProcessor();
+
+                    if (enableUpgrade)
+                    {
+                        // 設定ロードで false に戻されることがあるため、各回の直前に立て直す。
+                        proc.setEnableProgressiveUpgrade (true);
+                        proc.loadIR (irFile);          // → startProgressiveUpgrade（W6 を作る）
+                    }
+                    else
+                    {
+                        proc.loadImpulseResponse (irFile, false);   // → LoaderThread（W5 を作る）
+                    }
+                }
+            });
+        }
+
+        // 計測専用の負荷: 指定時刻から bypass と EQ gain を交互に切り替える（競合状態の再現）。
+        if (const auto fromMs = findValue("--cli-measure-bypass-from-ms"); !fromMs.isEmpty())
+        {
+            const int from = juce::jlimit (0, 600000, fromMs.getIntValue());
+            constexpr int kIntervalMs = 5;
+            const int kSpanMs = juce::jlimit (20, 5000,
+                findValue ("--cli-measure-bypass-span-ms").getIntValue() > 0
+                    ? findValue ("--cli-measure-bypass-span-ms").getIntValue() : 2000);
+            for (int i = 0; i < kSpanMs / kIntervalMs; ++i)
+            {
+                juce::Timer::callAfterDelay (from + i * kIntervalMs,
+                                             [safeThis, i]()
+                {
+                    if (auto* w = safeThis.getComponent())
+                    {
+                        // bypass のみを切り替える（EQ gain の切替は submitRebuildIntent を
+                        // 誘発して進行中ロードをキャンセルするため、この条件には含めない）。
+                        w->getAudioEngine()->setConvolverBypassRequested ((i % 2) == 0);
+                    }
+                });
+            }
+        }
+
+        // 計測専用の負荷（EQ gain 切替）: submitRebuildIntent を誘発する条件。
+        if (const auto eqFromMs = findValue ("--cli-measure-eq-from-ms"); !eqFromMs.isEmpty())
+        {
+            const int from = juce::jlimit (0, 600000, eqFromMs.getIntValue());
+            constexpr int kIntervalMs = 5;
+            const int spanMs = juce::jlimit (20, 5000,
+                findValue ("--cli-measure-eq-span-ms").getIntValue() > 0
+                    ? findValue ("--cli-measure-eq-span-ms").getIntValue() : 260);
+            for (int i = 0; i < spanMs / kIntervalMs; ++i)
+            {
+                juce::Timer::callAfterDelay (from + i * kIntervalMs,
+                                             [safeThis, i]()
+                {
+                    if (auto* w = safeThis.getComponent())
+                        w->getAudioEngine()->setEQBandGain (0, ((i % 2) == 0) ? 0.0f : 3.0f);
+                });
+            }
+        }
+
+        // 終了直前に 1 回だけロードして、shutdown 時点で走行中の Worker を作る。
+        if (const auto lateMs = findValue("--cli-measure-late-load-at-ms"); !lateMs.isEmpty())
+        {
+            const int atMs = juce::jlimit (100, 600000, lateMs.getIntValue());
+            juce::Timer::callAfterDelay (atMs, [safeThis, irFile, enableUpgrade]()
+            {
+                if (auto* w = safeThis.getComponent())
+                {
+                    auto& proc = w->getAudioEngine()->getConvolverProcessor();
+                    if (enableUpgrade)
+                    {
+                        proc.setEnableProgressiveUpgrade (true);
+                        proc.loadIR (irFile);
+                    }
+                    else
+                    {
+                        proc.loadImpulseResponse (irFile, false);
+                    }
+                }
+            });
+        }
+    }
+    else if (hasFlag ("--cli-measure-enable-upgrade"))
+    {
+        audioEngine.getConvolverProcessor().setEnableProgressiveUpgrade (true);
     }
 
     juce::Logger::writeToLog("[CLI] Automation requested: " + trimmedCommandLine);
@@ -89281,15 +90839,22 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     burstBypassValue = (parsedValue != 0);
             }
 
+            // ★ A(D1): 交互バースト（毎回値を反転する）。同一値の連投では publish が
+            //   起きない場合があるため、測定用の駆動として明示的に交互切替を選べるようにする。
+            bool burstAlternate = false;
+            if (const auto alternateValue = findValue("--cli-bypass-burst-alternate"); !alternateValue.isEmpty())
+                burstAlternate = (alternateValue != "0");
+
             juce::Logger::writeToLog("[CLI] Scheduled bypass burst: count="
                                      + juce::String(burstCount)
                                      + " intervalMs=" + juce::String(burstIntervalMs)
-                                     + " value=" + juce::String(static_cast<int>(burstBypassValue)));
+                                     + " value=" + juce::String(static_cast<int>(burstBypassValue))
+                                     + " alternate=" + juce::String(static_cast<int>(burstAlternate)));
 
             for (int i = 0; i < burstCount; ++i)
             {
                 const int delayMs = i * burstIntervalMs;
-                juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), burstBypassValue]
+                juce::Timer::callAfterDelay(delayMs, [safeThis = juce::Component::SafePointer<MainWindow>(this), burstBypassValue, burstAlternate, i]
                 {
                     if (safeThis == nullptr)
                         return;
@@ -89297,7 +90862,10 @@ void MainWindow::runCommandLineAutomation(const juce::String& commandLine)
                     if (!convo::consumeAtomic(safeThis->cliAutomationCallbacksEnabled, std::memory_order_acquire))
                         return;
 
-                    safeThis->audioEngine.setConvolverBypassRequested(burstBypassValue);
+                    const bool requested = burstAlternate
+                                             ? (((i % 2) == 0) ? burstBypassValue : ! burstBypassValue)
+                                             : burstBypassValue;
+                    safeThis->audioEngine.setConvolverBypassRequested(requested);
                 });
             }
         }
@@ -90033,9 +91601,42 @@ void MainWindow::launchFileChooserImpl(bool isSaving)
         if (isSaving)
         {
             auto state = safeThis->audioEngine.getCurrentState();
+
+            // ★ 保存失敗はユーザーに明示する。原因の詳細はログに残し、
+            //   通知文言は原因ごとに増やさず統一する（保存が完了しなかったことを明示）。
+            const auto notifySaveFailure = [] (const juce::String& detail)
+            {
+                juce::Logger::writeToLog ("[MainWindow] preset XML save rejected: " + detail);
+
+                juce::NativeMessageBox::showAsync (
+                    juce::MessageBoxOptions()
+                        .withIconType (juce::MessageBoxIconType::WarningIcon)
+                        .withTitle ("Preset not saved")
+                        .withMessage ("The preset was not saved. The existing file was left unchanged.")
+                        .withButton ("OK"),
+                    nullptr);
+            };
+
             if (auto xml = state.createXml())
             {
-                xml->writeTo(file);
+                const juce::String xmlText = xml->toString();
+
+                // ★ 上限判定は読込側と同じ関数・同じ単位（UTF-8 バイト数）で行う。
+                //   超過時は writeTo を呼ばない（既存ファイルに触れない）。
+                if (! convo::safeinput::isXmlTextWithinLimit (xmlText))
+                {
+                    notifySaveFailure ("size " + juce::String (static_cast<juce::int64> (xmlText.getNumBytesAsUTF8()))
+                                       + " bytes exceeds the limit of "
+                                       + juce::String (convo::safeinput::kMaxXmlFileBytes) + " bytes");
+                }
+                else if (! xml->writeTo (file))
+                {
+                    notifySaveFailure ("write failed: " + file.getFullPathName());
+                }
+            }
+            else
+            {
+                notifySaveFailure ("state could not be serialized");
             }
         }
         else // 読み込み中
@@ -90044,11 +91645,31 @@ void MainWindow::launchFileChooserImpl(bool isSaving)
             {
                 if (file.hasFileExtension(".xml"))
                 {
-                    if (auto xml = juce::XmlDocument::parse(file))
+                    // ★ B-06: プリセット／セッション XML は解析前にサイズ・深さ・DOCTYPE を検査する。
+                    //   拒否理由はログと UI の両方へ出す（silent skip にしない）。
+                    juce::String xmlReason;
+
+                    if (auto xml = convo::safeinput::parseXmlFile(file, &xmlReason))
                     {
                         auto state = juce::ValueTree::fromXml(*xml);
                         if (state.isValid())
                             safeThis->audioEngine.requestLoadState(state);
+                    }
+                    else
+                    {
+                        const juce::String why = xmlReason.isNotEmpty()
+                                                     ? xmlReason
+                                                     : ("Preset XML could not be read: " + file.getFileName());
+
+                        juce::Logger::writeToLog("[MainWindow] preset XML rejected: " + why);
+
+                        juce::NativeMessageBox::showAsync(
+                            juce::MessageBoxOptions()
+                                .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                .withTitle("Preset not loaded")
+                                .withMessage(why)
+                                .withButton("OK"),
+                            nullptr);
                     }
                 }
                 else if (file.hasFileExtension(".txt"))
@@ -90195,6 +91816,10 @@ private:
     int cliRequestedBufferSamples { 0 };
     double cliRequestedSampleRateHz { 0.0 };
     std::unique_ptr<juce::DocumentWindow> settingsWindow;
+
+    // ★ B-14: --cli-log-file 用の FileLogger。Logger::setCurrentLogger は
+    //   所有権を取らないため、自前で保持してデストラクタで外す。
+    std::unique_ptr<juce::FileLogger> cliLogFileLogger;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
 };
@@ -95159,6 +96784,8 @@ private:
 ```
 #include "NoiseShaperLearner.h"
 #include "AudioEngine.h"
+#include "InputInspection.h"               // ★ B-05: XML のサイズ・深さ検査
+#include "learner/LearnedStateMigration.h"   // ★ B-15: 形式の世代
 #include "core/ThreadAffinityManager.h"
 #include <JuceHeader.h>
 
@@ -96660,6 +98287,9 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 {
     juce::XmlElement xml("ConvoPeqLearnedState");
+    // ★ B-15: 形式の世代を明示する。version 無しは legacyUnknown として扱われる。
+    xml.setAttribute(convo::learnedstate::kVersionAttribute, convo::learnedstate::kCurrentVersion);
+    xml.setAttribute(convo::learnedstate::kConversionAttribute, convo::learnedstate::kConversionParcor);
     xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore, std::memory_order_acquire));
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
@@ -96681,9 +98311,31 @@ bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 
 bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
 {
-    auto xml = juce::XmlDocument::parse(file);
+    auto xml = convo::safeinput::parseXmlFile(file);
     if (xml == nullptr || !xml->hasTagName("ConvoPeqLearnedState"))
         return false;
+
+    // ★ B-15: 形式の世代を確認する。
+    //   - version 無し: 旧形式（二重 tanh）か新形式かを値から決められないため
+    //     legacyUnknown として扱い、値を変更しない（自動変換は行わない）。
+    //   - version 1: 旧形式。これも自動変換しない。
+    //   - version 2: 現行形式。
+    //   - version 3 以上: 未知。状態を壊さないよう読み込みを拒否する。
+    const auto versionInfo = convo::learnedstate::readVersion(*xml);
+    if (versionInfo.version > convo::learnedstate::kCurrentVersion)
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] loadLearnedState refused: unknown version "
+                                 + juce::String(versionInfo.version));
+        return false;
+    }
+
+    const bool legacyUnknown = versionInfo.legacyUnknown || versionInfo.legacyV1;
+    convo::publishAtomic(learnedStateLegacyUnknown_, legacyUnknown, std::memory_order_release);
+    if (legacyUnknown)
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] learned_state.xml has no version or version 1; "
+                                 "loaded as-is (legacyUnknown). Run --migrate-learned-state to convert explicitly.");
+    }
 
     const double savedSampleRate = xml->getDoubleAttribute("sampleRate");
     const int savedBitDepth = xml->getIntAttribute("bitDepth");
@@ -96887,6 +98539,7 @@ void NoiseShaperLearner::appendHistoryPoint(double score) noexcept
 
 #include "audioengine/AtomicAccess.h"
 #include "core/RCUReader.h"
+#include "learner/LearnedStateMigration.h"
 
 class AudioEngine;
 struct AudioBlock;
@@ -96987,6 +98640,14 @@ public:
 
     const Progress& getProgress() const noexcept;
     void getState(State& outState) const noexcept;
+
+    // ★ B-15: version 属性の無い learned_state.xml を読んだ場合に true。
+    //   自動変換は行わない（明示操作のみ）。UI/ログで警告するためのフラグ。
+    [[nodiscard]] bool wasLearnedStateLegacyUnknown() const noexcept
+    {
+        return convo::consumeAtomic(learnedStateLegacyUnknown_, std::memory_order_acquire);
+    }
+
     void setState(const State& inState) noexcept;
     int copyBestScoreHistory(double* destination, int maxPoints) noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
@@ -97116,6 +98777,7 @@ private:
                                                int evaluatedCandidates,
                                                std::uint64_t expectedEpoch,
                                                double safetyMargin) noexcept;
+
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
@@ -97147,6 +98809,9 @@ private:
     LearningMode pendingMode {LearningMode::Short};
     LearningMode activeMode {LearningMode::Short};
     int currentPhase = 1;
+
+    // ★ B-15: version 属性の無い learned_state.xml を読んだかどうか。
+    std::atomic<bool> learnedStateLegacyUnknown_ { false };
 
     std::array<State, 6> savedStates {};
 
@@ -98612,6 +100277,7 @@ struct PreparedIRState
 #include "core/ThreadAffinityManager.h"
 
 #include <cmath>
+#include <new>
 #include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
 #include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
 
@@ -98724,29 +100390,41 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
         std::atomic<bool>& cancelledRef = cancelled;
         const uint64_t expectedGeneration = taskGeneration;
 
-        prepared = converter.convertToHighRes(irFile,
-                                              sampleRate,
-                                              nextFFTSize,
-                                              taskGeneration,
-                                              stepKey,
-                                              [weakOwner, &cancelledRef, expectedGeneration]()
-                                              {
-                                                  auto* owner = weakOwner.get();
-                                                  if (owner == nullptr)
-                                                      return true;
+        {
+            prepared = converter.convertToHighRes(irFile,
+                                                  sampleRate,
+                                                  nextFFTSize,
+                                                  taskGeneration,
+                                                  stepKey,
+                                                  [weakOwner, &cancelledRef, expectedGeneration]()
+                                                  {
+                                                      auto* owner = weakOwner.get();
+                                                      if (owner == nullptr)
+                                                          return true;
 
-                                                  return juce::Thread::currentThreadShouldExit()
-                                                      || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
-                                                      || !owner->isConvolverGenerationCurrent(expectedGeneration);
-                                              });
+                                                      return juce::Thread::currentThreadShouldExit()
+                                                          || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
+                                                          || !owner->isConvolverGenerationCurrent(expectedGeneration);
+                                                  });
+        }
         if (!prepared)
             return false;
 
         if (!isGenerationValid())
             return false;
 
-        cacheManager.save(stepKey, nextFFTSize, *prepared);
-        cacheManager.evictLRU(processor.getMaxCacheEntries());
+        // ★ B-01: キャッシュ保存の確保失敗は当該ステップの失敗として扱う。
+        //   例外を juce::Thread::run の外へ出さない（未捕捉例外はプロセス終了になる）。
+        try
+        {
+            cacheManager.save(stepKey, nextFFTSize, *prepared);
+            cacheManager.evictLRU(processor.getMaxCacheEntries());
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] progressive upgrade: cache save failed (bad_alloc)");
+            return false;
+        }
     }
 
     if (prepared)
@@ -111046,8 +112724,10 @@ int runEngineInstanceCountTests()
 #include <JuceHeader.h>
 
 #include "ConvolverProcessor.h"
+#include "IRConverter.h"
 #include "AllpassDesigner.h"
 #include "convolver/IRLoadAdmission.h"
+#include "convolver/IRTrailingSilence.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 
 #include <cmath>
@@ -111835,6 +113515,328 @@ bool checkPreviewFailureCompletion()
     return true;
 }
 
+//----------------------------------------------------------
+// B-01: IRConverter（同期経路）のアドミッションと例外封じ
+//   細工 WAV（宣言長の偽装）・9ch・1 GiB 境界・リサンプル上限を、
+//   例外を外へ出さずに拒否することを確認する。
+//----------------------------------------------------------
+void patchDataChunkDeclaredBytes(const juce::File& file, juce::uint32 declaredBytes)
+{
+    juce::MemoryBlock mb;
+    if (! file.loadFileAsData(mb))
+        return;
+
+    auto* p = static_cast<juce::uint8*>(mb.getData());
+    const size_t n = mb.getSize();
+
+    for (size_t i = 0; i + 8 <= n; ++i)
+    {
+        if (p[i] == 'd' && p[i + 1] == 'a' && p[i + 2] == 't' && p[i + 3] == 'a')
+        {
+            p[i + 4] = static_cast<juce::uint8>(declaredBytes & 0xFFu);
+            p[i + 5] = static_cast<juce::uint8>((declaredBytes >> 8) & 0xFFu);
+            p[i + 6] = static_cast<juce::uint8>((declaredBytes >> 16) & 0xFFu);
+            p[i + 7] = static_cast<juce::uint8>((declaredBytes >> 24) & 0xFFu);
+            break;
+        }
+    }
+
+    file.replaceWithData(p, n);
+}
+
+bool checkConverterAdmission()
+{
+    IRConverter conv;
+
+    IRConverter::ConvertConfig cfg;
+    cfg.fftSize = 512;
+    cfg.partitionSize = 512;
+    cfg.targetSampleRate = 48000.0;
+
+    const auto noCancel = [] { return false; };
+    bool ok = true;
+
+    const auto expectAccept = [&ok] (const char* tag, const juce::File& f,
+                                     const juce::String& err,
+                                     std::unique_ptr<PreparedIRState>&& r)
+    {
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: fixture write failed\n", tag);
+            ok = false;
+            return;
+        }
+
+        if (r == nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: valid IR rejected: %s\n", tag, err.toRawUTF8());
+            ok = false;
+        }
+    };
+
+    const auto expectReject = [&ok] (const char* tag, const juce::File& f,
+                                     const juce::String& err,
+                                     std::unique_ptr<PreparedIRState>&& r,
+                                     const char* needle,
+                                     const char* altNeedle = nullptr)
+    {
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: fixture write failed\n", tag);
+            ok = false;
+            return;
+        }
+
+        if (r != nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: out-of-contract IR was accepted\n", tag);
+            ok = false;
+            return;
+        }
+
+        // 理由まで確認する（別の理由で偶然 nullptr になった場合を合格にしない）。
+        //   B-04 の RIFF 事前検査が先に弾く場合は、その理由も合格とする。
+        const bool matched = err.containsIgnoreCase (needle)
+                             || (altNeedle != nullptr && err.containsIgnoreCase (altNeedle));
+        if (! matched)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: reason '%s' matches neither '%s' nor '%s'\n",
+                         tag, err.toRawUTF8(), needle, altNeedle != nullptr ? altNeedle : "");
+            ok = false;
+        }
+    };
+
+    // I-1: 正常な 1 秒ステレオ 48 kHz（回帰）
+    {
+        const auto f = writeTestIr("b01_ok.wav", 48000.0, 2, 48000, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectAccept("I-1", f, err, std::move(r));
+        f.deleteFile();
+    }
+
+    // I-2: data チャンク長の偽装（宣言 3e9 バイト → FC-FORM-1 の予算超過で拒否）
+    {
+        const auto f = writeTestIr("b01_huge.wav", 48000.0, 2, 1024, -1, 1);
+        patchDataChunkDeclaredBytes(f, 3000000000u);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-2", f, err, std::move(r), "memory limit", "declared chunk size");
+        f.deleteFile();
+    }
+
+    // I-3: channel 上限（9ch）
+    {
+        const auto f = writeTestIr("b01_9ch.wav", 48000.0, 9, 512, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-3", f, err, std::move(r), "too many channels");
+        f.deleteFile();
+    }
+
+    // I-4: channel 上限の内側（8ch）
+    {
+        const auto f = writeTestIr("b01_8ch.wav", 48000.0, 8, 512, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectAccept("I-4", f, err, std::move(r));
+        f.deleteFile();
+    }
+
+    // I-5: byte budget の境界（16-bit stereo で N = 67,108,865 → 8·2·N > 1 GiB）
+    {
+        const auto f = writeTestIr("b01_budget.wav", 48000.0, 2, 1024, -1, 1);
+        patchDataChunkDeclaredBytes(f, 67108865u * 4u);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-5", f, err, std::move(r), "memory limit", "declared chunk size");
+        f.deleteFile();
+    }
+
+    // I-6: resample 出力上限（8 kHz 350k = 43.75 s > 2^21+1 @48 kHz = 43.69 s）
+    {
+        const auto f = writeTestIr("b01_resample.wav", 8000.0, 2, 350000, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-6", f, err, std::move(r), "longer than the DSP");
+        f.deleteFile();
+    }
+
+    if (ok)
+        std::printf("[B01] IRConverter admission: PASS (I-1..I-6)\n");
+
+    return ok;
+}
+
+//----------------------------------------------------------
+// B-04 — RIFF 事前検査が非同期ローダとプレビュー経路でも効くことの回帰
+//----------------------------------------------------------
+bool checkRiffGuardRuntime()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    const auto ir = writeTestIr("b04_riff_guard.wav", 48000.0, 2, 1024, -1, 1);
+    if (! ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[B04] FAIL RG-0 fixture write failed\n");
+        return false;
+    }
+
+    patchDataChunkDeclaredBytes(ir, 3000000000u);
+
+    bool ok = true;
+
+    // RG-1: 非同期ローダ経路（LoaderThread）
+    {
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+
+        juce::String err;
+        const bool settled = loadAndSettle(conv, ir, err);
+
+        if (! settled || conv.isIRLoaded() || ! err.containsIgnoreCase("declared chunk size"))
+        {
+            std::fprintf(stderr, "[B04] FAIL RG-1 loader path: settled=%d loaded=%d err='%s'\n",
+                         settled ? 1 : 0, conv.isIRLoaded() ? 1 : 0, err.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    // RG-2: プレビュー経路（analyzeImpulseResponseFile → ResampleAndFallback）
+    {
+        const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(ir, 48000.0);
+
+        if (preview.success || ! preview.errorMessage.containsIgnoreCase("declared chunk size"))
+        {
+            std::fprintf(stderr, "[B04] FAIL RG-2 preview path: success=%d err='%s'\n",
+                         preview.success ? 1 : 0, preview.errorMessage.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    ir.deleteFile();
+
+    if (ok)
+        std::printf("[B04] checkRiffGuardRuntime: PASS (loader / preview reject crafted RIFF)\n");
+
+    return ok;
+}
+
+//----------------------------------------------------------
+// B-10 — 最小位相化が FFT 上限でスキップされたときの実効値と警告
+//----------------------------------------------------------
+bool checkPhaseFallbackRuntime()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    bool ok = true;
+
+    // PB-1: 通常長の IR では Minimum が適用され、警告は出ない
+    {
+        const auto ir = writeTestIr("b10_minimum_ok.wav", 48000.0, 2, 48000, -1, 1);
+
+        if (! ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-0a fixture write failed\n");
+            return false;
+        }
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+        conv.setPhaseMode(ConvolverProcessor::PhaseMode::Minimum);
+
+        juce::String err;
+        const bool settled = loadAndSettle(conv, ir, err);
+
+        const int eff = conv.getEffectivePhaseModeForLastLoad();
+        const auto warn = conv.getLastPhaseWarning();
+
+        if (! settled || ! conv.isIRLoaded()
+            || eff != static_cast<int>(ConvolverProcessor::PhaseMode::Minimum)
+            || warn.isNotEmpty())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-1: settled=%d loaded=%d eff=%d warn='%s'\n",
+                         settled ? 1 : 0, conv.isIRLoaded() ? 1 : 0, eff, warn.toRawUTF8());
+            ok = false;
+        }
+
+        ir.deleteFile();
+    }
+
+    // PB-2: 2^21+1 サンプルでも、変換入力は targetLength（≤ MAX_IR_LATENCY = 2^21）に
+    //   切り詰められてから convertToMinimumPhase へ渡る。したがって fftSize は最大でも
+    //   2^23 = 8388608 で、スキップ分岐（> 8388608）には到達しない。
+    //   ここでは「スキップせず Minimum が適用され、警告も出ない」ことを固定する。
+    {
+        const int samples = 2097153;
+        const auto ir = writeTestIr("b10_minimum_skip.wav", 48000.0, 2, samples, -1, 1);
+
+        if (! ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-0b fixture write failed\n");
+            return false;
+        }
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+        conv.setPhaseMode(ConvolverProcessor::PhaseMode::Minimum);
+
+        juce::String err;
+        const bool settled = loadAndSettle(conv, ir, err);
+
+        const int eff = conv.getEffectivePhaseModeForLastLoad();
+        const auto warn = conv.getLastPhaseWarning();
+
+        if (! settled || ! conv.isIRLoaded()
+            || eff != static_cast<int>(ConvolverProcessor::PhaseMode::Minimum)
+            || warn.isNotEmpty())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-2: settled=%d loaded=%d eff=%d warn='%s'\n",
+                         settled ? 1 : 0, conv.isIRLoaded() ? 1 : 0, eff, warn.toRawUTF8());
+            ok = false;
+        }
+
+        ir.deleteFile();
+    }
+
+    // PB-3: 同期経路（loadIR → IRConverter）は位相変換を行わないため、実効値は AsIs
+    {
+        const auto ir = writeTestIr("b10_sync_path.wav", 48000.0, 2, 48000, -1, 1);
+
+        if (! ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-0c fixture write failed\n");
+            return false;
+        }
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+        conv.setPhaseMode(ConvolverProcessor::PhaseMode::Minimum);
+
+        conv.loadIR(ir); // 同期経路
+
+        const int eff = conv.getEffectivePhaseModeForLastLoad();
+        const auto warn = conv.getLastPhaseWarning();
+
+        if (eff != static_cast<int>(ConvolverProcessor::PhaseMode::AsIs) || warn.isNotEmpty())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-3: eff=%d warn='%s'\n", eff, warn.toRawUTF8());
+            ok = false;
+        }
+
+        ir.deleteFile();
+    }
+
+    if (ok)
+        std::printf("[B10] checkPhaseFallbackRuntime: PASS (Minimum applied; skip guard unreachable under the 2^21 cap)\n");
+
+    return ok;
+}
+
 } // namespace
 
 int runIRLoadPreviewAdmissionTests()
@@ -111854,6 +113856,207 @@ int runIRLoadPreviewAdmissionTests()
     return 0;
 }
 
+//----------------------------------------------------------
+// ★ B-01 / B-02 — 末尾無音トリムの共通規則
+//----------------------------------------------------------
+bool checkTrailingSilenceTrim()
+{
+    bool ok = true;
+
+    const auto expect = [&ok] (const char* id, int actual, int expected)
+    {
+        if (actual != expected)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: trimmed=%d expected=%d\n", id, actual, expected);
+            ok = false;
+        }
+    };
+
+    // T-1: 末尾無音を落とす
+    {
+        std::vector<float> a (1000, 0.0f);
+        a[599] = 1.0f;
+        expect("T-1", convo::irtrim::computeTrimmedLength<float> (a.data(), nullptr, (int) a.size()), 600);
+    }
+
+    // T-2: 2ch は大きい方のチャネルで決める
+    {
+        std::vector<float> a (1000, 0.0f), b (1000, 0.0f);
+        a[499] = 1.0f;
+        b[799] = -1.0f;
+        expect("T-2", convo::irtrim::computeTrimmedLength<float> (a.data(), b.data(), (int) a.size()), 800);
+    }
+
+    // T-3: 全サンプルが閾値以下でも 1 サンプルは残す
+    {
+        std::vector<float> a (1000, 0.0f);
+        expect("T-3", convo::irtrim::computeTrimmedLength<float> (a.data(), nullptr, (int) a.size()), 1);
+    }
+
+    // T-4: 無音が無ければ全長
+    {
+        std::vector<float> a (1000, 0.25f);
+        expect("T-4", convo::irtrim::computeTrimmedLength<float> (a.data(), nullptr, (int) a.size()), 1000);
+    }
+
+    // T-5: 閾値ちょうどは無音扱い、超えると有音扱い
+    {
+        std::vector<double> a (100, 0.0);
+        a[49] = 1.0e-15;      // 閾値と等しい → 超えない
+        a[59] = 1.0e-15 * 2;  // 超える
+        expect("T-5", convo::irtrim::computeTrimmedLength<double> (a.data(), nullptr, (int) a.size()), 60);
+    }
+
+    if (ok)
+        std::printf("[B01] checkTrailingSilenceTrim: PASS (T-1..T-5)\n");
+
+    return ok;
+}
+
+//----------------------------------------------------------
+// ★ B-01 / B-02 — 同期経路（IRConverter）もトリム後に FC-FORM-5 を評価する
+//   48 kHz → 96 kHz の resample で、上限は 2,097,153 サンプル。
+//   全体長 1,100,000 のうち末尾 100,000 が無音なら、トリム後 1,000,000 →
+//   resample 後 2,000,000 で受理される。末尾に信号があれば 2,200,000 で拒否。
+//----------------------------------------------------------
+bool checkSyncPathTrimParity()
+{
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory);
+    const auto writeIr = [&dir] (const char* name, int totalSamples, int signalSamples)
+    {
+        const juce::File f = dir.getChildFile (juce::String ("b01_trim_") + name);
+        f.deleteFile();
+
+        std::unique_ptr<juce::FileOutputStream> stream (f.createOutputStream());
+        if (stream == nullptr)
+            return juce::File();
+
+        juce::WavAudioFormat fmt;
+        std::unique_ptr<juce::AudioFormatWriter> w (
+            fmt.createWriterFor (stream.get(), 48000.0, 2u, 16, {}, 0));
+        if (w == nullptr)
+            return juce::File();
+
+        stream.release();
+
+        juce::AudioBuffer<float> buf (2, totalSamples);
+        buf.clear();
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* p = buf.getWritePointer (ch);
+            for (int i = 0; i < juce::jmin (signalSamples, totalSamples); ++i)
+                p[i] = ((i / 8) % 2 == 0) ? 0.25f : -0.25f;
+        }
+
+        w->writeFromAudioSampleBuffer (buf, 0, totalSamples);
+        w.reset();
+        return f;
+    };
+
+    IRConverter conv;
+    IRConverter::ConvertConfig cfg;
+    cfg.fftSize = 512;
+    cfg.partitionSize = 512;
+    cfg.targetSampleRate = 96000.0;
+    const auto noCancel = [] { return false; };
+
+    bool ok = true;
+
+    // A-01-1: 無音テール付きは受理され、resample 後の長さがトリム相当になる
+    {
+        const auto f = writeIr ("tail.wav", 1100000, 1000000);
+        juce::String err;
+        auto prepared = conv.convertFile (f, cfg, noCancel, &err);
+
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01: fixture write failed\n");
+            ok = false;
+        }
+        else if (prepared == nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01: silent-tail IR rejected: %s\n", err.toRawUTF8());
+            ok = false;
+        }
+        else if (prepared->timeDomainIR != nullptr)
+        {
+            // resampler は入出力比どおりの長さを返すが、末尾の丸めで 0.2% 程度ずれる。
+            // 確認したいのは「トリム後に上限内へ収まること」なので範囲で見る。
+            const int n = prepared->timeDomainIR->getNumSamples();
+            if (n < 1900000 || n > 2097153)
+            {
+                std::fprintf(stderr, "[B01] FAIL A-01: resampled length=%d out of trimmed range\n", n);
+                ok = false;
+            }
+        }
+
+        f.deleteFile();
+    }
+
+    // A-01-2: 末尾に信号がある場合は raw 長で拒否される（トリムしない制御）
+    {
+        const auto f = writeIr ("full.wav", 1100000, 1100000);
+        juce::String err;
+        auto prepared = conv.convertFile (f, cfg, noCancel, &err);
+
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01b: fixture write failed\n");
+            ok = false;
+        }
+        else if (prepared != nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01b: oversized IR was accepted\n");
+            ok = false;
+        }
+        else if (! err.containsIgnoreCase ("MAX_IR_LATENCY")
+                 && ! err.containsIgnoreCase ("resample")
+                 && ! err.containsIgnoreCase ("2097153")
+                 && ! err.containsIgnoreCase ("longer than the DSP"))
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01b: unexpected reason: %s\n", err.toRawUTF8());
+            ok = false;
+        }
+
+        f.deleteFile();
+    }
+
+    // A-02: 同じ入力（無音テール付き・48k→96k）で、プレビューと本適用の受理結果が一致する。
+    //   修正前は同期経路だけ全体長で FC-FORM-5 を評価し、プレビューは拒否・本適用は受理だった。
+    {
+        const auto f = writeIr ("parity.wav", 1100000, 1000000);
+
+        const auto preview = ConvolverProcessor::analyzeImpulseResponseFile (f, 96000.0);
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay (96000.0, 512);
+        ConvReleaser convReleaser { conv };
+
+        juce::String err;
+        const bool settled = loadAndSettle (conv, f, err);
+
+        const bool previewOk = preview.success && preview.errorMessage.isEmpty();
+        const bool loaderOk = settled && conv.isIRLoaded();
+
+        if (previewOk != loaderOk)
+        {
+            std::fprintf (stderr,
+                          "[B01] FAIL A-02: preview/loader disagree (preview=%d loader=%d previewErr='%s' loaderErr='%s')\n",
+                          previewOk ? 1 : 0, loaderOk ? 1 : 0,
+                          preview.errorMessage.toRawUTF8(), err.toRawUTF8());
+            ok = false;
+        }
+
+        f.deleteFile();
+    }
+
+
+    if (ok)
+        std::printf("[B01] checkSyncPathTrimParity: PASS (trim before FC-FORM-5)\n");
+
+    return ok;
+}
+
 int runIRLoadAdmissionTests()
 {
     if (!checkEFPredicateBoundaries())
@@ -111868,8 +114071,18 @@ int runIRLoadAdmissionTests()
         return 1;
     if (!checkResamplePathAccepted())
         return 1;
+    if (!checkConverterAdmission())
+        return 1;
+    if (!checkRiffGuardRuntime())
+        return 1;
+    if (!checkTrailingSilenceTrim())
+        return 1;
+    if (!checkSyncPathTrimParity())
+        return 1;
+    if (!checkPhaseFallbackRuntime())
+        return 1;
 
-    std::printf("IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L)\n");
+    std::printf("IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L + B01 I-1..I-6 + B01 T-1..T-5 + A-01/A-02 + B04 RG + B10 PB)\n");
     return 0;
 }
 
@@ -112358,6 +114571,121 @@ int runN1BypassAudioAnalysis(const juce::String& outDirIn, const juce::String& m
     std::printf("[N1-analysis] %s\n", allPass ? "ALL PASS" : "FAILURES PRESENT");
     std::fflush(stdout);
     return allPass ? 0 : 1;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\NoiseShaperStateRaceTests.cpp`
+
+```
+//==============================================================================
+// NoiseShaperStateRaceTests.cpp — BUG-1 の回帰テスト（専用ストレステスト）
+//
+// 目的:
+//   AudioEngine::getAdaptiveNoiseShaperState() が書き手と同じ mutex を取ることを、
+//   別スレッドで set / get を競合させて検証する。
+//
+// 検証方法:
+//   書き手は世代番号 g を mean / bestCoefficients / covarianceUpperTriangle / iteration の
+//   すべてに書き込む。読み手はコピーした State の全要素が同じ g であることを確認する。
+//   ロックが無い場合、560 B のコピーが書き込みと重なって世代混在（torn read）になる。
+//
+// 実行:
+//   AudioEngineHarness（環境変数 CONVOPEQ_NS_STATE_RACE_TEST=1）
+//   通常のテストスイートには含めない（opt-in）。
+//   実行時間は約 1.5 秒で固定する（書き手の反復回数ではなく期限で止める）。
+//==============================================================================
+
+#include <JuceHeader.h>
+
+#include "AudioEngine.h"
+#include "NoiseShaperLearnerTypes.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
+
+int runNoiseShaperStateRaceTests()
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // 注意: AudioEngine のデストラクタは未 prepare のままでは rebuildThread の join で
+    //   待ち続ける（shutdown 設計の既知事項）。本テストはプロセス終了で回収されるよう
+    //   意図的に破棄しない。
+    auto* engine = new AudioEngine();
+    if (engine == nullptr)
+        return 1;
+
+    const int bank = AudioEngine::getAdaptiveCoeffBankIndex(
+        48000.0, 24, convo::NoiseShaperLearningMode::Short);
+
+    std::atomic<bool> writerDone { false };
+    std::atomic<std::uint64_t> writes { 0 };
+    std::atomic<std::uint64_t> torn { 0 };
+    std::atomic<std::uint64_t> reads { 0 };
+
+    std::thread writer([engine, bank, &writerDone, &writes]()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        int g = 1;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            convo::NoiseShaperLearnerState s;
+            for (int i = 0; i < 9; ++i)
+            {
+                s.mean[i] = static_cast<double> (g);
+                s.bestCoefficients[i] = static_cast<double> (g);
+            }
+            for (int i = 0; i < 45; ++i)
+                s.covarianceUpperTriangle[i] = static_cast<double> (g);
+            s.iteration = g;
+            engine->setAdaptiveNoiseShaperState(bank, s);
+            ++g;
+            writes.fetch_add(1, std::memory_order_relaxed);
+        }
+        writerDone.store(true, std::memory_order_release);
+    });
+
+    while (! writerDone.load(std::memory_order_acquire))
+    {
+        convo::NoiseShaperLearnerState out;
+        (void) engine->getAdaptiveNoiseShaperState(bank, out);
+        reads.fetch_add(1, std::memory_order_relaxed);
+
+        const int g = out.iteration;
+        bool consistent = true;
+        for (int i = 0; i < 9; ++i)
+            consistent = consistent && (out.mean[i] == static_cast<double> (g))
+                                    && (out.bestCoefficients[i] == static_cast<double> (g));
+        for (int i = 0; i < 45; ++i)
+            consistent = consistent && (out.covarianceUpperTriangle[i] == static_cast<double> (g));
+
+        if (! consistent)
+            torn.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    writer.join();
+
+    const std::uint64_t tornCount = torn.load();
+    std::printf("NS-RACE: reads=%llu writes=%llu torn=%llu\n",
+                static_cast<unsigned long long> (reads.load()),
+                static_cast<unsigned long long> (writes.load()),
+                static_cast<unsigned long long> (tornCount));
+    std::fflush(stdout);
+
+    if (tornCount != 0)
+    {
+        std::fprintf(stderr, "NS-RACE: FAIL (%llu torn reads)\n",
+                     static_cast<unsigned long long> (tornCount));
+        std::fflush(stderr);
+        return 1;
+    }
+
+    std::printf("NS-RACE: PASS (no torn read)\n");
+    std::fflush(stdout);
+    return 0;
 }
 
 ```
@@ -116829,6 +119157,9 @@ int runIRLoadAdmissionTests();
 // IRLoadAdmissionTests.cpp (★ WORK102-PREV-01: preview loader admission / graceful failure)
 int runIRLoadPreviewAdmissionTests();
 
+// RuntimeParameterGuardTests.cpp (★ B-03: mixed f1/f2 の非有限値拒否)
+int runRuntimeParameterGuardTests();
+
 namespace {
 
 bool waitUntil(double timeoutSec, const std::function<bool()>& pred)
@@ -118088,6 +120419,9 @@ int runB2DiagSinkTests();
 // ★ A2 -> A3-a: 二重解放と誤状態処理の分離検証（opt-in）。
 int runA2A3aQuarantineTests();
 
+// BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
+int runNoiseShaperStateRaceTests();
+
 //=== U3 (R-107 Stage 3): RT 経路の新規確保プローブ測定 ======================
 //   CONVOPEQ_RT_ALLOC_PROBE=1（プローブ有効）と
 //   CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms>（このモードの実行）で起動する。
@@ -118239,6 +120573,10 @@ int main(int argc, char* argv[])
     // ★ A2 -> A3-a: 二重解放（V1）と誤状態処理（V2）の検証（opt-in）。
     if (std::getenv("A2A3A_TEST") != nullptr)
         return runA2A3aQuarantineTests();
+
+    // ★ BUG-1: 学習状態 accessor のロック検証（専用ストレステスト・opt-in）。
+    if (std::getenv("CONVOPEQ_NS_STATE_RACE_TEST") != nullptr)
+        return runNoiseShaperStateRaceTests();
 
     // ★ 2026-11-08: D12（FrozenRuntimeWorld の release 順序を含む）だけを実行する。
     //   既定スイートが環境依存の測定区間で停止する場合の限定実行用（opt-in）。
@@ -118616,6 +120954,10 @@ int runFpmM2();
 
     // ★ WORK102-PREV-01: preview loader admission（FC-1〜FC-5）と graceful failure の回帰。
     if (runIRLoadPreviewAdmissionTests() != 0)
+        return 1;
+
+    // ★ B-03: mixed f1/f2 setter の非有限値拒否（setState 経路を含む）。
+    if (runRuntimeParameterGuardTests() != 0)
         return 1;
 
     // ★ D162-2-I2: testCallerDestroyTerminalDisposition を最後に実行する。
@@ -119531,6 +121873,161 @@ int runRtMeasureRingTests()
     if (ok)
         std::printf("RtMeasureRingTests: PASS (U5 prep A1': modes 0/2/1, common samples, warmup, overflow, U4 locks)\n");
     return ok ? 0 : 1;
+}
+
+```
+
+### 📄 `src\tests\AudioEngineHarness\RuntimeParameterGuardTests.cpp`
+
+```
+// RuntimeParameterGuardTests.cpp — B-03（mixed f1/f2 の非有限値拒否）
+//
+// 破損セッションの NaN/Inf が pendingOverride へ入ると、mixed 位相の遷移周波数が
+// 非有限になり、再構築後の IR が非有限になる。setter と setState 経路の両方で
+// 「非有限は格納せず以前値を維持する」ことを確認する。
+
+#include <JuceHeader.h>
+
+#include "ConvolverProcessor.h"
+#include "AudioEngineHarness.h"
+
+#include <cmath>
+#include <cstdio>
+#include <limits>
+
+namespace {
+
+int gB03Failures = 0;
+
+void expect (bool ok, const char* id, const juce::String& detail = {})
+{
+    std::printf ("[%s] %s%s\n",
+                 ok ? "PASS" : "FAIL",
+                 id,
+                 detail.isNotEmpty() ? (" (" + detail + ")").toRawUTF8() : "");
+
+    if (! ok)
+        ++gB03Failures;
+}
+
+constexpr float kNaNf = std::numeric_limits<float>::quiet_NaN();
+constexpr float kInff = std::numeric_limits<float>::infinity();
+
+} // namespace
+
+int runRuntimeParameterGuardTests()
+{
+    gB03Failures = 0;
+
+    {
+        ConvolverProcessor conv;
+
+        conv.setMixedTransitionStartHz (300.0f);
+        conv.setMixedTransitionEndHz (800.0f);
+
+        const float f1 = conv.getMixedTransitionStartHz();
+        const float f2 = conv.getMixedTransitionEndHz();
+
+        expect (std::isfinite (f1) && std::isfinite (f2), "B03-1 baseline is finite",
+                "f1=" + juce::String (f1, 1) + " f2=" + juce::String (f2, 1));
+
+        // B03-2: NaN は格納しない（両 setter）
+        conv.setMixedTransitionStartHz (kNaNf);
+        conv.setMixedTransitionEndHz (kNaNf);
+
+        expect (conv.getMixedTransitionStartHz() == f1, "B03-2a NaN start is rejected",
+                "got=" + juce::String (conv.getMixedTransitionStartHz(), 1));
+        expect (conv.getMixedTransitionEndHz() == f2, "B03-2b NaN end is rejected",
+                "got=" + juce::String (conv.getMixedTransitionEndHz(), 1));
+
+        // B03-3: ±Inf も格納しない
+        conv.setMixedTransitionStartHz (kInff);
+        conv.setMixedTransitionEndHz (-kInff);
+
+        expect (conv.getMixedTransitionStartHz() == f1, "B03-3a +Inf start is rejected");
+        expect (conv.getMixedTransitionEndHz() == f2, "B03-3b -Inf end is rejected");
+
+        // B03-4: 有効値は従来どおり通る（F1 100–400、F2 700–1300 の内側）
+        conv.setMixedTransitionStartHz (250.0f);
+        conv.setMixedTransitionEndHz (1200.0f);
+
+        expect (std::abs (conv.getMixedTransitionStartHz() - 250.0f) < 1.0e-3f,
+                "B03-4a valid start is accepted",
+                "got=" + juce::String (conv.getMixedTransitionStartHz(), 1));
+        expect (std::abs (conv.getMixedTransitionEndHz() - 1200.0f) < 1.0e-3f,
+                "B03-4b valid end is accepted",
+                "got=" + juce::String (conv.getMixedTransitionEndHz(), 1));
+
+        // B03-5: setState（セッション復元の経路）に NaN を流しても壊れない
+        const float beforeF1 = conv.getMixedTransitionStartHz();
+        const float beforeF2 = conv.getMixedTransitionEndHz();
+
+        juce::ValueTree saved ("Convolver");
+        saved.setProperty ("mixedF1Hz", static_cast<double> (kNaNf), nullptr);
+        saved.setProperty ("mixedF2Hz", static_cast<double> (kInff), nullptr);
+
+        conv.setState (saved);
+
+        expect (conv.getMixedTransitionStartHz() == beforeF1
+                    && conv.getMixedTransitionEndHz() == beforeF2,
+                "B03-5 setState with non-finite values keeps previous",
+                "f1=" + juce::String (conv.getMixedTransitionStartHz(), 1)
+                    + " f2=" + juce::String (conv.getMixedTransitionEndHz(), 1));
+    }
+
+    // ---- B-09: 適応係数の非有限値ゲート ----
+    {
+        AudioEngineHarness h;
+
+        if (! h.start (48000.0, 512))
+        {
+            expect (false, "B09-0 harness start");
+        }
+        else
+        {
+            AudioEngine& e = h.engine();
+
+            constexpr int kOrder = 9; // kAdaptiveNoiseShaperOrder
+            const double seed[kOrder] = { 0.10, -0.20, 0.30, -0.40, 0.50,
+                                          -0.60, 0.70, -0.80, 0.15 };
+
+            e.setAdaptiveCoefficientsForSampleRate (48000.0, seed, kOrder);
+
+            double before[kOrder] = {};
+            e.getAdaptiveCoefficientsForSampleRate (48000.0, before, kOrder);
+
+            expect (std::isfinite (before[3]), "B09-1 baseline coefficients are finite",
+                    "c3=" + juce::String (before[3], 4));
+
+            double bad[kOrder] = {};
+
+            for (int i = 0; i < kOrder; ++i)
+                bad[i] = before[i];
+
+            bad[3] = std::numeric_limits<double>::quiet_NaN();
+            bad[5] = std::numeric_limits<double>::infinity();
+
+            e.setAdaptiveCoefficientsForSampleRate (48000.0, bad, kOrder);
+
+            double after[kOrder] = {};
+            e.getAdaptiveCoefficientsForSampleRate (48000.0, after, kOrder);
+
+            bool unchanged = true;
+
+            for (int i = 0; i < kOrder; ++i)
+                if (after[i] != before[i])
+                    unchanged = false;
+
+            expect (unchanged, "B09-2 non-finite coefficients are rejected",
+                    "c3=" + juce::String (after[3], 4) + " c5=" + juce::String (after[5], 4));
+
+            h.stop();
+        }
+    }
+    if (gB03Failures == 0)
+        std::printf ("RuntimeParameterGuardTests: PASS (B-03 setters, B-09 coefficient gate)\n");
+
+    return gB03Failures == 0 ? 0 : 1;
 }
 
 ```
@@ -138793,6 +141290,387 @@ int main()
 
 ```
 
+### 📄 `src\tests\CacheManagerHeaderValidationTests.cpp`
+
+```
+// CacheManagerHeaderValidationTests.cpp — B-02 回帰
+//
+// B-02: キャッシュヘッダの時間領域ディスクリプタ（channels×samples×8 と
+// timeDomainSizeBytes の一致）を検証せずに復元していたため、細工キャッシュで
+// マップ外読み出しに至り得た。本テストは
+//   (1) 正常な v2 / v1 キャッシュが従来どおり受理されること（互換性）
+//   (2) 不整合なディスクリプタ・部分指定・上限超過・桁あふれが拒否されること
+//   (3) 不正エントリが削除され、次回ロードで再構築にフォールバックできること
+// を確認する。ASan 実行時は (2) がマップ外読み出しを起こさないことも確認できる。
+//
+// 実行: CacheManagerHeaderValidationTests
+
+#include <JuceHeader.h>
+
+#include "CacheManager.h"
+#include "PreparedIRState.h"
+#include "AlignedAllocation.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <vector>
+
+namespace
+{
+
+int gFailures = 0;
+
+void check (bool ok, const char* id, const juce::String& detail = {})
+{
+    std::printf ("[%s] %s%s\n", ok ? "PASS" : "FAIL", id,
+                 detail.isNotEmpty() ? (" " + detail).toRawUTF8() : "");
+    if (! ok)
+        ++gFailures;
+}
+
+// CacheHeaderV1 は CacheManager.cpp 内の匿名名前空間にあるため、レイアウトを写して
+// v1 互換性を検査する（フィールド順・型は本番と同一）。
+struct CacheHeaderV1ForTest
+{
+    uint64_t magic = 0x434F4E564F504551ULL;
+    uint64_t version = 1;
+    uint64_t key = 0;
+    uint64_t dataSize = 0;
+    uint64_t checksum = 0;
+    uint64_t timestamp = 0;
+    uint64_t fftSize = 0;
+    uint64_t numPartitions = 0;
+    uint64_t numChannels = 0;
+    double   sampleRate = 0.0;
+    uint64_t timeDomainChannels = 0;
+    uint64_t timeDomainNumSamples = 0;
+    uint64_t timeDomainSizeBytes = 0;
+};
+
+std::unique_ptr<PreparedIRState> makeState (int channels, int samples, int partitionDoubles)
+{
+    auto state = std::make_unique<PreparedIRState>();
+
+    auto* p = static_cast<double*> (convo::aligned_malloc (sizeof (double) * (size_t) partitionDoubles, 64));
+    for (int i = 0; i < partitionDoubles; ++i)
+        p[i] = 0.001 * (i + 1);
+
+    state->partitionData = p;
+    state->partitionSizeBytes = sizeof (double) * (size_t) partitionDoubles;
+    state->numPartitions = 4;
+    state->fftSize = 512;
+    state->numChannels = channels;
+    state->sampleRate = 48000.0;
+
+    if (samples > 0)
+    {
+        state->timeDomainIR = std::make_unique<juce::AudioBuffer<double>> (channels, samples);
+        for (int ch = 0; ch < channels; ++ch)
+            for (int i = 0; i < samples; ++i)
+                state->timeDomainIR->setSample (ch, i, 0.01 * std::sin (0.01 * (double) i + (double) ch));
+    }
+
+    return state;
+}
+
+bool writeRaw (const juce::File& file,
+               const void* header, size_t headerSize,
+               const void* payload, size_t payloadSize,
+               const void* timeDomain, size_t timeDomainSize)
+{
+    file.deleteFile();
+    juce::FileOutputStream out (file);
+    if (! out.openedOk())
+        return false;
+
+    out.write (header, headerSize);
+    if (payloadSize > 0)
+        out.write (payload, payloadSize);
+    if (timeDomainSize > 0 && timeDomain != nullptr)
+        out.write (timeDomain, timeDomainSize);
+
+    out.flush();
+    return out.getStatus().wasOk();
+}
+
+juce::File findCacheFile (const juce::File& dir)
+{
+    juce::Array<juce::File> files;
+    dir.findChildFiles (files, juce::File::findFiles, false, "*.bin");
+    return files.isEmpty() ? juce::File() : files.getFirst();
+}
+
+} // namespace
+
+int main()
+{
+    // 出力を無バッファにする。異常終了したとき、どこまで進んだかを失わないため。
+    std::setvbuf (stdout, nullptr, _IONBF, 0);
+
+    juce::initialiseJuce_GUI();
+
+    const auto tempDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                            .getChildFile ("convopeq_b02_"
+                                           + juce::String::toHexString (juce::Time::currentTimeMillis()));
+    tempDir.createDirectory();
+
+    CacheManager cm (tempDir);
+
+    const uint64_t key = 0x1122334455667788ULL;
+    const int fft = 512;
+
+    // ---- C-1: 正常な v2 の往復（互換性） ----
+    {
+        // パーティション本体は numPartitions(4) * fftSize(512) 本の double。
+        // C-05 は dataSize とこの積の一致を検査するため、フィクスチャも同じ形にする。
+        auto state = makeState (2, 1000, 4 * 512);
+        cm.save (key, fft, *state);
+
+        auto loaded = cm.loadPreparedState (key, fft, 1);
+        check (loaded != nullptr, "C-1 valid v2 cache is accepted");
+        if (loaded != nullptr)
+        {
+            check (loaded->timeDomainIR != nullptr
+                   && loaded->timeDomainIR->getNumChannels() == 2
+                   && loaded->timeDomainIR->getNumSamples() == 1000,
+                   "C-1b time domain restored");
+            check (loaded->partitionSizeBytes == state->partitionSizeBytes,
+                   "C-1c partition payload size");
+        }
+    }
+
+    const auto cacheFile = findCacheFile (tempDir);
+    check (cacheFile.existsAsFile(), "C-0 cache file located");
+    if (! cacheFile.existsAsFile())
+    {
+        // ここで止める。空の MemoryBlock を memcpy すると落ちるだけで、情報が増えない。
+        std::printf ("[SUMMARY] failures=%d\n", gFailures);
+        return 1;
+    }
+
+    juce::MemoryBlock base;
+    cacheFile.loadFileAsData (base);
+
+    CacheHeader baseHeader {};
+    std::memcpy (&baseHeader, base.getData(), sizeof (CacheHeader));
+    const auto* basePayload = static_cast<const uint8_t*> (base.getData()) + sizeof (CacheHeader);
+
+    // 正常な時間領域データ（2ch × 1000）
+    const size_t validTdBytes = (size_t) baseHeader.timeDomainSizeBytes;
+    check (validTdBytes == 2u * 1000u * sizeof (double), "C-0b baseline td size");
+
+    auto rewrite = [&] (const CacheHeader& h, const void* td, size_t tdSize)
+    {
+        return writeRaw (cacheFile, &h, sizeof (h), basePayload, (size_t) h.dataSize, td, tdSize);
+    };
+
+    std::vector<double> zeroTd (validTdBytes / sizeof (double), 0.0);
+
+    // ---- C-2: tdSizeBytes=8 / samples=1000（B-02 の再現条件） ----
+    {
+        CacheHeader h = baseHeader;
+        h.timeDomainChannels = 1;
+        h.timeDomainNumSamples = 1000;
+        h.timeDomainSizeBytes = 8;
+        rewrite (h, zeroTd.data(), 8);
+
+        auto loaded = cm.loadPreparedState (key, fft, 1);
+        check (loaded == nullptr, "C-2 mismatched time-domain size is rejected");
+        check (! cacheFile.existsAsFile(), "C-2b invalid entry is removed");
+    }
+
+    // ---- C-3: 申告サイズが channels×samples×8 より大きい ----
+    {
+        CacheHeader h = baseHeader;
+        h.timeDomainChannels = 2;
+        h.timeDomainNumSamples = 1000;
+        h.timeDomainSizeBytes = validTdBytes + 8;
+        rewrite (h, zeroTd.data(), validTdBytes); // 実データは元の長さのまま
+
+        check (cm.loadPreparedState (key, fft, 1) == nullptr, "C-3 overstated td size is rejected");
+    }
+
+    // ---- C-4: 部分指定（channels だけ 0） ----
+    {
+        CacheHeader h = baseHeader;
+        h.timeDomainChannels = 0;
+        h.timeDomainNumSamples = 1000;
+        h.timeDomainSizeBytes = 8000;
+        rewrite (h, zeroTd.data(), validTdBytes);
+
+        check (cm.loadPreparedState (key, fft, 1) == nullptr, "C-4 partial descriptor is rejected");
+    }
+
+    // ---- C-5: channels 上限（9 > 8） ----
+    {
+        CacheHeader h = baseHeader;
+        h.timeDomainChannels = 9;
+        h.timeDomainNumSamples = 100;
+        h.timeDomainSizeBytes = 9u * 100u * sizeof (double);
+        std::vector<double> td ((size_t) (9u * 100u), 0.0);
+        rewrite (h, td.data(), td.size() * sizeof (double));
+
+        check (cm.loadPreparedState (key, fft, 1) == nullptr, "C-5 channel cap is enforced");
+    }
+
+    // ---- C-6: 桁あふれを狙う channels（UINT64_MAX） ----
+    {
+        CacheHeader h = baseHeader;
+        h.timeDomainChannels = ~0ULL;
+        h.timeDomainNumSamples = 1;
+        h.timeDomainSizeBytes = 8;
+        rewrite (h, zeroTd.data(), 8);
+
+        check (cm.loadPreparedState (key, fft, 1) == nullptr, "C-6 overflow-sized descriptor is rejected");
+    }
+
+    // ---- C-7: キー不一致 ----
+    {
+        CacheHeader h = baseHeader;
+        h.key = key ^ 1ULL;
+        rewrite (h, zeroTd.data(), validTdBytes);
+
+        check (cm.loadPreparedState (key, fft, 1) == nullptr, "C-7 key mismatch is rejected");
+        check (! cacheFile.existsAsFile(), "C-7b mismatched entry is removed");
+    }
+
+    // ---- C-8: partition CRC 不一致 ----
+    {
+        CacheHeader h = baseHeader;
+        std::vector<uint8_t> payload ((size_t) h.dataSize, 0);
+        std::memcpy (payload.data(), basePayload, (size_t) h.dataSize);
+        payload[0] ^= 0xFF;
+
+        writeRaw (cacheFile, &h, sizeof (h), payload.data(), payload.size(),
+                  zeroTd.data(), validTdBytes);
+
+        check (cm.loadPreparedState (key, fft, 1) == nullptr, "C-8 payload CRC mismatch is rejected");
+    }
+
+    // ---- C-9: v1（時間領域なし）の互換性 ----
+    {
+        CacheHeaderV1ForTest h {};
+        h.key = key;
+        h.dataSize = baseHeader.dataSize;
+        h.checksum = baseHeader.checksum;
+        h.fftSize = (uint64_t) fft;
+        h.numPartitions = baseHeader.numPartitions;
+        h.numChannels = baseHeader.numChannels;
+        h.sampleRate = baseHeader.sampleRate;
+
+        writeRaw (cacheFile, &h, sizeof (h), basePayload, (size_t) h.dataSize, nullptr, 0);
+
+        auto loaded = cm.loadPreparedState (key, fft, 1);
+        check (loaded != nullptr, "C-9 v1 cache without time domain is accepted");
+        if (loaded != nullptr)
+            check (loaded->timeDomainIR == nullptr, "C-9b v1 without td has no time domain");
+    }
+
+    // ---- C-9c: v1（正しい時間領域あり）の互換性 ----
+    {
+        CacheHeaderV1ForTest h {};
+        h.key = key;
+        h.dataSize = baseHeader.dataSize;
+        h.checksum = baseHeader.checksum;
+        h.fftSize = (uint64_t) fft;
+        h.numPartitions = baseHeader.numPartitions;
+        h.numChannels = baseHeader.numChannels;
+        h.sampleRate = baseHeader.sampleRate;
+        h.timeDomainChannels = 1;
+        h.timeDomainNumSamples = 100;
+        h.timeDomainSizeBytes = 100u * sizeof (double);
+
+        std::vector<double> td (100, 0.25);
+        writeRaw (cacheFile, &h, sizeof (h), basePayload, (size_t) h.dataSize,
+                  td.data(), td.size() * sizeof (double));
+
+        auto loaded = cm.loadPreparedState (key, fft, 1);
+        check (loaded != nullptr, "C-9c v1 cache with valid time domain is accepted");
+        if (loaded != nullptr)
+            check (loaded->timeDomainIR != nullptr
+                   && loaded->timeDomainIR->getNumSamples() == 100,
+                   "C-9d v1 time domain restored");
+    }
+
+    // ---- C-10: v2（時間領域なし）の互換性 ----
+    {
+        CacheHeader h = baseHeader;
+        h.timeDomainChannels = 0;
+        h.timeDomainNumSamples = 0;
+        h.timeDomainSizeBytes = 0;
+        rewrite (h, nullptr, 0);
+
+        auto loaded = cm.loadPreparedState (key, fft, 1);
+        check (loaded != nullptr, "C-10 v2 cache without time domain is accepted");
+        if (loaded != nullptr)
+            check (loaded->timeDomainIR == nullptr, "C-10b v2 without td has no time domain");
+    }
+
+    // ---- C-11: B-08 ディレクトリ総量の剪定 ----
+    {
+        auto pruneDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                            .getChildFile ("convo_b08_prune");
+        pruneDir.deleteRecursively();
+        pruneDir.createDirectory();
+
+        const auto makeFile = [&pruneDir] (const juce::String& name, int bytes, int ageSeconds)
+        {
+            auto f = pruneDir.getChildFile (name);
+            f.replaceWithText (juce::String::repeatedString ("x", bytes));
+            f.setLastModificationTime (juce::Time::getCurrentTime()
+                                       - juce::RelativeTime::seconds (static_cast<double> (ageSeconds)));
+            return f;
+        };
+
+        const auto oldest = makeFile ("0000000000000001_512.bin", 1024, 300);
+        const auto middle = makeFile ("0000000000000002_512.bin", 1024, 200);
+        const auto newest = makeFile ("0000000000000003_512.bin", 1024, 100);
+        const auto decoy  = makeFile ("notes.txt", 4096, 400);
+        const auto decoy2 = makeFile ("not-a-cache.bin", 4096, 400);
+
+        {
+            CacheManager pruneCm (pruneDir); // 既定上限では何も消えない
+            check (oldest.existsAsFile() && middle.existsAsFile() && newest.existsAsFile(),
+                   "C-11a constructor keeps entries under the default limit");
+
+            pruneCm.pruneDirectory (1024);
+
+            check (! oldest.existsAsFile() && ! middle.existsAsFile() && newest.existsAsFile(),
+                   "C-11b prune removes oldest entries down to the limit");
+            check (decoy.existsAsFile() && decoy2.existsAsFile(),
+                   "C-11c prune leaves non-cache files untouched");
+        }
+
+        pruneDir.deleteRecursively();
+    }
+
+    tempDir.deleteRecursively();
+
+    // ---- C-12: キャッシュキーの意味論バージョン（B-01/B-02） ----
+    //   末尾無音トリムを同期経路にも適用したため、同じファイルでも IR の長さが変わる。
+    //   トリム導入前のキー（v1）と現行キー（v2）が一致しないことを固定する。
+    {
+        const auto keyFile = tempDir.getChildFile ("c12_key_source.bin");
+        keyFile.replaceWithText ("trim-semantics-v2");
+
+        const auto k1 = CacheManager::computeKey (keyFile, fft, 48000.0, 0, 512, 1);
+        const auto k2 = CacheManager::computeKey (keyFile, fft, 48000.0, 0, 512, 2);
+        const auto kDefault = CacheManager::computeKey (keyFile, fft, 48000.0, 0, 512);
+
+        check (k1 != k2, "C-12a", "schema v1 and v2 produce different keys");
+        check (kDefault == k2, "C-12b", "default uses the current schema version");
+        check (CacheManager::kCacheKeySchemaVersion >= 2, "C-12c", "trim semantics are versioned");
+    }
+
+    std::printf ("[SUMMARY] failures=%d\n", gFailures);
+    juce::shutdownJuce_GUI();
+    return gFailures == 0 ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\CorruptSampleGuardTests.cpp`
 
 ```
@@ -146594,6 +149472,241 @@ int main()
 
 ```
 
+### 📄 `src\tests\InputInspectionTests.cpp`
+
+```
+// InputInspectionTests.cpp — B-04 / B-05 / B-06 回帰
+//
+//   B-04: RIFF/WAVE の宣言チャンク長が実ファイル残量を超える入力を拒否する
+//   B-05: XML のサイズ・要素深さ・DOCTYPE/ENTITY を解析前に拒否する
+//   B-06: プリセット XML は B-05 と同じ入口を通る（MainWindow 側の呼出）
+//
+// JUCE 本体は改修しない。ここでは ConvoPeq 側の事前検査だけを確認する。
+
+#include <JuceHeader.h>
+
+#include "InputInspection.h"
+
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+namespace {
+
+int gFailures = 0;
+
+void check (bool ok, const char* id, const juce::String& detail = {})
+{
+    std::printf ("[%s] %s%s\n",
+                 ok ? "PASS" : "FAIL",
+                 id,
+                 detail.isNotEmpty() ? (" (" + detail + ")").toRawUTF8() : "");
+
+    if (! ok)
+        ++gFailures;
+}
+
+juce::File tempFile (const juce::String& name)
+{
+    auto f = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                 .getChildFile ("convo_inputinspect_" + name);
+    f.deleteFile();
+    return f;
+}
+
+void appendBytes (std::vector<char>& out, const char* data, size_t n)
+{
+    out.insert (out.end(), data, data + n);
+}
+
+void appendU32 (std::vector<char>& out, juce::uint32 v)
+{
+    out.push_back (static_cast<char> (v & 0xFFu));
+    out.push_back (static_cast<char> ((v >> 8) & 0xFFu));
+    out.push_back (static_cast<char> ((v >> 16) & 0xFFu));
+    out.push_back (static_cast<char> ((v >> 24) & 0xFFu));
+}
+
+void appendU16 (std::vector<char>& out, juce::uint16 v)
+{
+    out.push_back (static_cast<char> (v & 0xFFu));
+    out.push_back (static_cast<char> ((v >> 8) & 0xFFu));
+}
+
+// 最小の RIFF/WAVE を作る。dataSize を実体と変えて「宣言長の偽装」を再現する。
+juce::File makeWav (const juce::String& name, juce::uint32 dataSize, int payloadBytes)
+{
+    std::vector<char> bytes;
+    appendBytes (bytes, "RIFF", 4);
+    appendU32 (bytes, 36u);
+    appendBytes (bytes, "WAVE", 4);
+
+    appendBytes (bytes, "fmt ", 4);
+    appendU32 (bytes, 16u);
+    appendU16 (bytes, 1u);        // PCM
+    appendU16 (bytes, 2u);        // channels
+    appendU32 (bytes, 48000u);    // sample rate
+    appendU32 (bytes, 192000u);   // byte rate
+    appendU16 (bytes, 4u);        // block align
+    appendU16 (bytes, 16u);       // bits
+
+    appendBytes (bytes, "data", 4);
+    appendU32 (bytes, dataSize);
+
+    for (int i = 0; i < payloadBytes; ++i)
+        bytes.push_back (0);
+
+    const auto f = tempFile (name);
+    f.replaceWithData (bytes.data(), bytes.size());
+    return f;
+}
+
+juce::String makeXml (int depth, bool withDoctype = false)
+{
+    juce::String s;
+
+    if (withDoctype)
+        s << "<!DOCTYPE root [<!ELEMENT root ANY>]>\n";
+
+    s << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+
+    for (int i = 0; i < depth; ++i)
+        s << "<n" << juce::String (i) << ">";
+
+    s << "x";
+
+    for (int i = depth - 1; i >= 0; --i)
+        s << "</n" << juce::String (i) << ">";
+
+    return s;
+}
+
+} // namespace
+
+int main()
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // ---- B-05: XML ----
+    {
+        const auto f = tempFile ("ok.xml");
+        f.replaceWithText (makeXml (8));
+
+        juce::String reason;
+        auto xml = convo::safeinput::parseXmlFile (f, &reason);
+        check (xml != nullptr, "X-1 normal XML is accepted", reason);
+
+        const auto g = tempFile ("deep.xml");
+        g.replaceWithText (makeXml (200));
+
+        reason.clear();
+        xml = convo::safeinput::parseXmlFile (g, &reason);
+        check (xml == nullptr && reason.containsIgnoreCase ("too deep"),
+               "X-2 deep nesting is rejected", reason);
+
+        const auto d = tempFile ("doctype.xml");
+        d.replaceWithText (makeXml (4, true));
+
+        reason.clear();
+        xml = convo::safeinput::parseXmlFile (d, &reason);
+        check (xml == nullptr && reason.containsIgnoreCase ("DOCTYPE"),
+               "X-3 DOCTYPE is rejected", reason);
+
+        const auto e = tempFile ("entity.xml");
+        e.replaceWithText ("<?xml version=\"1.0\"?><r><!ENTITY a \"b\">&a;</r>");
+
+        reason.clear();
+        xml = convo::safeinput::parseXmlFile (e, &reason);
+        check (xml == nullptr && reason.containsIgnoreCase ("ENTITY"),
+               "X-4 ENTITY declaration is rejected", reason);
+
+        const auto m = tempFile ("broken.xml");
+        m.replaceWithText ("<root><child></root>");
+
+        reason.clear();
+        xml = convo::safeinput::parseXmlFile (m, &reason);
+        check (xml == nullptr, "X-5 malformed XML is rejected", reason);
+
+        const auto big = tempFile ("big.xml");
+        {
+            juce::String huge = "<r>";
+            huge += juce::String::repeatedString ("a", 9 * 1024 * 1024);
+            huge += "</r>";
+            big.replaceWithText (huge);
+        }
+
+        reason.clear();
+        xml = convo::safeinput::parseXmlFile (big, &reason);
+        check (xml == nullptr && reason.containsIgnoreCase ("too large"),
+               "X-6 oversized XML is rejected", reason);
+
+        // X-7: 保存側のガードが読込上限と同じ値・同じ単位（UTF-8 バイト数）であること。
+        //   境界（上限ちょうど＝可、上限+1＝不可）を固定する。
+        {
+            const juce::int64 limit = convo::safeinput::kMaxXmlFileBytes;
+
+            const auto atLimit = juce::String::repeatedString ("a", static_cast<int> (limit));
+            check (convo::safeinput::isXmlTextWithinLimit (atLimit),
+                   "X-7 text exactly at the read limit is writable", juce::String (limit));
+
+            const auto overLimit = juce::String::repeatedString ("a", static_cast<int> (limit) + 1);
+            check (! convo::safeinput::isXmlTextWithinLimit (overLimit),
+                   "X-7 text one byte above the read limit is not writable", juce::String (limit + 1));
+        }
+
+        for (auto* p : { &f, &g, &d, &e, &m, &big })
+            p->deleteFile();
+    }
+
+    // ---- B-04: RIFF チャンク境界 ----
+    {
+        const auto okFile = makeWav ("ok.wav", 64u, 64);
+
+        juce::String reason;
+        check (convo::safeinput::inspectRiffChunkBounds (okFile, &reason),
+               "R-1 well-formed WAV is accepted", reason);
+        okFile.deleteFile();
+
+        const auto badFile = makeWav ("badsize.wav", 0x7FFFFFFFu, 64);
+
+        reason.clear();
+        check (! convo::safeinput::inspectRiffChunkBounds (badFile, &reason),
+               "R-2 overstated chunk size is rejected", reason);
+        badFile.deleteFile();
+
+        const auto textFile = tempFile ("notes.txt");
+        textFile.replaceWithText ("this is not a RIFF file");
+
+        reason.clear();
+        check (convo::safeinput::inspectRiffChunkBounds (textFile, &reason),
+               "R-3 non-RIFF input is out of scope (accepted)", reason);
+        textFile.deleteFile();
+
+        // data の後ろに巨大な bext を宣言したチャンクを足す（JUCE のメタデータ確保を狙う形）
+        const auto metaFile = makeWav ("bext.wav", 64u, 64);
+        {
+            juce::MemoryBlock mb;
+            metaFile.loadFileAsData (mb);
+
+            std::vector<char> bytes (static_cast<const char*> (mb.getData()),
+                                     static_cast<const char*> (mb.getData()) + mb.getSize());
+            appendBytes (bytes, "bext", 4);
+            appendU32 (bytes, 0xFFFFFF00u);
+            metaFile.replaceWithData (bytes.data(), bytes.size());
+        }
+
+        reason.clear();
+        check (! convo::safeinput::inspectRiffChunkBounds (metaFile, &reason),
+               "R-4 oversized metadata chunk is rejected", reason);
+        metaFile.deleteFile();
+    }
+
+    std::printf ("[SUMMARY] failures=%d\n", gFailures);
+    return gFailures == 0 ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\invariant_INV3_INV5.cpp`
 
 ```
@@ -151587,6 +154700,175 @@ int main()
     }
     std::printf("ISRSoakTests: all headless data-structure endurance tests PASS\n");
     return 0;
+}
+
+```
+
+### 📄 `src\tests\LearnedStateMigrationTests.cpp`
+
+```
+//============================================================================
+// LearnedStateMigrationTests.cpp — B-15 の移行テスト
+//
+// 目的:
+//   * version 無し（legacyUnknown）のファイルは自動変換されないこと。
+//   * 明示移行で parcor = atanh(c) に戻り、tanh で元に戻ること（可逆）。
+//   * 移行は冪等（2 回目は変更なし）で、バックアップが残ること。
+//   * 未知 version・不正値・壊れた XML では元ファイルを変更しないこと。
+//   * CmaMean は変換されないこと。
+//============================================================================
+#include "learner/LearnedStateMigration.h"
+
+#include <cmath>
+#include <cstdio>
+
+namespace
+{
+int gFailures = 0;
+
+void check (bool ok, const char* id, const juce::String& detail)
+{
+    std::printf ("[%s] %s %s\n", ok ? "PASS" : "FAIL", id, detail.toRawUTF8());
+    if (! ok)
+        ++gFailures;
+}
+
+juce::String legacyFileText (const double* stored, int count, int version, bool includeVersion)
+{
+    juce::XmlElement xml ("ConvoPeqLearnedState");
+    if (includeVersion)
+        xml.setAttribute ("version", version);
+    xml.setAttribute ("bestScore", -1.25);
+    xml.setAttribute ("sampleRate", 48000.0);
+    xml.setAttribute ("bitDepth", 24);
+    xml.setAttribute ("phase", 1);
+    xml.setAttribute ("elapsedPlaybackSeconds", 12.5);
+
+    auto* coeffs = xml.createNewChildElement ("BestCoefficients");
+    for (int i = 0; i < count; ++i)
+        coeffs->setAttribute ("c" + juce::String (i), stored[i]);
+
+    auto* mean = xml.createNewChildElement ("CmaMean");
+    for (int i = 0; i < count; ++i)
+        mean->setAttribute ("m" + juce::String (i), 0.11 * (i + 1));
+
+    return xml.toString();
+}
+
+juce::File makeTempDir (const juce::String& name)
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                   .getNonexistentChildFile (name, {}, false);
+    dir.createDirectory();
+    return dir;
+}
+
+void testLegacyMigration()
+{
+    const auto dir = makeTempDir ("b15-legacy");
+    const auto file = dir.getChildFile ("learned_state.xml");
+
+    constexpr int kCount = 9;
+    double parcor[kCount];
+    double stored[kCount];
+    for (int i = 0; i < kCount; ++i)
+    {
+        parcor[i] = -0.55 + 0.13 * i;           // |parcor| < 1
+        stored[i] = std::tanh (parcor[i]);      // 旧形式（二重 tanh 済み）
+    }
+
+    file.replaceWithText (legacyFileText (stored, kCount, 0, false));
+
+    const auto result = convo::learnedstate::migrateFile (file);
+    check (result.ok && result.changed, "M-15-1", "legacy file migrates: " + result.message);
+
+    auto xml = juce::XmlDocument::parse (file);
+    check (xml != nullptr && xml->getIntAttribute ("version") == 2
+               && xml->getStringAttribute ("conversion") == "parcor",
+           "M-15-2", "version=2 / conversion=parcor is written");
+
+    double maxError = 0.0;
+    if (auto* coeffs = xml != nullptr ? xml->getChildByName ("BestCoefficients") : nullptr)
+    {
+        for (int i = 0; i < kCount; ++i)
+        {
+            const double migrated = coeffs->getDoubleAttribute ("c" + juce::String (i));
+            maxError = juce::jmax (maxError, std::abs (migrated - parcor[i]));
+        }
+    }
+    check (maxError <= 1.0e-12, "M-15-3", "converted values equal the original parcor (maxErr="
+                                            + juce::String (maxError, 3) + ")");
+
+    const bool backupExists = dir.getNumberOfChildFiles (juce::File::findFiles, "learned_state.xml.bak-*") > 0;
+    check (backupExists, "M-15-4", "backup of the original file exists");
+
+    if (auto* mean = xml != nullptr ? xml->getChildByName ("CmaMean") : nullptr)
+        check (std::abs (mean->getDoubleAttribute ("m0") - 0.11) < 1.0e-12,
+               "M-15-5", "CmaMean is not converted");
+    else
+        check (false, "M-15-5", "CmaMean missing");
+
+    // 冪等性
+    const auto second = convo::learnedstate::migrateFile (file);
+    check (second.ok && ! second.changed, "M-15-6", "second migration is a no-op: " + second.message);
+
+    dir.deleteRecursively();
+}
+
+void testUnknownVersion()
+{
+    const auto dir = makeTempDir ("b15-unknown");
+    const auto file = dir.getChildFile ("learned_state.xml");
+    const juce::String original = "<ConvoPeqLearnedState version=\"3\"><BestCoefficients c0=\"0.2\"/></ConvoPeqLearnedState>";
+    file.replaceWithText (original);
+
+    const auto result = convo::learnedstate::migrateFile (file);
+    check (! result.ok && result.message.contains ("unknown version"),
+           "M-15-7", "unknown version is refused: " + result.message);
+    check (file.loadFileAsString() == original, "M-15-8", "original file is untouched");
+    dir.deleteRecursively();
+}
+
+void testInvalidCoefficient()
+{
+    const auto dir = makeTempDir ("b15-invalid");
+    const auto file = dir.getChildFile ("learned_state.xml");
+    double stored[2] { 0.2, 1.5 };   // 2 番目は |c| >= 1 で旧形式ではあり得ない
+    const juce::String original = legacyFileText (stored, 2, 0, false);
+    file.replaceWithText (original);
+
+    const auto result = convo::learnedstate::migrateFile (file);
+    check (! result.ok, "M-15-9", "out-of-range coefficient is refused: " + result.message);
+    check (file.loadFileAsString() == original, "M-15-10", "original file is untouched");
+    check (dir.getNumberOfChildFiles (juce::File::findFiles, "*.tmp") == 0,
+           "M-15-11", "no temporary file is left behind");
+    dir.deleteRecursively();
+}
+
+void testCorruptFile()
+{
+    const auto dir = makeTempDir ("b15-corrupt");
+    const auto file = dir.getChildFile ("learned_state.xml");
+    const juce::String original = "<ConvoPeqLearnedState><BestCoefficients c0=";
+    file.replaceWithText (original);
+
+    const auto result = convo::learnedstate::migrateFile (file);
+    check (! result.ok, "M-15-12", "corrupt XML is refused");
+    check (file.loadFileAsString() == original, "M-15-13", "corrupt file is untouched");
+    dir.deleteRecursively();
+}
+
+} // namespace
+
+int main()
+{
+    testLegacyMigration();
+    testUnknownVersion();
+    testInvalidCoefficient();
+    testCorruptFile();
+
+    std::printf ("[SUMMARY] failures=%d\n", gFailures);
+    return gFailures == 0 ? 0 : 1;
 }
 
 ```

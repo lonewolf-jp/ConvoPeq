@@ -1048,7 +1048,9 @@ void ConvolverProcessor::forceCleanup()
     for (auto& loader : loadersToDelete)
     {
         if (loader)
+        {
             loader->stopThread(500);
+        }
     }
     loadersToDelete.clear();
 }

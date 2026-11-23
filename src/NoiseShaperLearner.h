@@ -18,6 +18,7 @@
 
 #include "audioengine/AtomicAccess.h"
 #include "core/RCUReader.h"
+#include "learner/LearnedStateMigration.h"
 
 class AudioEngine;
 struct AudioBlock;
@@ -118,6 +119,14 @@ public:
 
     const Progress& getProgress() const noexcept;
     void getState(State& outState) const noexcept;
+
+    // ★ B-15: version 属性の無い learned_state.xml を読んだ場合に true。
+    //   自動変換は行わない（明示操作のみ）。UI/ログで警告するためのフラグ。
+    [[nodiscard]] bool wasLearnedStateLegacyUnknown() const noexcept
+    {
+        return convo::consumeAtomic(learnedStateLegacyUnknown_, std::memory_order_acquire);
+    }
+
     void setState(const State& inState) noexcept;
     int copyBestScoreHistory(double* destination, int maxPoints) noexcept;
     void onCoeffBankChanged(int newBankIndex) noexcept;
@@ -247,6 +256,7 @@ private:
                                                int evaluatedCandidates,
                                                std::uint64_t expectedEpoch,
                                                double safetyMargin) noexcept;
+
     void appendHistoryPoint(double score) noexcept;
 
     int computePhase(LearningMode mode, double playbackSeconds) const noexcept;
@@ -278,6 +288,9 @@ private:
     LearningMode pendingMode {LearningMode::Short};
     LearningMode activeMode {LearningMode::Short};
     int currentPhase = 1;
+
+    // ★ B-15: version 属性の無い learned_state.xml を読んだかどうか。
+    std::atomic<bool> learnedStateLegacyUnknown_ { false };
 
     std::array<State, 6> savedStates {};
 

@@ -1,5 +1,7 @@
 #include "NoiseShaperLearner.h"
 #include "AudioEngine.h"
+#include "InputInspection.h"               // ★ B-05: XML のサイズ・深さ検査
+#include "learner/LearnedStateMigration.h"   // ★ B-15: 形式の世代
 #include "core/ThreadAffinityManager.h"
 #include <JuceHeader.h>
 
@@ -1501,6 +1503,9 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 {
     juce::XmlElement xml("ConvoPeqLearnedState");
+    // ★ B-15: 形式の世代を明示する。version 無しは legacyUnknown として扱われる。
+    xml.setAttribute(convo::learnedstate::kVersionAttribute, convo::learnedstate::kCurrentVersion);
+    xml.setAttribute(convo::learnedstate::kConversionAttribute, convo::learnedstate::kConversionParcor);
     xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore, std::memory_order_acquire));
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
@@ -1522,9 +1527,31 @@ bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 
 bool NoiseShaperLearner::loadLearnedState(const juce::File& file)
 {
-    auto xml = juce::XmlDocument::parse(file);
+    auto xml = convo::safeinput::parseXmlFile(file);
     if (xml == nullptr || !xml->hasTagName("ConvoPeqLearnedState"))
         return false;
+
+    // ★ B-15: 形式の世代を確認する。
+    //   - version 無し: 旧形式（二重 tanh）か新形式かを値から決められないため
+    //     legacyUnknown として扱い、値を変更しない（自動変換は行わない）。
+    //   - version 1: 旧形式。これも自動変換しない。
+    //   - version 2: 現行形式。
+    //   - version 3 以上: 未知。状態を壊さないよう読み込みを拒否する。
+    const auto versionInfo = convo::learnedstate::readVersion(*xml);
+    if (versionInfo.version > convo::learnedstate::kCurrentVersion)
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] loadLearnedState refused: unknown version "
+                                 + juce::String(versionInfo.version));
+        return false;
+    }
+
+    const bool legacyUnknown = versionInfo.legacyUnknown || versionInfo.legacyV1;
+    convo::publishAtomic(learnedStateLegacyUnknown_, legacyUnknown, std::memory_order_release);
+    if (legacyUnknown)
+    {
+        juce::Logger::writeToLog("[NoiseShaperLearner] learned_state.xml has no version or version 1; "
+                                 "loaded as-is (legacyUnknown). Run --migrate-learned-state to convert explicitly.");
+    }
 
     const double savedSampleRate = xml->getDoubleAttribute("sampleRate");
     const int savedBitDepth = xml->getIntAttribute("bitDepth");

@@ -577,12 +577,15 @@ Console で「トークンを生成」→ ダイアログの readonly input に 
   **`finalize_dropbox.py` は `HERE` を未定義のまま参照していた**（`NameError`）—
   `HERE = os.path.dirname(os.path.abspath(__file__))` を足すこと。
 
-## 既知の性能問題 — 学習ノイズシェイパー状態ファイル（2026-11-10 実測）
+## 既知の性能問題 — 学習ノイズシェイパー状態ファイル（原因特定済み・2026-11-13 再検証）
 
-- `%APPDATA%\ConvoPeq\noise_shaper_learn.xml`（278 KB / 180 要素 = 10 サンプルレート × 3 ビット深度 × 6 モード）の読み込み・再構築に **起動 +10.7 秒、終了時の `DeviceSettings::saveSettings` +10.2 秒**を要する。
-- 同ファイルを 38 バイトにすると `saveSettings` は 66 ms、プロセス寿命は 5.9 秒（起動 1.8 秒）。ファイル書込み自体は 2 ms、`saveSettings` 窓の CPU 時間は +10.4 秒。原因の関数は未特定（`saveNoiseShaperState` の既存 XML パース／`loadNoiseShaperState` が候補）。
-- このため `HeadlessAudioPathVerification`（タイムアウト 30 秒）はプロセス寿命 25.9〜28.7 秒で余裕がない。**タイムアウト延長で隠さない。**
-- 根拠: `doc/work113/20261110-1313_終了遅延調査/report.md`。
+- 2026-11-10 の実測では `%APPDATA%\ConvoPeq\noise_shaper_learn.xml`（278 KB / 180 要素 = 10 サンプルレート × 3 ビット深度 × 6 モード）の読み込み・再構築に **起動 +10.7 秒、終了時の `DeviceSettings::saveSettings` +10.2 秒**を要し、同ファイルを 38 バイトにすると `saveSettings` は 66 ms、プロセス寿命は 5.9 秒（起動 1.8 秒）だった。ファイル書込み自体は 2 ms、`saveSettings` 窓の CPU 時間は +10.4 秒。
+- **原因（特定済み）**: `computeMaxElementDepth`（`src/InputInspection.cpp`）が `juce::String::operator[]` による文字位置参照で走査していた。JUCE の `String` は UTF-8 を保持するため `text[i]` が O(i) となり、全文走査が **O(n²)** になる。根拠は 2026-11-10 の関数別プローブ計測で、同関数が **12,697〜12,858 ms**、`loadNoiseShaperState` の **98% 以上**を占めていたこと。
+- **修正（既存・2026-11-10 に適用済み）**: UTF-8 バイト列のポインタ走査（O(n)）へ置換した（「B 修正案 A」）。判定条件・分岐順序・戻り値は変えていない。**今回の再検証で新たな修正はしていない。**
+- **修正後の確認（2026-11-13）**: 278 KB と 38 バイトを各 3 回比較し、起動 1.79〜1.96 秒・総経過 5.95〜6.33 秒でファイルサイズ依存が解消したことを確認。
+- **留保**: 旧実装との直接比較は未実施。原因の同定は当時のプローブ計測に基づく（`src/InputInspection.cpp` は未追跡のため当時のコードは残っていない）。
+- 上記により `HeadlessAudioPathVerification`（タイムアウト 30 秒）に対する余裕の懸念は解消した。**タイムアウト延長で隠さない方針は維持する。**
+- 根拠: `doc/work113/20261110-1313_終了遅延調査/report.md`、`doc/work113/20261110-1418_プローブ計測/report.md`、`doc/work113/20261113-1530_BUG2原因確定/report.md`。
 
 ## Gate 1: EQ の RCU 入場失敗時は退役対象に触れない（2026-11-11）
 
@@ -646,17 +649,18 @@ Console で「トークンを生成」→ ダイアログの readonly input に 
   `ebrWait`。burst 系の最大 2.16 s は **ebrWait**（走査済みだが epoch 安全条件待ち）、
   eq の最大 11.9 s は **driverWait**（一度も走査されない）。**後者は EQ ドメインではなく
   エンジン側 ISR ドメインのキューと推定**される（EQ は段階①ドライバが 100 ms で走査するため
-  `driverWait` が 100 ms を大きく超えない）。帰属確定には domain tag が必要（未承認）。
+  `driverWait` が 100 ms を大きく超えない）。帰属確定には domain tag が必要（`173e6995` で実装済み）。
 - `sync` / `drain` の 1〜2 件は `reclaim()` の走査を通らないため `firstScanTs = 0` となり
   `unclassified` に全額計上される（設計どおり。ここを 0 にしてはいけない）。
 
-## domain tag: 実装済み（未コミット）・設計 v2.9 受理済み（2026-11-12）
+## domain tag: 実装済み・commit 済み `173e6995`（当時の origin/main と同一。現在の main は `6e099932`）・設計 v2.9 受理済み（2026-11-12）
 
 - 設計差分: `doc/work113/20261111-1512_domain設計/design_diff.md`（**v2.9 で受理済み・不改変**。53,979 B /
   SHA-256 `C3AE50991D9AB0A50BF09C9D8BDBD0B8919AC4F04732F567D93AE76656848427`）。受理記録と着手前チェックは
   `doc/work113/20261111-2400_着手前確認/`、**実装と §7.2 の検証は
   `doc/work113/20261112-0030_domain実装/`**（ctest 61/61・15 項目 PASS）。
-- **実装済み・未コミット**（2026-11-12）。commit／merge／release は未実施。
+- **実装済み・commit 済み**（2026-11-12 01:48、`173e6995`、親 `c94d3767`）。**push 済み**（2026-11-12 時点で origin/main と同一。当初の記録の「未 push」は現在は該当しない）。merge／release は未実施。
+  commit は domain tag とその前提の測定・分類・テスト 49 ファイル。B-01〜B-13 の監査対応、`.github` スクリプト、`ConvoPeq.md` は範囲外として未ステージのまま残した。
   - 新設 `src/core/RetireDomain.h`、`EpochDomain` の明示 ctor、`DeletionEntry.domainId`、
     `IRetireProvider::retireDomainId()`、Router の委譲、Terminal／Quarantine への明示引数、
     `retireLatencyClassified.domains[]`、生成箇所 38（本番 3 + テスト 35）。
@@ -851,3 +855,156 @@ OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツー�
 - **context-mode の MCP エントリには `enabled: true` が残っている**。2.0.16 ではこのキーでエントリが破棄されたが、2.3.2 では `mcp connected server=context-mode tools=9` が記録されており接続している。互換のため触っていない。
 - **`context-mode doctor` は他エージェントの行で FAIL する**（claude-code は 1.x の古いエントリ、codex / gemini / qwen / vscode は未設定）。opencode の行は PASS なので、終了コード 1 は本環境の不具合ではない。
 - **Graphify Cloud の無料プランは 1 リポジトリ 25,000 ノードまで**（CLI ソースの `_CLOUD_CTA_LARGE_GRAPH_NODES = 25_000` と一致）。本リポジトリは 71,126 ノードで無料枠に収まらない。Cloud は `https://app.graphify.com` のホスト型で MCP 接続、CLI の `--backend` には無い。このリポジトリでは既に Graphify Labs の GitHub App が PR チェック（`Graphify` / `Graphify Formal Verification`）を出しており、Cloud 側の機能はそこで使えている。ホスト型グラフ MCP を足すにはアカウント作成が必要。
+
+
+## drain タイムアウト（2 秒）の原因 — 実測 2026-11-13
+
+- 通常終了時の `waitForDrain(2000, 2)` タイムアウトは 3/3 で再現する。`isFullyDrained()` の 9 条件のうち
+  **偽になるのは c3（`m_retireRouter->pendingRetireCount()` = 1、EngineISR ドメイン）と
+  c9（`runtimePublicationBridge_.isFullyDrained()` = false）だけ**。他の 7 条件
+  （deferred publish / pending reclaim / lifetime intent / overflow ring / DSP quarantine /
+  retire quarantine / terminal reclaim）はすべて 0 で、Reader も 0。
+- タイムアウト時点の c3 は 1 だが、フォールバック後の `sh3_pendingRetire` は 2。増加は
+  `drainDeferredRetireQueues(true)` → `tryReclaim` の区間で起きる。
+- **`evidence/world_lifecycle_audit.json` は起動直後の定期ダンプ（60 秒間隔）のままで古い。**
+  短時間実行では `publishedCount=1 / retiredCount=0` のままになる。ライブ値は
+  `evidence/world_retirement_telemetry.json`（`acquireObserved` / `releaseObserved`）を見る。
+- 診断ログは `[DRAIN_DIAG]` で 1 shutdown あたり 2 行（`worldClear` と `timedOut`）。
+  実装は `AudioEngine.Processing.ReleaseResources.cpp` と `AudioEngine.h` の
+  `pendingReclaimHandleCount()` 1 個。報告は `doc/work113/20261113-1846_drain診断/`。
+- **原因確定（A/C 計測・3 回同値）**:
+  - c3 = **epoch が 2 秒窓で前進しない**。先頭 entry の `epoch` = `minReaderEpoch` = `currentEpoch`（実測 12）で
+    `isOlder` が偽。`ForceEpochAdvance` の 1 回は最後の enqueue（clear→retire など）より前、
+    `~AudioEngine` の `publishEpoch()` は 2 秒窓の後。`drainDeferredRetireQueues` は epoch を進めない。
+  - c9 = **`retireBacklogCount_` に本番の減算経路が無い**。`onRetireAccepted()` は EQ の
+    `enqueueRetire`（`EQProcessor.Core.cpp:60` → engine の `runtimePublicationBridge_`）から +1 されるが、
+    `onRetireConsumed()` の本番呼出し元は 0。実測 143 件。
+    このため `isFullyDrained()` は恒久的に偽になり、`markShutdownComplete` は毎回 Faulted へ遷移する。
+  - **c3 と c9 は独立**。片方だけ直してもタイムアウトは消えない。設計検討は
+    `doc/work113/20261113-2031_c3c9設計検討/`。
+  - **待機中の +1 件の出所（追加調査で確定）**: 2 秒待ちの後に走る `m_coordinator.finalizeShutdown()`
+    （`SnapshotCoordinator::retireCurrentAndTarget`、`SnapshotCoordinator.h:179-203`）が
+    `publishEpoch()` で epoch を 1 進めてから `GlobalSnapshot` を 1 件 enqueue する。
+    enqueue は前進の**後**で、新しい epoch の entry になる。`drainDeferredRetireQueues(true)` と
+    OwnerChannel 残存 drain（`drainedResidual=0`）は enqueue しない。
+  - **5 秒 graceful drain（`ReleaseResources.cpp:287-313`）は既に `publishEpoch` + `tryReclaim` を
+    10 ms ごとに実行している**。今回の実行ではキューが空で即 break したため 0 回だった。
+    前進しないのは 2 秒待ちのループだけ。
+  - **採用方針（2026-11-13 Owner 判断・実装 GO は未発行）**: c3 は C3-D（先頭 entry の identity 単位で
+    最大 1 回前進）、c9 は C9-A（Coordinator の drain 述語から `retireBacklogCount_ == 0` だけを外す）。
+    `retireBacklogCount_` は pressure slope 専用として残し、実 backlog としては扱わない。
+  - **前進処理の配置（2026-11-13 Owner 指定）**: `waitForDrain` のループ内で `publishEpoch()` し、
+    その後に `drainDeferredRetireQueues(true)` を実行する。`drainDeferredRetireQueues(true)` の
+    本番呼出しは 3 箇所（`AudioEngine.Threading.cpp:327` = waitForDrain、
+    `ReleaseResources.cpp:377` = ReclaimComplete 前、`AudioEngine.CtorDtor.cpp:320` = ~AudioEngine）
+    あり、共通 drain 関数に前進を入れると 3 経路すべての意味が変わる。
+  - **C3-D の head identity API 拡張は実装・検証済み（2026-11-13）**: `peekHead` を
+    `(DeletionEntry&, uint32_t& slotIndex, uint32_t& sequence)` へ拡張し、**失敗時は 3 つとも書かない**
+    （推定値を返さない）。`RetireHeadSnapshot` に `headSlotIndex` / `headSequence` を追加し、
+    `[DRAIN_DIAG]` に `headSlot=` / `headSeq=` を出力する。契約テストは
+    `ISRSemanticValidationTests.cpp` の `testAC2_headIdentity`（空キュー・sequence 不一致・
+    peek 反復で不変・reclaim 後の identity 変化・deleter 1 回）。ミューテーションで検出力も確認済み。
+  - **C3-D 本体も実装済み（2026-11-13）**: `AudioEngine::waitForDrain` のループ先頭で
+    `inspectRetireHead()` の identity を見て `advanceRetireEpoch()` し、その後に
+    `drainDeferredRetireQueues(true)` を呼ぶ。同一 identity への前進は最大 1 回。前進は
+    `minReaderEpoch` を変えないため Reader の安全条件は不変。`waitForDrain` の呼出し元は
+    `releaseResources` の 2 箇所だけなので、通常動作には影響しない。
+  - **C9-A も実装済み（2026-11-13）**: `ShutdownScheduler::isFullyDrained()` から
+    `retireBacklogCount_ == 0` を削除（残り 13 条件）。テストは Bootstrapping 側
+    （retireBacklog 非 0 でも drained）と Faulted 側（残した条件を非 0）の両方を固定。
+  - **2 秒 drain タイムアウトは解消（2026-11-13 実測 3/3）**: 変更前 6.23〜6.81 s →
+    変更後 4.28〜4.57 s、`drain timeout reached` と `[FAULT] ~AudioEngine: coordinator in
+    Faulted state` が消え、`sh3_pendingRetire=2` → 0、`reclaimSuccess` 6 → 8。
+    C3-D 単独では c3 だけが消えてタイムアウトは残る（c9 が残るため）。両方入れて解消する。
+  - **`retireBacklogCount_` の改名**: 起票（`doc/work113/20261113-2250_改名課題/issue.md`）に続き、
+    2026-11-13 に **`retireAcceptedCount_` / `getRetireAcceptedCount()` / `setRetireAcceptedCount()` へ改名**した
+    （意味論・更新経路・drain 判定は不変、`ctest` 61/61）。`noteRetireBacklogChanged` と
+    `previousRetireBacklogCount_` は課題票の対象外として旧名のまま。
+  - **AC1 ミラー（解消済み）**: `testAC1_drainBreakdownMatchesPredicate` の `allDrained` ラムダは
+    C9-A 後も 14 条件のままで、`retireBacklog` が常に 0 のシナリオでは PASS するため乖離を検出できなかった。
+    PR #207 の `74e9aab0` で `b.retireBacklog == 0` を削除して述語と同じ 13 条件に揃え、
+    `setRetireAcceptedCount(7)` を与えても述語とミラーが一致するシナリオを追加した
+    （起票: `doc/work113/20261113-2350_AC1修正課題/issue.md`）。
+  - **Debug 構成の既知の失敗（2026-11-13 実測・構成固有）**: `ctest -C Debug` は 59/61。
+    `D8_2_B_2_Tests` は **0xC00000FD（stack overflow）** — `EpochDomain`（約 230 KB）をスタックに
+    置くため。同じバイナリの複製に `editbin /STACK:8388608` を適用すると T1〜T13 すべて PASS
+    するので、ロジック不良ではない。`TailLayerIntegrityTests` は RES-F の CPU 予算（10 ms/s）超過
+    （Debug は 11.6〜34.0 ms/s、メモリは 32 MB 以内）。どちらも C3-D/C9-A とは無関係。
+
+## ビルド環境 — GNU Octave の mingw64 が PATH にあると CMake 構成が壊れる（2026-11-13 実測）
+
+- 本機では `C:\Program Files\GNU Octave\Octave-11.3.0\mingw64\bin` が PATH 上で Windows SDK より
+  先に来る。CMake は `link.exe` の代わりに Octave の `ld.exe` と `ar.exe` を検出し、`juceaide` の
+  サブビルドが `cannot find /nologo` や `RC Pass 1 ... failed` で落ちる。
+- 対策: PATH から `Octave|mingw64|msys|MinGW` を含む要素を外してから `vcvars64.bat` を呼び、
+  `MKLROOT` / `IPPROOT` を設定して構成する。`build/JUCE/tools/CMakeCache.txt` と `CMakeFiles` は
+  毎回消す（`build.bat` と同じ手順）。壊れたキャッシュには `CMAKE_LINKER` / `CMAKE_AR` に
+  Octave のパスが残るので、その場合は値も直す。
+- `build.bat` は msvc モードで vcvars を呼ばない（MSVC 環境は呼出し側で用意する）。
+- `cmd /c` から `build.bat` を起動すると、`chcp 65001` の切り替えで日本語 REM 行が途中で切れ、
+  `'M' is not recognized` と `Failed to create build directory` になる。cmake を直接叩く方が確実。
+
+## main 統合 2026-11-14（C3-D / C9-A / 改名・merge `862565a3`）
+
+- **経緯**: C3-D・C9-A・改名は `main` の作業ツリーに**未コミット**で存在し、ブランチは無かった。
+  Owner 指示（進め方 B）でハンク単位に選別し、`impl/c3d-c9-rename-20261114`（`6bb57003`）へ 1 コミット、
+  `main` へ `--no-ff` マージ（`862565a3`・push 済み）。
+- **除外した 6 ハンク**（`ConvolverStopProbe` 系 5・BUG-1 の `stateMutex` 1）は作業ツリーに残置。
+  混在 3 ファイル（`AudioEngine.Threading.cpp` / `ReleaseResources.cpp` / `AudioEngine.h`）の
+  未コミット差分は、いまこの 6 ハンクだけになっている。
+- **新 HEAD の実測**: Release ビルド 692 ターゲット（アプリ 126）エラー 0、ctest **57/57**（166.77 s）、
+  CLI 12 秒 × 3 で drain タイムアウト 0・`[FAULT]` 0・総経過 13.86〜14.24 s。
+- **ctest が 61 ではなく 57 の理由**: 未コミットの `CMakeLists.txt`（+143 行）が追加した 4 ターゲット
+  （`CacheManagerHeaderValidationTests` / `InputInspectionTests` / `LearnedStateMigrationTests` /
+  `LearnerStateAuthorityTests`）は HEAD に存在しない。**57 が新 HEAD の正しい登録数**。
+- **CI（`862565a3`）**: Windows MSVC Build success（ConvoPeq と AudioEngineHarness のビルドまで。
+  push では ctest を実行しない）／ISR Authority Compliance success／CodeQL success／
+  Sanitizer CI success（TSan・ASan とも success）／audioengine-lint failure／list-compliance failure。
+- **失敗 2 件はベース `173e6995` と同一**（本マージで増えていない）。
+  `[LINT-AE-011]` は `ISRDebugRuntime.h:37` と `ISRRetireLatency.h:1021` の 2 件でベースも同じ。
+  `list-compliance` の `[3.1] Strict atomic dot-call scan failed` は、検査スクリプトを
+  ベースとマージ後ツリーの両方に実行して **7 ファイル 258 件が完全一致**することを確認した。
+- **`--verify-runtime-evidence-live` は main では未実装**（B-11 の未コミット変更）。HEAD の
+  `--verify-runtime-evidence` 判定は部分一致なので、このフラグを渡すと証跡を書いて即終了する
+  （実測 0.05 s・exit 0）。統合計測は `--cli-run --cli-exit-ms <ms>` だけで行う。
+- **全ターゲット一括ビルドは `JuceHeader.h` の生成順で失敗する**（`fatal error C1083`）。
+  `cmake --build build --config Release --target ConvoPeq` を先に実行して `JuceHeader.h` を生成し、
+  その後に全ターゲットをビルドする。
+
+## PR #207 統合 2026-11-14（検証ゲート復旧・merge `6e099932`）
+
+- **内容**: `audioengine-lint`（LINT-AE-011 2 件）、`list-compliance`（atomic dot-call 258 件）、
+  `isr-verify` の proof-scope 検査を復旧した。`main` の `862565a3` へ `--no-ff` 相当の
+  マージコミット `6e099932`（親 = `862565a3` + `25d68e9c`）で統合した。
+- **レビュー指摘**: CodeRabbit の指摘 12 件をすべて修正した。Proof Scope 検証器は
+  次の穴を順に塞いである（いずれもフィクスチャで固定）。
+  - `#if 0` / 条件コンパイル下の定義・ガード・呼び出しは「有効を確定できない」として拒否
+  - 定数は完全一致のみ受理（`1 && 0` は unknown）。`#if` 内の式を有効分岐と誤認しない
+  - 指令の走査はコメント・文字列を伏せた同じ長さのテキストで行う
+  - 文・呼び出しの走査の前に指令行（行継続含む）を空白化する（未使用 `#define` 対策）
+  - ガードは関数本体のトップレベル（深さ 1）のみ、Release リテラルは大小文字を区別
+  - `emitHBTrace()` は Release 専用ブロック内・定数偽ブロック内では通さない
+- **`retireBacklogCount_` 改名に追随していなかったゲート 3 本**（Issue #208）:
+  `isr-verify-runtime-coordinator-state-machine.ps1` / `isr-verify-v73-retire-pressure-contract.ps1` /
+  `isr-verify-gate-wiring.ps1`。**改名時はゲート側の識別子も必ず検索すること**
+  （`git grep -e 旧名 -- .github`）。
+- **単一 drain authority**（Issue #209）: policy は
+  `runtimePublicationBridge_.isFullyDrained()` を `AudioEngine.Threading.cpp` のみ許可する。
+  `ReleaseResources.cpp` の `[DRAIN_DIAG]` は `collectDrainBreakdown()` から 13 条件を計算する
+  （`retireBacklog` は C9-A で述語から外れているため含めない）。
+- **AC1 ミラー**: `testAC1_drainBreakdownMatchesPredicate` の `allDrained` は 13 条件に揃え、
+  `retireBacklog` が非 0 でも述語と一致するシナリオを追加した。
+- **検証**: Release ctest 57/57、proof-scope self-test 46/46、lexer probe 全通過、
+  `isr-run-tiered-verification.ps1 -Tier standard` PASS。CI は必須 14 success・skipped 2・failure 0。
+- **注意**: `--verify-runtime-evidence-live` は main では未実装（B-11 の未コミット作業）。
+  HEAD の `--verify-runtime-evidence` は部分一致なので、このフラグは証跡を書いて即終了する。
+## ツール更新 2026-11-17（graphify 0.9.111 / OpenCode V2 + OpenChamber）
+
+- **手順**: `uv tool install "graphifyy[mcp]==0.9.111" --force`。ただし MCP の graphify 子プロセスが exe を掴んでいると `failed to remove directory ...\graphifyy\Scripts: os error 32` で失敗する（uv は旧ツールを先に消すため、失敗すると一時的に未登録になる）。`CommandLine` に graphify を含む python / graphify-mcp のプロセスを停止してから実行する。
+- 停止するとそのセッションの graphify MCP ツールは消える。再接続は OpenChamber の再起動が要る。検証は `C:\Users\user\.local\bin\mcp\mcp-probe.py` と、生の JSON-RPC の `tools/call` で行う（プローブはツール一覧まで、実呼び出しは別途）。
+- **スキル同期**: `graphify install --platform opencode|claude|codex|copilot`。opencode は `~/.config/opencode/skills/graphify` と `~/.config/opencode/plugins/graphify.js` を書く。plugin は `export default { id, setup, server }` 形式で、**OpenChamber の V2 契約（id と setup）に適合**する。サーバーログは `loading plugin` のみで失敗は出ない。
+- **AST キャッシュは schema 47（0.9.110 で 46→47）**。`graphify update .` は差分のあったファイルだけ再抽出し、未変更ファイルは旧 schema の node id のまま残る（全件再抽出はしない）。ConvoPeq のグラフは 71,125 ノード中 55,843 が `.md` なので、`--code-only` の全再構築は文書ノードを落とす。全再構築はしない。
+- **新機能**: `graphify section "<heading>"`（CLI）と MCP `get_section`。MCP の引数は `label` / `node_id` / `id` で、`heading` は受け付けない。`get_section` はグラフを変えず、読み取り時に見出しの本文をソースから切り出す。`diagnose multigraph`（同一端点の collapse 診断）も追加。MCP ツールは 10 → 11。
+- **0.9.111 は Python 3.11 以上が必須**（`requires_python <3.15`）。uv tool venv は 3.14.7 で、`mcp 2.3.0` はツール venv 内に隔離されるため、共有 site の `mcp<2` 制約とは競合しない。
+- **C++ に関係する修正**: 0.9.107 で折り畳みメンバ宣言の `definition_file` を root 相対に統一、0.9.109 で `Foo` と `~Foo`・`name_` の twin id を分離、0.9.110 で入れ子型を owner 修飾 id にし（`Left.Builder` と `Right.Builder` の衝突解消）、`Outer::Inner::m()` の修飾呼び出しを解決する。
+- **0.9.108 の serve 改善**: グラフ再読込が全 MCP 要求を止めない（新しいグラフを横で作って原子的に差し替える）。

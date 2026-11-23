@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "DspNumericPolicy.h"   // ★ B-09: convo::numeric_policy::isFinite
 #include "core/RuntimeReaderContext.h"
 #include "NoiseShaperLearner.h"
 
@@ -494,8 +495,22 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRate(double sampleRate, const 
     getAdaptiveCoefficientsForSampleRate(sampleRate, stagedCoefficients, kAdaptiveNoiseShaperOrder);
 
     const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
+    bool acceptedAny = false;
+
     for (int i = 0; i < limit; ++i)
+    {
+        // ★ B-09: 非有限値は bank へ入れない（staged には現在値が入っているため、
+        //   その index は以前値を維持する）。clampCoeff でも 0 に落ちるが、
+        //   保存→再読で NaN が固定化するのをここで断つ。
+        if (!convo::numeric_policy::isFinite(coeffs[i]))
+            continue;
+
         stagedCoefficients[i] = coeffs[i];
+        acceptedAny = true;
+    }
+
+    if (!acceptedAny)
+        return;
 
     storeLearnedCoeffsToBank(bankIndex, stagedCoefficients);
 }
@@ -549,8 +564,22 @@ void AudioEngine::setAdaptiveCoefficientsForSampleRateAndBitDepth(double sampleR
     getAdaptiveCoefficientsForSampleRateAndBitDepth(sampleRate, bitDepth, stagedCoefficients, kAdaptiveNoiseShaperOrder);
 
     const int limit = std::min(kAdaptiveNoiseShaperOrder, numCoefficients);
+    bool acceptedAny = false;
+
     for (int i = 0; i < limit; ++i)
+    {
+        // ★ B-09: 非有限値は bank へ入れない（staged には現在値が入っているため、
+        //   その index は以前値を維持する）。clampCoeff でも 0 に落ちるが、
+        //   保存→再読で NaN が固定化するのをここで断つ。
+        if (!convo::numeric_policy::isFinite(coeffs[i]))
+            continue;
+
         stagedCoefficients[i] = coeffs[i];
+        acceptedAny = true;
+    }
+
+    if (!acceptedAny)
+        return;
 
     storeLearnedCoeffsToBank(bankIndex, stagedCoefficients);
 }
@@ -619,6 +648,9 @@ void AudioEngine::storeLearnedCoeffsToBank(int bankIndex, const double* coeffs)
 [[nodiscard]] bool AudioEngine::getAdaptiveNoiseShaperState(int bankIndex, convo::NoiseShaperLearnerState& outState) const noexcept
 {
     const auto& bank = getAdaptiveCoeffBankForIndex(bankIndex);
+    // ★ BUG-1: 書き手（setAdaptiveNoiseShaperState）と同じ mutex を取る。
+    //   取らないと 560 B の構造体コピーが書き込みと重なり、世代混在の torn read になる。
+    std::lock_guard<std::mutex> lock(bank.stateMutex);
     outState = bank.state;
     return true;
 }

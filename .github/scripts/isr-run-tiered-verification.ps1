@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('smoke', 'standard', 'exhaustive')]
     [string]$Tier = 'smoke',
     [switch]$RequireRuntimeEvidence,
@@ -176,7 +176,14 @@ if ($RequireRuntimeEvidence) {
         $env:CONVO_ISR_RUNTIME_RUN_ID = "local-$([guid]::NewGuid().ToString('N'))"
     }
     Write-Host "[INFO] tier=$Tier strict runtime evidence mode enabled: runId=$($env:CONVO_ISR_RUNTIME_RUN_ID)"
-    & ./.github/scripts/isr-run-runtime-evidence.ps1
+    # ★ B-11: 実測シナリオ証跡（generate）とアプリ出力（run、run 単位ディレクトリ）を分離する。
+    #   run はアプリが出さなかった artifact を -AllowSynthesis で補うが、
+    #   provenance=synthesized / status=not_measured として識別され、
+    #   実測を要求する検証器（v5/v6/v7）の合格には使われない。
+    & ./.github/scripts/isr-generate-runtime-evidence.ps1
+    & ./.github/scripts/isr-run-runtime-evidence.ps1 -AllowSynthesis
+    $runEvidenceRoot = Join-Path (Join-Path (Join-Path (Join-Path (Get-Location) "evidence") "runs") $env:CONVO_ISR_RUNTIME_RUN_ID) "evidence"
+    & ./.github/scripts/isr-verify-evidence-consistency.ps1 -EvidenceRoot $runEvidenceRoot
 }
 else {
     $env:ISR_REQUIRE_RUNTIME_EVIDENCE = '0'

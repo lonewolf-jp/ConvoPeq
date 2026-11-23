@@ -453,9 +453,7 @@ void AudioEngine::onRuntimePublishedNonRt(const RuntimePublishWorld& world) noex
     const bool diagTickDue = (diagLastTicks == 0 || (diagNowTicks - diagLastTicks) >= diagIntervalTicks);
     if (diagTickDue)
     {
-#if defined(JUCE_DEBUG) || defined(CONVO_CI_BUILD)
         debugRuntime_.emitCIArtifacts();
-#endif
         debugRuntime_.emitHBTrace();
     }
     emitEvidenceTickNonRt(false);
