@@ -350,6 +350,12 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
     if (engine.getAdaptiveNoiseShaperState(bankIndex, newState) && newState.iteration > 0)
     {
         setState(newState);
+        // ★ B-07(a): setState() no longer writes worker-owned fields. This call path IS the
+        //   worker thread, so adopt the restored clock/phase here to keep the mode-switch
+        //   semantics (phase recomputed from the restored elapsed time).
+        accumulatedPlaybackSeconds =
+            convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire);
+        currentPhase = convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire);
     }
     else
     {
@@ -416,12 +422,15 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
     convo::fetchAddAtomic(optimizerStateEpoch, std::uint64_t{1}, std::memory_order_acq_rel);
     for (int i = 0; i < kOrder; ++i)
         convo::publishAtomic(bestCoefficients[i], inState.bestCoefficients[i], std::memory_order_release);
-    accumulatedPlaybackSeconds = inState.elapsedPlaybackSeconds;
-    currentPhase = inState.currentPhase;
+    // ★ B-07(a): accumulatedPlaybackSeconds / currentPhase are worker-owned plain fields.
+    //   setState() is also called from the message thread (AudioEngine::Timer recovery), so
+    //   writing them here would race with the worker loop. Publish the restored values and
+    //   let the worker adopt them at the next generation boundary; the public view
+    //   (progress) is already consistent with the restored state at return.
     convo::publishAtomic(progress.iteration, inState.iteration, std::memory_order_release);
     convo::publishAtomic(progress.bestScore, inState.bestScore, std::memory_order_release);
-    convo::publishAtomic(progress.elapsedPlaybackSeconds, accumulatedPlaybackSeconds, std::memory_order_release);
-    convo::publishAtomic(progress.currentPhase, currentPhase, std::memory_order_release);
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, inState.elapsedPlaybackSeconds, std::memory_order_release);
+    convo::publishAtomic(progress.currentPhase, inState.currentPhase, std::memory_order_release);
     convo::publishAtomic(progress.processCount, inState.processCount, std::memory_order_release);
     convo::publishAtomic(progress.totalGenerations, inState.totalGenerations, std::memory_order_release);
 }
@@ -888,7 +897,11 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
         // ★ review: local baseline must follow a restore (setState publishes progress.bestScore).
         std::uint64_t trackedOptimizerEpoch =
             convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
-        int generation = 0;
+        // ★ B-07(c): the generation counter continues from the restored value. Starting at 0
+        //   would publish iteration=1 right after a resume, regressing the generation that
+        //   setState()/getState() carry in the learner state.
+        int generation = static_cast<int>(
+            convo::consumeAtomic(progress.iteration, std::memory_order_acquire));
         DrainStats cumulativeDrainStats {};
         auto lastWaitingDiagnosticsLogTime = std::chrono::steady_clock::now();
 
@@ -1007,6 +1020,14 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                     // 復元後は復元されたスコアを比較の基準にする（古い baseline を残さない）。
                     trackedOptimizerEpoch = optimizerEpochAtSample;
                     bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
+                    // ★ B-07(a): the restore request only publishes. Worker-owned plain
+                    //   fields (playback clock, phase) and the generation counter are
+                    //   adopted here, at the generation boundary, so the evaluated state
+                    //   and the published values stay in the same generation.
+                    accumulatedPlaybackSeconds =
+                        convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire);
+                    currentPhase = convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire);
+                    generation = static_cast<int>(convo::consumeAtomic(progress.iteration, std::memory_order_acquire));
                 }
                 optimizer.sample(candidatePopulationMatrix());
             }
@@ -1088,6 +1109,10 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             if (committed)
                 appendHistoryPoint(bestCandidateScore);
 
+            // ★ B-07: iteration は確定済み世代の通し番号。ここだけは optimizerMutex の外で
+            //   公開するため、getState() は「係数は世代 N、iteration は N+1」を観測し得る。
+            //   状態そのもの（mean / 係数 / bestScore）は同一臨界区間で揃うので、これは
+            //   混在ではなく「確定済み世代が 1 つ先に見える」だけの許容範囲とする。
             convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
             convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
             ++generation;
@@ -1506,23 +1531,29 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 
 bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 {
+    // ★ B-07(b): the whole file must come from one generation. Reading the published
+    //   atomics one by one can interleave with setState() and write the CMA mean of one
+    //   generation together with the coefficients / score of another. getState() takes
+    //   optimizerMutex and setState() publishes under the same mutex, so a single snapshot
+    //   is a single generation.
+    State state;
+    getState(state);
+
     juce::XmlElement xml("ConvoPeqLearnedState");
     // ★ B-15: 形式の世代を明示する。version 無しは legacyUnknown として扱われる。
     xml.setAttribute(convo::learnedstate::kVersionAttribute, convo::learnedstate::kCurrentVersion);
     xml.setAttribute(convo::learnedstate::kConversionAttribute, convo::learnedstate::kConversionParcor);
-    xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore, std::memory_order_acquire));
+    xml.setAttribute("bestScore", state.bestScore);
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
-    xml.setAttribute("phase", convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire));
-    xml.setAttribute("elapsedPlaybackSeconds", convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire));
+    xml.setAttribute("phase", state.currentPhase);
+    xml.setAttribute("elapsedPlaybackSeconds", state.elapsedPlaybackSeconds);
 
     auto* coeffsXml = xml.createNewChildElement("BestCoefficients");
     for (int i = 0; i < kOrder; ++i)
-        coeffsXml->setAttribute("c" + juce::String(i), convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire));
+        coeffsXml->setAttribute("c" + juce::String(i), state.bestCoefficients[i]);
 
     auto* cmaXml = xml.createNewChildElement("CmaMean");
-    State state;
-    getState(state);
     for (int i = 0; i < kOrder; ++i)
         cmaXml->setAttribute("m" + juce::String(i), state.mean[i]);
 

@@ -1018,3 +1018,21 @@ OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツー�
   `.opencode/opencode.json`（gitignore 済み）に置く。後者は `integ/ConvoPeq/graphify-out/graph.json`
   （`graphify update .` で作る code-only グラフ）を指す。
 - 経緯: `doc/work113/20261124-0030_反映計画/report.md`、`doc/work113/20261124-0145_移行記録/report.md`
+
+## B-07 復元要求と公開値の同期（Issue #278・2026-11-24 実測）
+
+- **復元要求（`NoiseShaperLearner::setState()`）は公開値だけを書く。** worker 専用の
+  `accumulatedPlaybackSeconds` / `currentPhase` と `generation` は、主ループの epoch 変化検出時に
+  worker 自身が取り込む。`setState()` は `AudioEngine.Timer.cpp` の復旧経路（メッセージスレッド）からも
+  呼ばれるため、以前の直接代入はデータ競合だった。
+- **`saveLearnedState()` は 1 回の `getState()` スナップショットから書く。** 属性ごとに atomic を読むと
+  `setState()` と交差し、新しい mean と古い係数が同じ XML に入る（旧実装の実測で 174 回中 173 回）。
+- **`bank.state` は `getAdaptiveNoiseShaperState()` / `setAdaptiveNoiseShaperState()` の 2 経路だけが触り、
+  両方が `bank.stateMutex` を取る。** `NoiseShaperLearnerState` は POD なので全体代入で安全。
+  C-03 は optimizer、`bank.stateMutex` は係数バンクを守る（守備範囲は重複しない）。
+- `progress.iteration` は `optimizerMutex` の外で公開するため、`getState()` は「係数が世代 N、iteration が
+  N+1」を観測し得る。状態（mean / 係数 / bestScore）は同じ臨界区間で揃うので許容。
+- `learned_state.xml` は iteration を保存しない。ファイルだけから復帰すると世代番号は 0 から再開する。
+- 試験: `CONVOPEQ_NS_RESTORE_SYNC_TEST=1 build\Release\AudioEngineHarness.exe`（約 2 秒・opt-in）。
+  `CONVOPEQ_NS_STATE_RACE_TEST=1` は従来どおり係数バンクの torn read を見る。
+- 根拠: `doc/work113/20261124-0800_B07同期/report.md`

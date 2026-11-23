@@ -2783,6 +2783,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         # BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
         src/tests/AudioEngineHarness/NoiseShaperStateRaceTests.cpp
+        # B-07: 復元要求と公開値・保存スナップショットの同期（専用テスト・opt-in）
+        src/tests/AudioEngineHarness/NoiseShaperRestoreSyncTests.cpp
         src/tests/AudioEngineHarness/RuntimeParameterGuardTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
