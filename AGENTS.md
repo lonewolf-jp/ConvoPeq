@@ -820,3 +820,13 @@ OpenCode V2 + OpenChamber 環境での実測。バックエンドは `opencode.e
   どちらも終了コード 0 で生成物に影響しない。
 - 実測: 141 ステップ、8.4 分、`ConvoPeq.exe` 48,817,152 B、icx の警告 156 行、エラー 0。
   `--cli-run --cli-exit-ms 1500` は終了コード 0、192 kHz で処理時間 平均 521〜535 µs・最大 900 µs。
+
+## CI — CodeQL はドキュメントのみの変更で解析をスキップする（2026-11-23 切替）
+
+- 2026-11-23 に CodeQL を **default setup から advanced setup（`.github/workflows/codeql.yml`）へ移した**。default setup は paths フィルタを持てず、`doc/` だけの push でも 4 言語（actions / c-cpp / csharp / javascript-typescript）が走り、c-cpp が実測 57〜71 分かかっていた。公開リポジトリなので課金は無く、失っていたのは待ち時間とランナー枠である。
+- 構成: workflow は常に起動する。`Detect changed files` が `windows-msvc-build.yml` と同じ規則（`doc/`・`*.md`・`.memories/`・`.x64dbg-mcp/`・`.zcode/` のみなら doc、判定不能は解析側へ）で分類し、`Analyze (<lang>)` の matrix はコード変更時だけ実行する。集約ジョブ `CodeQL` が単一の check 名になり、解析が必要なのに成功していなければ失敗する。
+- **workflow 自体を `paths` / `paths-ignore` で止めない**。止めると check が作られず、必須チェックに指定したときに doc のみの PR が `Pending` のままマージできなくなる（`windows-msvc-build.yml` に同じ理由が書いてある）。
+- build mode は **none（buildless）**。切替前の default setup も none で走っていた。autobuild はこのリポジトリでは成立しない（c-cpp は `mkl.h` と MSVC の `/EHsc` を要求し、csharp はビルド可能な .NET プロジェクトが無い）。
+- 言語を増やすときは workflow の matrix を直す（default setup の自動追従は無くなった）。アクションは `github/codeql-action/*@v4` 固定で、メジャー更新は手で行う。
+- 戻し方: workflow を削除し、`PATCH /repos/{owner}/{repo}/code-scanning/default-setup` に `{"state":"configured"}` を送る。カテゴリ（`/language:<lang>`）を切替前と揃えてあるので、アラートの追跡は切れない。
+- 必須チェックは `Windows MSVC / Release` の 1 本のまま。CodeQL は必須にしていない（`CodeQL` という安定した名前があるので、必要になれば指定できる）。
