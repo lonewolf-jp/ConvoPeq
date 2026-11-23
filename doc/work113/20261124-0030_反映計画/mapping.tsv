@@ -1,0 +1,61 @@
+scope	class	path	note
+tracked	F0	src/CacheManager.h	main と同一
+tracked	F0	src/IRConverter.h	main と同一
+tracked	F0	src/audioengine/AudioEngine.Learning.cpp	main と同一
+tracked	F0	src/audioengine/ISRRetireLatency.h	main と同一
+tracked	F0	src/convolver/ConvolverProcessor.ResampleAndFallback.cpp	main と同一
+tracked	F0	src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp	main と同一
+tracked	F1	.github/scripts/isr-run-tiered-verification.ps1	WIP の追加行はすべて main に在る
+tracked	F1	AGENTS.md	WIP の追加行はすべて main に在る
+tracked	F1	CMakeLists.txt	残差は B-07 のテスト登録 8 行のみ
+tracked	F1	ConvoPeq.md	生成物。main 版が最終 main 由来
+tracked	F1	src/CacheManager.cpp	残差は WIP 版の検証関数。main は C-05 + 2^21+1 で同等以上
+tracked	F1	src/ConvolverControlPanel.cpp	WIP の追加行はすべて main に在る
+tracked	F1	src/DeviceSettings.cpp	WIP の追加行はすべて main に在る
+tracked	F1	src/IRConverter.cpp	残差は置換で消えた旧コード。main が B-01 を含む
+tracked	F1	src/MKLNonUniformConvolver.cpp	残差は B-12 の仕様コメント 4 行。実装は main に在る
+tracked	F1	src/MKLNonUniformConvolver.h	残差は B-12 の仕様コメント 8 行
+tracked	F1	src/MainApplication.cpp	残差は B-11 の実測証跡モード 13 行（見送り）
+tracked	F1	src/MainApplication.h	残差は B-11 のメンバ 3 行
+tracked	F1	src/MainWindow.h	WIP の追加行はすべて main に在る
+tracked	F1	src/NoiseShaperLearner.cpp	残差 85 行は B-07。B-05/B-09 は main に在る
+tracked	F1	src/NoiseShaperLearner.h	残差 17 行は B-07 の宣言
+tracked	F1	src/ProgressiveUpgradeThread.cpp	残差 18 行は probe 計測のみ
+tracked	F1	src/audioengine/AudioEngine.Commit.cpp	残差 4 行は B-11 の実測証跡
+tracked	F1	src/audioengine/AudioEngine.Processing.ReleaseResources.cpp	残差 3 行は probe 計測のみ
+tracked	F1	src/audioengine/AudioEngine.Reader.cpp	残差 13 行は reader 計測（LINT-AE-011 のため見送り）
+tracked	F1	src/audioengine/AudioEngine.Threading.cpp	残差 4 行は probe 計測のみ
+tracked	F1	src/audioengine/AudioEngine.h	差分の実体なし
+tracked	F1	src/convolver/ConvolverProcessor.LoadPipeline.cpp	残差は probe と、main で decltype 化した 1 行
+tracked	F1	src/convolver/ConvolverProcessor.LoaderThread.cpp	残差 32 行は probe と、main が別形に整理した 3 行
+tracked	F1	src/convolver/ConvolverProcessor.Runtime.cpp	残差は B-03 のコメント。実装は main に在る
+tracked	F1	src/convolver/ConvolverProcessor.StateAndUI.cpp	残差 7 行は probe 計測のみ
+tracked	F1	src/core/EpochDomain.h	WIP の追加行はすべて main に在る
+tracked	F1	src/core/ReaderMeasureRegistry.h	WIP の追加行はすべて main に在る
+tracked	F1	src/core/ScopedEpochReader.h	WIP の追加行はすべて main に在る
+tracked	F1	src/tests/AudioEngineHarness/PublishPipelineIntegrationTests.cpp	WIP の追加行はすべて main に在る
+tracked	F1	src/tests/TailLayerIntegrityTests.cpp	残差はコメント 2 行。main 版が B-12 を含む
+tracked	F2	src/MainWindow.cpp	残差 15 行のうち 12 行は ASIO 警告ダイアログ、3 行は B-14（main の C-16 が上位互換）
+tracked	F3	.github/scripts/isr-generate-runtime-evidence.ps1	main に未取込。反映すると失われる
+tracked	F3	.github/scripts/isr-run-runtime-evidence.ps1	main に未取込。反映すると失われる
+tracked	F3	.github/scripts/isr-seed-evidence.ps1	main に未取込。反映すると失われる
+tracked	F3	.github/scripts/isr-verify-common.ps1	main に未取込。反映すると失われる
+tracked	F3	.github/scripts/isr-verify-v5.ps1	main に未取込。反映すると失われる
+tracked	F4	opencode.json	MCP の protocol 1 行。main に無い（今回の修正）
+untracked	U0	src/InputInspection.cpp	main と同一
+untracked	U0	src/InputInspection.h	main と同一
+untracked	U0	src/convolver/IRTrailingSilence.h	main と同一
+untracked	U0	src/learner/LearnedStateMigration.cpp	main と同一
+untracked	U0	src/learner/LearnedStateMigration.h	main と同一
+untracked	U0	src/tests/AudioEngineHarness/NoiseShaperStateRaceTests.cpp	main と同一
+untracked	U0	src/tests/AudioEngineHarness/RuntimeParameterGuardTests.cpp	main と同一
+untracked	U0	src/tests/InputInspectionTests.cpp	main と同一
+untracked	U0	src/tests/LearnedStateMigrationTests.cpp	main と同一
+untracked	U1	src/tests/CacheManagerHeaderValidationTests.cpp	統合前の写し。main はフィクスチャ修正済み
+untracked	U2	src/convolver/ConvolverStopProbe.h	probe 計測（除外系統）
+untracked	U2	src/learner/LearnerStateAuthority.h	B-07（不採用）
+untracked	U2	src/tests/LearnerStateAuthorityTests.cpp	B-07（不採用）
+untracked	U2	.github/scripts/isr-verify-evidence-consistency.ps1	B-11 の証跡分離（除外）
+untracked	U2	.openchamber/notes-todos.json	ローカル状態
+untracked	U2	resf_raw.json	測定の生データ
+untracked	U3	doc/ (339 files)	過去報告書と ConvoPeq.md のスナップショット
