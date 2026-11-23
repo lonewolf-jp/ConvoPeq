@@ -17,8 +17,10 @@
 #include <JuceHeader.h>
 
 #include "ConvolverProcessor.h"
+#include "IRConverter.h"
 #include "AllpassDesigner.h"
 #include "convolver/IRLoadAdmission.h"
+#include "convolver/IRTrailingSilence.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 
 #include <cmath>
@@ -806,6 +808,328 @@ bool checkPreviewFailureCompletion()
     return true;
 }
 
+//----------------------------------------------------------
+// B-01: IRConverter（同期経路）のアドミッションと例外封じ
+//   細工 WAV（宣言長の偽装）・9ch・1 GiB 境界・リサンプル上限を、
+//   例外を外へ出さずに拒否することを確認する。
+//----------------------------------------------------------
+void patchDataChunkDeclaredBytes(const juce::File& file, juce::uint32 declaredBytes)
+{
+    juce::MemoryBlock mb;
+    if (! file.loadFileAsData(mb))
+        return;
+
+    auto* p = static_cast<juce::uint8*>(mb.getData());
+    const size_t n = mb.getSize();
+
+    for (size_t i = 0; i + 8 <= n; ++i)
+    {
+        if (p[i] == 'd' && p[i + 1] == 'a' && p[i + 2] == 't' && p[i + 3] == 'a')
+        {
+            p[i + 4] = static_cast<juce::uint8>(declaredBytes & 0xFFu);
+            p[i + 5] = static_cast<juce::uint8>((declaredBytes >> 8) & 0xFFu);
+            p[i + 6] = static_cast<juce::uint8>((declaredBytes >> 16) & 0xFFu);
+            p[i + 7] = static_cast<juce::uint8>((declaredBytes >> 24) & 0xFFu);
+            break;
+        }
+    }
+
+    file.replaceWithData(p, n);
+}
+
+bool checkConverterAdmission()
+{
+    IRConverter conv;
+
+    IRConverter::ConvertConfig cfg;
+    cfg.fftSize = 512;
+    cfg.partitionSize = 512;
+    cfg.targetSampleRate = 48000.0;
+
+    const auto noCancel = [] { return false; };
+    bool ok = true;
+
+    const auto expectAccept = [&ok] (const char* tag, const juce::File& f,
+                                     const juce::String& err,
+                                     std::unique_ptr<PreparedIRState>&& r)
+    {
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: fixture write failed\n", tag);
+            ok = false;
+            return;
+        }
+
+        if (r == nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: valid IR rejected: %s\n", tag, err.toRawUTF8());
+            ok = false;
+        }
+    };
+
+    const auto expectReject = [&ok] (const char* tag, const juce::File& f,
+                                     const juce::String& err,
+                                     std::unique_ptr<PreparedIRState>&& r,
+                                     const char* needle,
+                                     const char* altNeedle = nullptr)
+    {
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: fixture write failed\n", tag);
+            ok = false;
+            return;
+        }
+
+        if (r != nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: out-of-contract IR was accepted\n", tag);
+            ok = false;
+            return;
+        }
+
+        // 理由まで確認する（別の理由で偶然 nullptr になった場合を合格にしない）。
+        //   B-04 の RIFF 事前検査が先に弾く場合は、その理由も合格とする。
+        const bool matched = err.containsIgnoreCase (needle)
+                             || (altNeedle != nullptr && err.containsIgnoreCase (altNeedle));
+        if (! matched)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: reason '%s' matches neither '%s' nor '%s'\n",
+                         tag, err.toRawUTF8(), needle, altNeedle != nullptr ? altNeedle : "");
+            ok = false;
+        }
+    };
+
+    // I-1: 正常な 1 秒ステレオ 48 kHz（回帰）
+    {
+        const auto f = writeTestIr("b01_ok.wav", 48000.0, 2, 48000, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectAccept("I-1", f, err, std::move(r));
+        f.deleteFile();
+    }
+
+    // I-2: data チャンク長の偽装（宣言 3e9 バイト → FC-FORM-1 の予算超過で拒否）
+    {
+        const auto f = writeTestIr("b01_huge.wav", 48000.0, 2, 1024, -1, 1);
+        patchDataChunkDeclaredBytes(f, 3000000000u);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-2", f, err, std::move(r), "memory limit", "declared chunk size");
+        f.deleteFile();
+    }
+
+    // I-3: channel 上限（9ch）
+    {
+        const auto f = writeTestIr("b01_9ch.wav", 48000.0, 9, 512, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-3", f, err, std::move(r), "too many channels");
+        f.deleteFile();
+    }
+
+    // I-4: channel 上限の内側（8ch）
+    {
+        const auto f = writeTestIr("b01_8ch.wav", 48000.0, 8, 512, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectAccept("I-4", f, err, std::move(r));
+        f.deleteFile();
+    }
+
+    // I-5: byte budget の境界（16-bit stereo で N = 67,108,865 → 8·2·N > 1 GiB）
+    {
+        const auto f = writeTestIr("b01_budget.wav", 48000.0, 2, 1024, -1, 1);
+        patchDataChunkDeclaredBytes(f, 67108865u * 4u);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-5", f, err, std::move(r), "memory limit", "declared chunk size");
+        f.deleteFile();
+    }
+
+    // I-6: resample 出力上限（8 kHz 350k = 43.75 s > 2^21+1 @48 kHz = 43.69 s）
+    {
+        const auto f = writeTestIr("b01_resample.wav", 8000.0, 2, 350000, -1, 1);
+        juce::String err;
+        auto r = conv.convertFile(f, cfg, noCancel, &err);
+        expectReject("I-6", f, err, std::move(r), "longer than the DSP");
+        f.deleteFile();
+    }
+
+    if (ok)
+        std::printf("[B01] IRConverter admission: PASS (I-1..I-6)\n");
+
+    return ok;
+}
+
+//----------------------------------------------------------
+// B-04 — RIFF 事前検査が非同期ローダとプレビュー経路でも効くことの回帰
+//----------------------------------------------------------
+bool checkRiffGuardRuntime()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    const auto ir = writeTestIr("b04_riff_guard.wav", 48000.0, 2, 1024, -1, 1);
+    if (! ir.existsAsFile())
+    {
+        std::fprintf(stderr, "[B04] FAIL RG-0 fixture write failed\n");
+        return false;
+    }
+
+    patchDataChunkDeclaredBytes(ir, 3000000000u);
+
+    bool ok = true;
+
+    // RG-1: 非同期ローダ経路（LoaderThread）
+    {
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+
+        juce::String err;
+        const bool settled = loadAndSettle(conv, ir, err);
+
+        if (! settled || conv.isIRLoaded() || ! err.containsIgnoreCase("declared chunk size"))
+        {
+            std::fprintf(stderr, "[B04] FAIL RG-1 loader path: settled=%d loaded=%d err='%s'\n",
+                         settled ? 1 : 0, conv.isIRLoaded() ? 1 : 0, err.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    // RG-2: プレビュー経路（analyzeImpulseResponseFile → ResampleAndFallback）
+    {
+        const auto preview = ConvolverProcessor::analyzeImpulseResponseFile(ir, 48000.0);
+
+        if (preview.success || ! preview.errorMessage.containsIgnoreCase("declared chunk size"))
+        {
+            std::fprintf(stderr, "[B04] FAIL RG-2 preview path: success=%d err='%s'\n",
+                         preview.success ? 1 : 0, preview.errorMessage.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    ir.deleteFile();
+
+    if (ok)
+        std::printf("[B04] checkRiffGuardRuntime: PASS (loader / preview reject crafted RIFF)\n");
+
+    return ok;
+}
+
+//----------------------------------------------------------
+// B-10 — 最小位相化が FFT 上限でスキップされたときの実効値と警告
+//----------------------------------------------------------
+bool checkPhaseFallbackRuntime()
+{
+    static juce::ScopedJuceInitialiser_GUI juceInit;
+
+    bool ok = true;
+
+    // PB-1: 通常長の IR では Minimum が適用され、警告は出ない
+    {
+        const auto ir = writeTestIr("b10_minimum_ok.wav", 48000.0, 2, 48000, -1, 1);
+
+        if (! ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-0a fixture write failed\n");
+            return false;
+        }
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+        conv.setPhaseMode(ConvolverProcessor::PhaseMode::Minimum);
+
+        juce::String err;
+        const bool settled = loadAndSettle(conv, ir, err);
+
+        const int eff = conv.getEffectivePhaseModeForLastLoad();
+        const auto warn = conv.getLastPhaseWarning();
+
+        if (! settled || ! conv.isIRLoaded()
+            || eff != static_cast<int>(ConvolverProcessor::PhaseMode::Minimum)
+            || warn.isNotEmpty())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-1: settled=%d loaded=%d eff=%d warn='%s'\n",
+                         settled ? 1 : 0, conv.isIRLoaded() ? 1 : 0, eff, warn.toRawUTF8());
+            ok = false;
+        }
+
+        ir.deleteFile();
+    }
+
+    // PB-2: 2^21+1 サンプルでも、変換入力は targetLength（≤ MAX_IR_LATENCY = 2^21）に
+    //   切り詰められてから convertToMinimumPhase へ渡る。したがって fftSize は最大でも
+    //   2^23 = 8388608 で、スキップ分岐（> 8388608）には到達しない。
+    //   ここでは「スキップせず Minimum が適用され、警告も出ない」ことを固定する。
+    {
+        const int samples = 2097153;
+        const auto ir = writeTestIr("b10_minimum_skip.wav", 48000.0, 2, samples, -1, 1);
+
+        if (! ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-0b fixture write failed\n");
+            return false;
+        }
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+        conv.setPhaseMode(ConvolverProcessor::PhaseMode::Minimum);
+
+        juce::String err;
+        const bool settled = loadAndSettle(conv, ir, err);
+
+        const int eff = conv.getEffectivePhaseModeForLastLoad();
+        const auto warn = conv.getLastPhaseWarning();
+
+        if (! settled || ! conv.isIRLoaded()
+            || eff != static_cast<int>(ConvolverProcessor::PhaseMode::Minimum)
+            || warn.isNotEmpty())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-2: settled=%d loaded=%d eff=%d warn='%s'\n",
+                         settled ? 1 : 0, conv.isIRLoaded() ? 1 : 0, eff, warn.toRawUTF8());
+            ok = false;
+        }
+
+        ir.deleteFile();
+    }
+
+    // PB-3: 同期経路（loadIR → IRConverter）は位相変換を行わないため、実効値は AsIs
+    {
+        const auto ir = writeTestIr("b10_sync_path.wav", 48000.0, 2, 48000, -1, 1);
+
+        if (! ir.existsAsFile())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-0c fixture write failed\n");
+            return false;
+        }
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay(48000.0, 512);
+        ConvReleaser convReleaser { conv };
+        conv.setPhaseMode(ConvolverProcessor::PhaseMode::Minimum);
+
+        conv.loadIR(ir); // 同期経路
+
+        const int eff = conv.getEffectivePhaseModeForLastLoad();
+        const auto warn = conv.getLastPhaseWarning();
+
+        if (eff != static_cast<int>(ConvolverProcessor::PhaseMode::AsIs) || warn.isNotEmpty())
+        {
+            std::fprintf(stderr, "[B10] FAIL PB-3: eff=%d warn='%s'\n", eff, warn.toRawUTF8());
+            ok = false;
+        }
+
+        ir.deleteFile();
+    }
+
+    if (ok)
+        std::printf("[B10] checkPhaseFallbackRuntime: PASS (Minimum applied; skip guard unreachable under the 2^21 cap)\n");
+
+    return ok;
+}
+
 } // namespace
 
 int runIRLoadPreviewAdmissionTests()
@@ -825,6 +1149,207 @@ int runIRLoadPreviewAdmissionTests()
     return 0;
 }
 
+//----------------------------------------------------------
+// ★ B-01 / B-02 — 末尾無音トリムの共通規則
+//----------------------------------------------------------
+bool checkTrailingSilenceTrim()
+{
+    bool ok = true;
+
+    const auto expect = [&ok] (const char* id, int actual, int expected)
+    {
+        if (actual != expected)
+        {
+            std::fprintf(stderr, "[B01] FAIL %s: trimmed=%d expected=%d\n", id, actual, expected);
+            ok = false;
+        }
+    };
+
+    // T-1: 末尾無音を落とす
+    {
+        std::vector<float> a (1000, 0.0f);
+        a[599] = 1.0f;
+        expect("T-1", convo::irtrim::computeTrimmedLength<float> (a.data(), nullptr, (int) a.size()), 600);
+    }
+
+    // T-2: 2ch は大きい方のチャネルで決める
+    {
+        std::vector<float> a (1000, 0.0f), b (1000, 0.0f);
+        a[499] = 1.0f;
+        b[799] = -1.0f;
+        expect("T-2", convo::irtrim::computeTrimmedLength<float> (a.data(), b.data(), (int) a.size()), 800);
+    }
+
+    // T-3: 全サンプルが閾値以下でも 1 サンプルは残す
+    {
+        std::vector<float> a (1000, 0.0f);
+        expect("T-3", convo::irtrim::computeTrimmedLength<float> (a.data(), nullptr, (int) a.size()), 1);
+    }
+
+    // T-4: 無音が無ければ全長
+    {
+        std::vector<float> a (1000, 0.25f);
+        expect("T-4", convo::irtrim::computeTrimmedLength<float> (a.data(), nullptr, (int) a.size()), 1000);
+    }
+
+    // T-5: 閾値ちょうどは無音扱い、超えると有音扱い
+    {
+        std::vector<double> a (100, 0.0);
+        a[49] = 1.0e-15;      // 閾値と等しい → 超えない
+        a[59] = 1.0e-15 * 2;  // 超える
+        expect("T-5", convo::irtrim::computeTrimmedLength<double> (a.data(), nullptr, (int) a.size()), 60);
+    }
+
+    if (ok)
+        std::printf("[B01] checkTrailingSilenceTrim: PASS (T-1..T-5)\n");
+
+    return ok;
+}
+
+//----------------------------------------------------------
+// ★ B-01 / B-02 — 同期経路（IRConverter）もトリム後に FC-FORM-5 を評価する
+//   48 kHz → 96 kHz の resample で、上限は 2,097,153 サンプル。
+//   全体長 1,100,000 のうち末尾 100,000 が無音なら、トリム後 1,000,000 →
+//   resample 後 2,000,000 で受理される。末尾に信号があれば 2,200,000 で拒否。
+//----------------------------------------------------------
+bool checkSyncPathTrimParity()
+{
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory);
+    const auto writeIr = [&dir] (const char* name, int totalSamples, int signalSamples)
+    {
+        const juce::File f = dir.getChildFile (juce::String ("b01_trim_") + name);
+        f.deleteFile();
+
+        std::unique_ptr<juce::FileOutputStream> stream (f.createOutputStream());
+        if (stream == nullptr)
+            return juce::File();
+
+        juce::WavAudioFormat fmt;
+        std::unique_ptr<juce::AudioFormatWriter> w (
+            fmt.createWriterFor (stream.get(), 48000.0, 2u, 16, {}, 0));
+        if (w == nullptr)
+            return juce::File();
+
+        stream.release();
+
+        juce::AudioBuffer<float> buf (2, totalSamples);
+        buf.clear();
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* p = buf.getWritePointer (ch);
+            for (int i = 0; i < juce::jmin (signalSamples, totalSamples); ++i)
+                p[i] = ((i / 8) % 2 == 0) ? 0.25f : -0.25f;
+        }
+
+        w->writeFromAudioSampleBuffer (buf, 0, totalSamples);
+        w.reset();
+        return f;
+    };
+
+    IRConverter conv;
+    IRConverter::ConvertConfig cfg;
+    cfg.fftSize = 512;
+    cfg.partitionSize = 512;
+    cfg.targetSampleRate = 96000.0;
+    const auto noCancel = [] { return false; };
+
+    bool ok = true;
+
+    // A-01-1: 無音テール付きは受理され、resample 後の長さがトリム相当になる
+    {
+        const auto f = writeIr ("tail.wav", 1100000, 1000000);
+        juce::String err;
+        auto prepared = conv.convertFile (f, cfg, noCancel, &err);
+
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01: fixture write failed\n");
+            ok = false;
+        }
+        else if (prepared == nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01: silent-tail IR rejected: %s\n", err.toRawUTF8());
+            ok = false;
+        }
+        else if (prepared->timeDomainIR != nullptr)
+        {
+            // resampler は入出力比どおりの長さを返すが、末尾の丸めで 0.2% 程度ずれる。
+            // 確認したいのは「トリム後に上限内へ収まること」なので範囲で見る。
+            const int n = prepared->timeDomainIR->getNumSamples();
+            if (n < 1900000 || n > 2097153)
+            {
+                std::fprintf(stderr, "[B01] FAIL A-01: resampled length=%d out of trimmed range\n", n);
+                ok = false;
+            }
+        }
+
+        f.deleteFile();
+    }
+
+    // A-01-2: 末尾に信号がある場合は raw 長で拒否される（トリムしない制御）
+    {
+        const auto f = writeIr ("full.wav", 1100000, 1100000);
+        juce::String err;
+        auto prepared = conv.convertFile (f, cfg, noCancel, &err);
+
+        if (! f.existsAsFile())
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01b: fixture write failed\n");
+            ok = false;
+        }
+        else if (prepared != nullptr)
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01b: oversized IR was accepted\n");
+            ok = false;
+        }
+        else if (! err.containsIgnoreCase ("MAX_IR_LATENCY")
+                 && ! err.containsIgnoreCase ("resample")
+                 && ! err.containsIgnoreCase ("2097153")
+                 && ! err.containsIgnoreCase ("longer than the DSP"))
+        {
+            std::fprintf(stderr, "[B01] FAIL A-01b: unexpected reason: %s\n", err.toRawUTF8());
+            ok = false;
+        }
+
+        f.deleteFile();
+    }
+
+    // A-02: 同じ入力（無音テール付き・48k→96k）で、プレビューと本適用の受理結果が一致する。
+    //   修正前は同期経路だけ全体長で FC-FORM-5 を評価し、プレビューは拒否・本適用は受理だった。
+    {
+        const auto f = writeIr ("parity.wav", 1100000, 1000000);
+
+        const auto preview = ConvolverProcessor::analyzeImpulseResponseFile (f, 96000.0);
+
+        ConvolverProcessor conv;
+        conv.prepareToPlay (96000.0, 512);
+        ConvReleaser convReleaser { conv };
+
+        juce::String err;
+        const bool settled = loadAndSettle (conv, f, err);
+
+        const bool previewOk = preview.success && preview.errorMessage.isEmpty();
+        const bool loaderOk = settled && conv.isIRLoaded();
+
+        if (previewOk != loaderOk)
+        {
+            std::fprintf (stderr,
+                          "[B01] FAIL A-02: preview/loader disagree (preview=%d loader=%d previewErr='%s' loaderErr='%s')\n",
+                          previewOk ? 1 : 0, loaderOk ? 1 : 0,
+                          preview.errorMessage.toRawUTF8(), err.toRawUTF8());
+            ok = false;
+        }
+
+        f.deleteFile();
+    }
+
+
+    if (ok)
+        std::printf("[B01] checkSyncPathTrimParity: PASS (trim before FC-FORM-5)\n");
+
+    return ok;
+}
+
 int runIRLoadAdmissionTests()
 {
     if (!checkEFPredicateBoundaries())
@@ -839,7 +1364,17 @@ int runIRLoadAdmissionTests()
         return 1;
     if (!checkResamplePathAccepted())
         return 1;
+    if (!checkConverterAdmission())
+        return 1;
+    if (!checkRiffGuardRuntime())
+        return 1;
+    if (!checkTrailingSilenceTrim())
+        return 1;
+    if (!checkSyncPathTrimParity())
+        return 1;
+    if (!checkPhaseFallbackRuntime())
+        return 1;
 
-    std::printf("IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L)\n");
+    std::printf("IRLoadAdmissionTests: PASS (WORK102 A/B/C/D/E/F/G/H/I/L + B01 I-1..I-6 + B01 T-1..T-5 + A-01/A-02 + B04 RG + B10 PB)\n");
     return 0;
 }

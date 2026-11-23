@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <mkl.h>
 #include <mkl_cblas.h>
 #include "DiagnosticsConfig.h"
+#include "convolver/IRLoadAdmission.h"
 
 namespace
 {
@@ -40,6 +42,7 @@ uint64_t crc64Update(uint64_t crc, const uint8_t* data, size_t size)
     }
     return crc;
 }
+
 }
 
 uint64_t CacheManager::hashCombine(uint64_t seed, uint64_t value)
@@ -85,9 +88,14 @@ uint64_t CacheManager::computeKey(const juce::File& file,
                                   int fftSize,
                                   double sampleRate,
                                   int phaseMode,
-                                  int partitionSize)
+                                  int partitionSize,
+                                  uint64_t schemaVersion)
 {
-    uint64_t seed = computeFileContentCRC(file);
+    // version 1 はトリム導入前のキー（CRC から開始）。version 2 以降は
+    // バージョン値を混ぜて、意味論が変わったキャッシュを再利用しない。
+    uint64_t seed = (schemaVersion >= 2)
+        ? hashCombine(schemaVersion, computeFileContentCRC(file))
+        : computeFileContentCRC(file);
     seed = hashCombine(seed, static_cast<uint64_t>(fftSize));
     seed = hashCombine(seed, static_cast<uint64_t>(phaseMode));
     seed = hashCombine(seed, static_cast<uint64_t>(partitionSize));
@@ -100,11 +108,21 @@ uint64_t CacheManager::computeKey(const juce::File& file,
     return seed;
 }
 
+CacheManager::CacheManager(juce::File cacheDirOverride)
+    : cacheDirectoryOverride(std::move(cacheDirOverride))
+{
+    // ★ B-08: 跨セッションで増え続ける IRCache を、起動時に一度だけ上限まで剪定する。
+    //   セッション中の evictLRU（件数上限）とは別の、総量の歯止め。
+    pruneDirectory();
+}
+
 juce::File CacheManager::getCacheDirectory() const
 {
-    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                   .getChildFile("ConvoPeq")
-                   .getChildFile("IRCache");
+    auto dir = (cacheDirectoryOverride != juce::File())
+                   ? cacheDirectoryOverride
+                   : juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                         .getChildFile("ConvoPeq")
+                         .getChildFile("IRCache");
     if (!dir.exists())
      {
          auto result = dir.createDirectory();
@@ -177,6 +195,9 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     //   checked that header+dataSize+timeDomain matched the file length, so a crafted
     //   cache could declare channels*samples far beyond timeDomainSizeBytes and make the
     //   time-domain memcpy read past the mapping.
+    // ★ 統合 (2026-11-23): 標本数の上限だけ WIP の凍結値 2^21+1 を採る。upstream の
+    //   2^28 は 48 kHz で約 93 分に相当し、キャッシュが保持する準備済み IR には緩い。
+    //   2^21+1 は IRLoadAdmission の kMaxIRResampleOutputSamples（MAX_IR_LATENCY + 1）。
     const uint64_t fileSize = static_cast<uint64_t>(juce::jmax<int64_t>(0, file.getSize()));
     const uint64_t headerSizeU = (headerOut.version == 1)
                                ? static_cast<uint64_t>(sizeof(CacheHeaderV1))
@@ -202,7 +223,9 @@ bool CacheManager::validateCacheFile(const juce::File& file, uint64_t expectedKe
     {
         if (headerOut.timeDomainChannels < 1 || headerOut.timeDomainChannels > 8)
             return false;
-        if (headerOut.timeDomainNumSamples < 1 || headerOut.timeDomainNumSamples > (uint64_t{1} << 28))
+        if (headerOut.timeDomainNumSamples < 1
+            || headerOut.timeDomainNumSamples
+                   > static_cast<uint64_t>(convo::irload::kMaxIRResampleOutputSamples))
             return false;
         if (headerOut.timeDomainChannels * headerOut.timeDomainNumSamples * sizeof(double)
             != headerOut.timeDomainSizeBytes)
@@ -254,10 +277,26 @@ double* CacheManager::copyFromMmapToAligned(juce::MemoryMappedFile& mmap, size_t
 
 std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, int fftSize, uint64_t generationId)
 {
+    return loadPreparedStateFromFile(getCacheFile(key, fftSize), key, fftSize, generationId);
+}
+
+std::unique_ptr<PreparedIRState> CacheManager::loadPreparedStateFromFile(const juce::File& file,
+                                                                        uint64_t key,
+                                                                        int fftSize,
+                                                                        uint64_t generationId)
+{
     CacheHeader header{};
-    const auto file = getCacheFile(key, fftSize);
     if (!validateCacheFile(file, key, fftSize, header))
+    {
+        // B-02: 構造的に不正なエントリは再構築可能なので削除する（毎回の再試行を避ける）。
+        // ファイル名はキーから決まるため、キー不一致もこの名前のエントリが不正であることを意味する。
+        if (file.existsAsFile())
+        {
+            juce::Logger::writeToLog("[CACHE] rejected and removed invalid cache entry: " + file.getFileName());
+            file.deleteFile();
+        }
         return nullptr;
+    }
 
     juce::MemoryMappedFile mmap(file, juce::MemoryMappedFile::readOnly);
     const size_t headerSize = (header.version == 1) ? sizeof(CacheHeaderV1) : sizeof(CacheHeader);
@@ -301,29 +340,47 @@ std::unique_ptr<PreparedIRState> CacheManager::loadPreparedState(uint64_t key, i
     prepared->generationId = generationId;
     prepared->cacheKey = key;
 
-    // timeDomainIR があれば復元
+    // timeDomainIR があれば復元（B-02: 確保の直前にもう一度ディスクリプタを検証する）
     if (header.timeDomainSizeBytes > 0 && header.timeDomainChannels > 0 && header.timeDomainNumSamples > 0)
     {
-        const uint8_t* tdStart = dataStart + header.dataSize;
-        const size_t expectedTdBytes = static_cast<size_t>(header.timeDomainSizeBytes);
-        if (static_cast<size_t>(mmap.getSize() - headerSize - header.dataSize) >= expectedTdBytes)
+        // 確保の直前にもう一度、凍結値の範囲と整合を確かめる（防御の二重化）。
+        const bool tdOk = header.timeDomainChannels <= static_cast<uint64_t>(convo::irload::kMaxIRLoadChannels)
+            && header.timeDomainNumSamples <= static_cast<uint64_t>(convo::irload::kMaxIRResampleOutputSamples)
+            && header.timeDomainChannels * header.timeDomainNumSamples * sizeof(double)
+                   == header.timeDomainSizeBytes;
+        if (! tdOk)
         {
-            auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(
-                static_cast<int>(header.timeDomainChannels),
-                static_cast<int>(header.timeDomainNumSamples));
-            // ★ work92 C-4 (big 2-4): strict-aliasing 違反の解消。
-            //   mmap 先頭は uint8_t バッファであり double としての有効型を持たないため
-            //   reinterpret_cast<const double*> の逆参照は UB。バイトオフセット + memcpy
-            //   （逆参照なしのコピー）に置換する。数値は bit 単位で同一。
-            const uint8_t* tdCursor = tdStart;
-            const size_t rowBytes = static_cast<size_t>(header.timeDomainNumSamples) * sizeof(double);
-            for (int ch = 0; ch < static_cast<int>(header.timeDomainChannels); ++ch)
-            {
-                std::memcpy(tdBuffer->getWritePointer(ch), tdCursor, rowBytes);
-                tdCursor += rowBytes;
-            }
-            prepared->timeDomainIR = std::move(tdBuffer);
+            juce::Logger::writeToLog("[CACHE] rejected invalid time-domain descriptor before allocation");
+            return nullptr;
         }
+
+        // 符号なしで境界を先に確かめる（減算の桁あふれを作らない）。
+        const uint64_t mappedSize = static_cast<uint64_t>(juce::jmax<juce::int64>(0, mmap.getSize()));
+        const uint64_t tdOffset = static_cast<uint64_t>(headerSize) + header.dataSize;
+        const uint64_t expectedTdBytes = header.timeDomainSizeBytes;
+        if (mappedSize < tdOffset || mappedSize - tdOffset < expectedTdBytes)
+        {
+            juce::Logger::writeToLog("[CACHE] truncated time-domain payload");
+            return nullptr;
+        }
+
+        const uint8_t* tdStart = mapped + tdOffset;
+        const auto tdChannels = static_cast<int>(header.timeDomainChannels);
+        const auto tdSamples = static_cast<int>(header.timeDomainNumSamples);
+
+        auto tdBuffer = std::make_unique<juce::AudioBuffer<double>>(tdChannels, tdSamples);
+        // ★ work92 C-4 (big 2-4): strict-aliasing 違反の解消。
+        //   mmap 先頭は uint8_t バッファであり double としての有効型を持たないため
+        //   reinterpret_cast<const double*> の逆参照は UB。バイトオフセット + memcpy
+        //   （逆参照なしのコピー）に置換する。数値は bit 単位で同一。
+        const uint8_t* tdCursor = tdStart;
+        const size_t rowBytes = static_cast<size_t>(tdSamples) * sizeof(double);
+        for (int ch = 0; ch < tdChannels; ++ch)
+        {
+            std::memcpy(tdBuffer->getWritePointer(ch), tdCursor, rowBytes);
+            tdCursor += rowBytes;
+        }
+        prepared->timeDomainIR = std::move(tdBuffer);
     }
 
     if (header.version < 2)
@@ -475,6 +532,87 @@ void CacheManager::setSafeDeleteChecker(SafeDeleteFn checker)
 {
     std::lock_guard<std::mutex> lock(cacheMutex);
     safeDeleteChecker = std::move(checker);
+}
+
+void CacheManager::pruneDirectory(juce::int64 maxTotalBytes)
+{
+    if (maxTotalBytes <= 0)
+        return;
+
+    const auto dir = getCacheDirectory();
+
+    struct Entry
+    {
+        juce::File file;
+        juce::int64 size = 0;
+        juce::Time modified;
+        uint64_t key = 0;
+        int fftSize = 0;
+    };
+
+    std::vector<Entry> entries;
+    juce::int64 total = 0;
+
+    // 対象はこのクラスが書く命名（<16 桁 hex>_<fft>.bin）に一致するものだけ。
+    // 他のアプリや他バージョンのファイルには触れない。
+    for (const auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.bin"))
+    {
+        const auto base = f.getFileNameWithoutExtension();
+        const int sep = base.lastIndexOfChar ('_');
+
+        if (sep <= 0 || sep + 1 >= base.length())
+            continue;
+
+        const auto hexPart = base.substring (0, sep);
+        const auto fftPart = base.substring (sep + 1);
+
+        if (hexPart.length() != 16 || ! hexPart.containsOnly ("0123456789abcdefABCDEF"))
+            continue;
+
+        if (fftPart.isEmpty() || ! fftPart.containsOnly ("0123456789"))
+            continue;
+
+        Entry entry;
+        entry.file = f;
+        entry.size = f.getSize();
+        entry.modified = f.getLastModificationTime();
+        entry.key = static_cast<uint64_t> (hexPart.getHexValue64());
+        entry.fftSize = fftPart.getIntValue();
+
+        total += entry.size;
+        entries.push_back (std::move (entry));
+    }
+
+    if (total <= maxTotalBytes)
+        return;
+
+    std::sort (entries.begin(), entries.end(), [] (const Entry& a, const Entry& b)
+    {
+        return a.modified < b.modified; // 古い順
+    });
+
+    int removed = 0;
+
+    for (const auto& entry : entries)
+    {
+        if (total <= maxTotalBytes)
+            break;
+
+        if (! isEntrySafeToDelete (entry.key, entry.fftSize))
+            continue;
+
+        // Windows で mmap 中のファイルは deleteFile が false を返すため、
+        // 使用中エントリを巻き込むことはない。
+        if (entry.file.deleteFile())
+        {
+            total -= entry.size;
+            ++removed;
+        }
+    }
+
+    juce::Logger::writeToLog ("[CACHE] prune: removed " + juce::String (removed)
+                              + " entries, total now " + juce::String (total)
+                              + " bytes (limit " + juce::String (maxTotalBytes) + ")");
 }
 
 void CacheManager::clear()

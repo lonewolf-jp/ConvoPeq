@@ -257,10 +257,15 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
         return;
     }
 
+    juce::File previousIrFile;
     {
         const juce::ScopedLock sl(irFileLock);
+        previousIrFile = currentIrFile;
         currentIrFile = irFile;
     }
+
+    // ★ B-01: 失敗理由を末端の報告点まで運ぶ（従来は「no FFT applied」だけだった）。
+    juce::String loadFailureReason;
 
     stopUpgradeThread();
 
@@ -280,19 +285,39 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
 
     if (cacheManager)
     {
-        auto directTarget = cacheManager->loadPreparedState(targetKey, targetFFT, generation);
-        if (directTarget)
+        // ★ B-01: キャッシュ読み出しの確保失敗は「キャッシュミス」として扱い、
+        //   変換へフォールバックする（例外をメッセージスレッドへ出さない）。
+        try
         {
-            directTarget->originalFileName = irFile.getFileNameWithoutExtension();
-            appliedFft = targetFFT;
-            applyComputedIR(std::move(directTarget));
+            auto directTarget = cacheManager->loadPreparedState(targetKey, targetFFT, generation);
+            if (directTarget)
+            {
+                directTarget->originalFileName = irFile.getFileNameWithoutExtension();
+                appliedFft = targetFFT;
+                applyComputedIR(std::move(directTarget));
+            }
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] loadIR: cache read failed (bad_alloc); rebuilding");
         }
     }
 
     if (appliedFft == 0 && cacheManager && irConverter)
     {
         const uint64_t lowResKey = CacheManager::computeKey(irFile, lowResFFT, sr, phase, lowResFFT);
-        auto cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);
+
+        // ★ B-01: 読み出し中の確保失敗は「キャッシュミス」として扱う（例外を外へ出さない）。
+        //   型名は書かない（PRT ゲート C13 が src/convolver 配下で旧型名を禁止している）。
+        decltype(cacheManager->loadPreparedState(lowResKey, lowResFFT, generation)) cachedLow;
+        try
+        {
+            cachedLow = cacheManager->loadPreparedState(lowResKey, lowResFFT, generation);
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] loadIR: low-res cache read failed (bad_alloc); rebuilding");
+        }
 
         if (cachedLow)
         {
@@ -310,24 +335,42 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
             cfg.generationId = generation;
             cfg.cacheKey = lowResKey;
 
-            auto prepared = irConverter->convertFile(irFile, cfg, [this, generation]()
+            auto prepared = [&]()
             {
-                return !convolverStateGeneration.isCurrentGeneration(generation);
-            });
+                return irConverter->convertFile(irFile, cfg, [this, generation]()
+                {
+                    return !convolverStateGeneration.isCurrentGeneration(generation);
+                }, &loadFailureReason);
+            }();
 
             if (prepared == nullptr)
             {
                 juce::Logger::writeToLog("[DIAG_IR] loadIR: convertFile returned null for "
-                    + irFile.getFileName());
+                    + irFile.getFileName()
+                    + (loadFailureReason.isNotEmpty() ? (" / " + loadFailureReason) : juce::String()));
             }
 
             if (prepared)
             {
                 prepared->originalFileName = irFile.getFileNameWithoutExtension();
-                cacheManager->save(lowResKey, lowResFFT, *prepared);
-                cacheManager->evictLRU(cacheLimit);
+
+                // ★ B-01: キャッシュ書き込みの失敗は IR 適用を止めない（キャッシュは
+                //   最適化であり、失敗しても今回の IR は有効）。例外はここで封じる。
+                try
+                {
+                    cacheManager->save(lowResKey, lowResFFT, *prepared);
+                    cacheManager->evictLRU(cacheLimit);
+                }
+                catch (const std::exception& e)
+                {
+                    juce::Logger::writeToLog("[DIAG_IR] loadIR: cache save failed: "
+                        + juce::String(e.what()));
+                }
+
                 appliedFft = lowResFFT;
-                applyComputedIR(std::move(prepared));
+                {
+                    applyComputedIR(std::move(prepared));
+                }
             }
         }
     }
@@ -342,8 +385,22 @@ void ConvolverProcessor::loadIRImpl(const juce::File& irFile, std::uint64_t diag
             + juce::String(static_cast<int>(cacheManager != nullptr))
             + " irConverter=" + juce::String(static_cast<int>(irConverter != nullptr))
             + " sr=" + juce::String(sr, 1) + ")");
+
+        // ★ B-01: 変換自体が失敗した場合のみ、currentIrFile を直前の値へ戻す。
+        //   失敗ファイルを指したままだと、以後のリビルド（setState / サンプルレート変更）
+        //   が同じ失敗を繰り返す。別世代が進行中のときはその世代の値が正であり触らない。
+        if (loadFailureReason.isNotEmpty()
+            && convolverStateGeneration.isCurrentGeneration(generation))
+        {
+            const juce::ScopedLock sl(irFileLock);
+            currentIrFile = previousIrFile;
+        }
+
         // ★ STG-6-D1: convert null を含む未適用終端を報告する（単一報告点）。
-        handleLoadError("IR load failed (no FFT applied): " + irFile.getFileName());
+        //   ★ B-01: 変換側の具体的な理由があればそれを優先して表示する。
+        handleLoadError(loadFailureReason.isNotEmpty()
+                            ? loadFailureReason
+                            : ("IR load failed (no FFT applied): " + irFile.getFileName()));
     }
 }
 
@@ -562,6 +619,13 @@ void ConvolverProcessor::applyComputedIR(std::unique_ptr<ConvolverIRPayload> pre
                ? prepared->originalFileName
                : currentIrFile.getFileNameWithoutExtension();
     }
+
+    // ★ B-10: ここから先が実際の適用（commit）。この経路（IRConverter とキャッシュ）は
+    //   最小位相／混合位相の変換を行わないため、実効値は AsIs（線形）である。
+    //   検証で中断した場合は以前の表示を保つよう、commit の直前に公開する。
+    //   ローダ経由で変換した場合は、ローダが実効値を上書きする。
+    setEffectivePhaseModeForLastLoad(PhaseMode::AsIs);
+    setLastPhaseWarning({});
 
     convo::publishAtomic(currentSampleRate, prepared->sampleRate, std::memory_order_release); // release: Runtime/UI 側 acquire と HB
     convo::publishAtomic(irLength, prepared->timeDomainIR ? prepared->timeDomainIR->getNumSamples() : 0, std::memory_order_release); // release: UI 側 acquire と HB

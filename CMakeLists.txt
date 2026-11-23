@@ -1667,6 +1667,118 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 endif()
 
 #------------------------------------------------------------
+# B-02: CacheManager ヘッダ検証（時間領域ディスクリプタ）の回帰
+#   細工キャッシュによるマップ外読み出しを防ぐ検査の回帰。
+#------------------------------------------------------------
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(CacheManagerHeaderValidationTests)
+    target_sources(CacheManagerHeaderValidationTests PRIVATE
+        src/tests/CacheManagerHeaderValidationTests.cpp
+        src/CacheManager.cpp
+    )
+    target_include_directories(CacheManagerHeaderValidationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(CacheManagerHeaderValidationTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(CacheManagerHeaderValidationTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        $<$<BOOL:${CONVOPEQ_HAS_MKL}>:JUCE_DSP_USE_INTEL_MKL=1>
+        JUCE_USE_SIMD=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CacheManagerHeaderValidationTests PRIVATE /arch:AVX2 /utf-8 /EHsc)
+        if(CONVOPEQ_HAS_MKL)
+            target_link_libraries(CacheManagerHeaderValidationTests PRIVATE MKL::MKL)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(CacheManagerHeaderValidationTests PRIVATE
+            /QxCORE-AVX2 /Qmkl:sequential
+            -Wno-macro-redefined
+            -Wno-unused-command-line-argument
+        )
+    endif()
+    target_link_libraries(CacheManagerHeaderValidationTests PRIVATE
+        juce::juce_core juce::juce_dsp juce::juce_audio_basics
+        juce::juce_audio_utils juce::juce_events
+    )
+    add_test(NAME CacheManagerHeaderValidationTests COMMAND CacheManagerHeaderValidationTests)
+    juce_generate_juce_header(CacheManagerHeaderValidationTests)
+endif()
+
+#------------------------------------------------------------
+# B-04 / B-05: 入力ファイルの事前検査（RIFF チャンク境界・XML 上限）
+#   JUCE 本体は改修せず、入口で拒否できることを確認する。
+#------------------------------------------------------------
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(InputInspectionTests)
+    target_sources(InputInspectionTests PRIVATE
+        src/tests/InputInspectionTests.cpp
+        src/InputInspection.cpp
+    )
+    target_include_directories(InputInspectionTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(InputInspectionTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(InputInspectionTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(InputInspectionTests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(InputInspectionTests PRIVATE
+        juce::juce_core juce::juce_events
+    )
+    add_test(NAME InputInspectionTests COMMAND InputInspectionTests)
+    juce_generate_juce_header(InputInspectionTests)
+
+    #------------------------------------------------------------
+    # ★ B-15: 学習係数ファイルの version 管理と明示移行
+    #------------------------------------------------------------
+    juce_add_console_app(LearnedStateMigrationTests)
+    target_sources(LearnedStateMigrationTests PRIVATE
+        src/tests/LearnedStateMigrationTests.cpp
+        src/learner/LearnedStateMigration.cpp
+        src/InputInspection.cpp
+    )
+    target_include_directories(LearnedStateMigrationTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/convolver
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/tests
+    )
+    target_include_directories(LearnedStateMigrationTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(LearnedStateMigrationTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(LearnedStateMigrationTests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(LearnedStateMigrationTests PRIVATE
+        juce::juce_core juce::juce_events
+    )
+    add_test(NAME LearnedStateMigrationTests COMMAND LearnedStateMigrationTests)
+    juce_generate_juce_header(LearnedStateMigrationTests)
+endif()
+
+#------------------------------------------------------------
 # work113 D-1R-2L: PersistentCache v3 Phase 0 Executable Contract (P0-1..P0-6)
 #------------------------------------------------------------
 # Owner instruction "Owner 回答 — D-1R-2K Phase 0 GO / Production
@@ -1795,6 +1907,7 @@ endif()
 # ソースファイル
 #------------------------------------------------------------
 set(CONVOPEQ_ALL_SOURCES
+    src/learner/LearnedStateMigration.cpp
     src/MainApplication.cpp
     src/MainWindow.cpp
     src/audioengine/AudioEngine.RebuildDispatch.cpp
@@ -1914,6 +2027,7 @@ set(CONVOPEQ_ALL_SOURCES
     src/MixedPhaseOptimizationComponent.cpp
     src/IRConverter.cpp
     src/IRAnalyzer.cpp  # ★ v14.0
+    src/InputInspection.cpp  # ★ B-04/B-05: 入力ファイルの事前検査
     src/ProgressiveUpgradeThread.cpp
     src/MixedPhasePersistentCache.cpp
     src/CacheManager.cpp
@@ -2399,6 +2513,23 @@ if(ENABLE_ASAN)
         set_property(TARGET ConvoPeq PROPERTY MSVC_RUNTIME_LIBRARY
             "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     endif()
+
+    # B-02 / B-04 / B-05 / B-12 の回帰テストも同じ構成で ASan 化する。
+    # RelWithDebInfo を想定。Debug では /RTC1 を外す。
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        foreach(_asanTarget CacheManagerHeaderValidationTests InputInspectionTests TailLayerIntegrityTests)
+            if(TARGET ${_asanTarget})
+                target_compile_options(${_asanTarget} PRIVATE
+                    $<$<CONFIG:Debug>:/RTC1-> /fsanitize=address)
+                target_link_options(${_asanTarget} PRIVATE /fsanitize=address)
+                # テスト側が「ASan 構成である」ことを判定できるようにする。
+                #   ASan は割当を隔離するため、ヒープ増分を予算として読めない。
+                target_compile_definitions(${_asanTarget} PRIVATE CONVOPEQ_ASAN_BUILD=1)
+                set_property(TARGET ${_asanTarget} PROPERTY MSVC_RUNTIME_LIBRARY
+                    "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+            endif()
+        endforeach()
+    endif()
 endif()
 
 #------------------------------------------------------------
@@ -2620,6 +2751,9 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/BulkParameterRestoreTests.cpp
         src/tests/AudioEngineHarness/STG11D12NoiseShaperEnumGuardTests.cpp
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
+        # BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
+        src/tests/AudioEngineHarness/NoiseShaperStateRaceTests.cpp
+        src/tests/AudioEngineHarness/RuntimeParameterGuardTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
         src/tests/AudioEngineHarness/T2Measurement.cpp

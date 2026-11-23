@@ -7,6 +7,7 @@
 #include "core/ThreadAffinityManager.h"
 
 #include <cmath>
+#include <new>
 #include <xmmintrin.h>   // _MM_SET_FLUSH_ZERO_MODE
 #include <pmmintrin.h>   // _MM_SET_DENORMALS_ZERO_MODE
 
@@ -119,29 +120,41 @@ bool ProgressiveUpgradeThread::upgradeStep(int nextFFTSize)
         std::atomic<bool>& cancelledRef = cancelled;
         const uint64_t expectedGeneration = taskGeneration;
 
-        prepared = converter.convertToHighRes(irFile,
-                                              sampleRate,
-                                              nextFFTSize,
-                                              taskGeneration,
-                                              stepKey,
-                                              [weakOwner, &cancelledRef, expectedGeneration]()
-                                              {
-                                                  auto* owner = weakOwner.get();
-                                                  if (owner == nullptr)
-                                                      return true;
+        {
+            prepared = converter.convertToHighRes(irFile,
+                                                  sampleRate,
+                                                  nextFFTSize,
+                                                  taskGeneration,
+                                                  stepKey,
+                                                  [weakOwner, &cancelledRef, expectedGeneration]()
+                                                  {
+                                                      auto* owner = weakOwner.get();
+                                                      if (owner == nullptr)
+                                                          return true;
 
-                                                  return juce::Thread::currentThreadShouldExit()
-                                                      || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
-                                                      || !owner->isConvolverGenerationCurrent(expectedGeneration);
-                                              });
+                                                      return juce::Thread::currentThreadShouldExit()
+                                                          || convo::consumeAtomic(cancelledRef, std::memory_order_acquire)
+                                                          || !owner->isConvolverGenerationCurrent(expectedGeneration);
+                                                  });
+        }
         if (!prepared)
             return false;
 
         if (!isGenerationValid())
             return false;
 
-        cacheManager.save(stepKey, nextFFTSize, *prepared);
-        cacheManager.evictLRU(processor.getMaxCacheEntries());
+        // ★ B-01: キャッシュ保存の確保失敗は当該ステップの失敗として扱う。
+        //   例外を juce::Thread::run の外へ出さない（未捕捉例外はプロセス終了になる）。
+        try
+        {
+            cacheManager.save(stepKey, nextFFTSize, *prepared);
+            cacheManager.evictLRU(processor.getMaxCacheEntries());
+        }
+        catch (const std::bad_alloc&)
+        {
+            juce::Logger::writeToLog("[DIAG_IR] progressive upgrade: cache save failed (bad_alloc)");
+            return false;
+        }
     }
 
     if (prepared)

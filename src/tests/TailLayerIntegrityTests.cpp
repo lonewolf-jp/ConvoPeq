@@ -267,8 +267,15 @@ void checkF (const std::vector<double>& ir, int block)
             fmt ("block=%d ir=%d tailDelta=%.3f dB", block, irLen, r.tailEnergyDeltaDb));
     report ("F-3", r.minWindowRatio >= kWindowRatio,
             fmt ("block=%d ir=%d minWindowRatio=%.3f", block, irLen, r.minWindowRatio));
+#if defined(CONVOPEQ_ASAN_BUILD)
+    // ASan は解放済みの割当を隔離（quarantine）するため、ヒープ増分は予算として読めない。
+    //   メモリ安全性そのものは ASan が検査するので、ここでは判定しない（値は残す）。
+    reportSkip ("RES-M", fmt ("block=%d ir=%d mem=%.2f MB (ASan build: heap delta is not a budget)",
+                              block, irLen, r.memDeltaMB));
+#else
     report ("RES-M", r.memDeltaMB <= kMemLimitMB,
             fmt ("block=%d ir=%d mem=%.2f MB", block, irLen, r.memDeltaMB));
+#endif
     reportSkip ("RES-F-cpu",
                 fmt ("block=%d ir=%d cpu_diag=%.3f ms/s (RES-F CPU is evaluated by "
                      "TailLayerPerfTests in Release)", block, irLen, r.cpuMsPerAudioSec));

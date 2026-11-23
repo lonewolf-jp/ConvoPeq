@@ -4,11 +4,13 @@
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "convolver/IRLoadAdmission.h"
 #include "convolver/IRTrimTestHooks.h"   // ★ WORK111: test/measurement-only hook
+#include "InputInspection.h"             // ★ B-04: RIFF チャンク境界検査
 #include "AlignedAllocation.h"
 #include <mkl.h>
 #include <limits>   // ★ WORK112: std::numeric_limits (subnormal 判定)
 
 #include "audioengine/AtomicAccess.h"
+#include "convolver/IRTrailingSilence.h"
 
 // IR ロード経路の診断出力（既定 OFF）。stderr が未ドレインのパイプの場合に
 // LoaderThread の書き込みが止まり IR ロードが失敗するため、通常ビルドでは出力しない。
@@ -139,8 +141,11 @@ ConvolverProcessor::LoaderThread::LoadResult ConvolverProcessor::LoaderThread::p
     std::function<bool()> savedCheck = externalCancellationCheck;
     if (thread != nullptr)
     {
-        externalCancellationCheck = [thread, saved = savedCheck]() -> bool {
-            if (thread->threadShouldExit()) return true;
+        externalCancellationCheck = [this, thread, saved = savedCheck]() -> bool {
+            if (thread->threadShouldExit())
+            {
+                return true;
+            }
             return saved && saved();
         };
     }
@@ -414,6 +419,18 @@ bool ConvolverProcessor::LoaderThread::doLoadIRStep()
             return false;
         }
 
+        // ★ B-04: JUCE の WAV リーダーはメタデータチャンクの宣言長で calloc する。
+        //   createReaderFor の前に、宣言長が実ファイル残量を超えていないことを確認する。
+        {
+            juce::String why;
+
+            if (!convo::safeinput::inspectRiffChunkBounds(file, &why))
+            {
+                stepResult.errorMessage = why;
+                return false;
+            }
+        }
+
         juce::AudioFormatManager formatManager;
         formatManager.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -586,47 +603,13 @@ bool ConvolverProcessor::LoaderThread::doTrimStep()
         const int numChannels = stepResult.loadedIR.getNumChannels();
         const double threshold = 1.0e-15;
 
-        int newLength = 0;
-        if (numChannels > 0)
-        {
-            const double* ch0 = stepResult.loadedIR.getReadPointer(0);
-            const double* ch1 = (numChannels > 1) ? stepResult.loadedIR.getReadPointer(1) : nullptr;
+        // ★ B-01 / B-02: 同期経路（IRConverter）と同じ規則の共通関数を使う。
+        const int newLength = convo::irtrim::computeTrimmedLength(
+            stepResult.loadedIR.getReadPointer(0),
+            (numChannels > 1) ? stepResult.loadedIR.getReadPointer(1) : nullptr,
+            numSamples,
+            threshold);
 
-            const __m256d vThreshold = _mm256_set1_pd(threshold);
-            const __m256d vSignMask = _mm256_set1_pd(-0.0);
-
-            int i = numSamples;
-            bool found = false;
-            for (; i >= 4; i -= 4)
-            {
-                __m256d v0 = _mm256_loadu_pd(ch0 + i - 4);
-                __m256d abs0 = _mm256_andnot_pd(vSignMask, v0);
-                __m256d mask = _mm256_cmp_pd(abs0, vThreshold, _CMP_GT_OQ);
-                if (ch1)
-                {
-                    __m256d v1 = _mm256_loadu_pd(ch1 + i - 4);
-                    __m256d abs1 = _mm256_andnot_pd(vSignMask, v1);
-                    mask = _mm256_or_pd(mask, _mm256_cmp_pd(abs1, vThreshold, _CMP_GT_OQ));
-                }
-                if (_mm256_testz_pd(mask, mask) == 0)
-                {
-                    for (int j = i - 1; j >= i - 4; --j)
-                    {
-                        if (std::abs(ch0[j]) > threshold || (ch1 && std::abs(ch1[j]) > threshold))
-                        { newLength = j + 1; found = true; break; }
-                    }
-                    if (found) break;
-                }
-            }
-            if (!found)
-            {
-                for (int j = i - 1; j >= 0; --j)
-                {
-                    if (std::abs(ch0[j]) > threshold || (ch1 && std::abs(ch1[j]) > threshold))
-                    { newLength = j + 1; break; }
-                }
-            }
-        }
         if (newLength < numSamples)
         {
             stepResult.loadedIR.setSize(numChannels, std::max(1, newLength), true);
@@ -894,37 +877,62 @@ bool ConvolverProcessor::LoaderThread::doTransformStep()
         return maxAbs > 1.0e-12;
     };
 
-    if (phaseMode == ConvolverProcessor::PhaseMode::Minimum ||
-        phaseMode == ConvolverProcessor::PhaseMode::Mixed)
+    // ★ B-10: 実効位相モードを記録する。最小位相変換が FFT 上限でスキップされた場合は、
+    //   要求値ではなく「線形位相で適用した」事実を残す（silent skip を禁止する）。
     {
-        bool wasCancelled = false;
-        // ★ C-18: convertToMinimumPhase() is best-effort. It returns an empty buffer when
-        //   the FFT would exceed the size limit or the MKL plan fails; validateBuffer()
-        //   below then rejects it and the linear IR is kept. That fallback is intentional
-        //   (the filter stays usable), but it means Minimum mode can silently run linear.
-        auto minPhaseIR = ConvolverProcessorInternal::convertToMinimumPhase(stepTrimmed, shouldStop, &wasCancelled);
-        if (wasCancelled) return false;
+        using PhaseMode = ConvolverProcessor::PhaseMode;
+        const bool wantsConversion = (phaseMode == PhaseMode::Minimum || phaseMode == PhaseMode::Mixed);
+        auto applied = wantsConversion ? PhaseMode::AsIs : phaseMode;
 
-        if (validateBuffer(minPhaseIR))
+        if (wantsConversion)
         {
-            if (phaseMode == ConvolverProcessor::PhaseMode::Minimum)
+            bool wasCancelled = false;
+            // ★ C-18: convertToMinimumPhase() is best-effort. It returns an empty buffer when
+            //   the FFT would exceed the size limit or the MKL plan fails; validateBuffer()
+            //   below then rejects it and the linear IR is kept. That fallback is intentional
+            //   (the filter stays usable), but it means Minimum mode can silently run linear.
+            auto minPhaseIR = ConvolverProcessorInternal::convertToMinimumPhase(stepTrimmed, shouldStop, &wasCancelled);
+            if (wasCancelled) return false;
+
+            if (validateBuffer(minPhaseIR))
             {
-                stepTrimmed = std::move(minPhaseIR);
+                if (phaseMode == PhaseMode::Minimum)
+                {
+                    stepTrimmed = std::move(minPhaseIR);
+                    applied = PhaseMode::Minimum;
+                }
+                else
+                {
+                    bool mixedCancelled = false;
+                    auto progressCb = [this](float p) { owner.setLoadingProgress(p); };
+                    auto mixedIR = convertToMixedPhase(&owner, stepFileHash, stepTrimmed, minPhaseIR,
+                                                       sampleRate,
+                                                       static_cast<double>(mixedTransitionStartHz),
+                                                       static_cast<double>(mixedTransitionEndHz),
+                                                       32.0,  // tau (dummy, unused in DSP)
+                                                       shouldStop, &mixedCancelled, progressCb);
+                    if (mixedCancelled) return false;
+                    if (validateBuffer(mixedIR))
+                    {
+                        stepTrimmed = std::move(mixedIR);
+                        applied = PhaseMode::Mixed;
+                    }
+                }
             }
-            else
-            {
-                bool mixedCancelled = false;
-                auto progressCb = [this](float p) { owner.setLoadingProgress(p); };
-                auto mixedIR = convertToMixedPhase(&owner, stepFileHash, stepTrimmed, minPhaseIR,
-                                                   sampleRate,
-                                                   static_cast<double>(mixedTransitionStartHz),
-                                                   static_cast<double>(mixedTransitionEndHz),
-                                                   32.0,  // tau (dummy, unused in DSP)
-                                                   shouldStop, &mixedCancelled, progressCb);
-                if (mixedCancelled) return false;
-                if (validateBuffer(mixedIR))
-                    stepTrimmed = std::move(mixedIR);
-            }
+        }
+
+        owner.setEffectivePhaseModeForLastLoad(applied);
+
+        if (applied != phaseMode)
+        {
+            const juce::String requested = (phaseMode == PhaseMode::Minimum) ? "Minimum" : "Mixed";
+
+            owner.setLastPhaseWarning(requested + " phase could not be applied to this IR "
+                                      "(it exceeds the processing FFT limit). Linear phase is in use.");
+        }
+        else
+        {
+            owner.setLastPhaseWarning({});
         }
     }
 

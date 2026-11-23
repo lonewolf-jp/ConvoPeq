@@ -2,6 +2,7 @@
 #include "ConvolverProcessor.h"
 #include "convolver/ConvolverProcessor.Internal.h"
 #include "convolver/IRLoadAdmission.h"
+#include "InputInspection.h"             // ★ B-04: RIFF チャンク境界検査
 #include "CDSPResampler.h"
 #include "AlignedAllocation.h"
 #include <mkl.h>
@@ -278,6 +279,17 @@ bool loadImpulseResponsePreviewFile(const juce::File& file,
     {
         errorMessage = "IR file not found: " + file.getFullPathName();
         return false;
+    }
+
+    // ★ B-04: メタデータチャンクの宣言長による確保を、createReaderFor の前に拒否する。
+    {
+        juce::String why;
+
+        if (!convo::safeinput::inspectRiffChunkBounds(file, &why))
+        {
+            errorMessage = why;
+            return false;
+        }
     }
 
     juce::AudioFormatManager formatManager;

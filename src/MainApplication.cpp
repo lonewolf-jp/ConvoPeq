@@ -20,7 +20,8 @@
 #include "MainWindow.h"
 #include "MKLRealTimeSetup.h"
 #include "CpuFeatureCheck.h" // ★ [P0-1] AVX2 ランタイム検出
-#include "audioengine/ISREvidenceExporter.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
+#include "audioengine/ISREvidenceExporter.h"
+#include "audioengine/ISRDebugRuntime.h" // ★ work88: --verify-runtime-evidence（CI runtime evidence モード）
 
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -42,6 +43,7 @@
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #include <processthreadsapi.h> // For disabling efficiency mode
+#include "learner/LearnedStateMigration.h"
 
 // Windows 11 Efficiency Mode (EcoQoS) API definitions for older SDKs
 #ifndef PROCESS_POWER_THROTTLING_CURRENT_VERSION
@@ -132,10 +134,29 @@ void MainApplication::initialise(const juce::String& commandLine)
     }
 
     if (! liveRuntimeEvidenceRequested && commandLine.contains("--verify-runtime-evidence"))
+
     {
         convo::isr::EvidenceExporter evidenceExporter;
         evidenceExporter.exportEvidence(nullptr, 0);
         juce::Logger::writeToLog("[verify-runtime-evidence] runtime evidence exported");
+        juce::JUCEApplicationBase::quit();
+        return;
+    }
+
+    // ★ B-15: 学習係数ファイルの明示移行。version 無しのファイルを atanh で
+    //   旧形式から戻し、version=2 として保存する（バックアップ付き・原子的置換）。
+    //   自動では行わない。ユーザー／管理者がこのフラグを明示したときだけ実行する。
+    if (commandLine.contains("--migrate-learned-state"))
+    {
+        const auto stateFile = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                                   .getChildFile("ConvoPeq")
+                                   .getChildFile("learned_state.xml");
+        const auto result = convo::learnedstate::migrateFile(stateFile);
+        const juce::String cliLine = juce::String("[migrate-learned-state] ")
+            + (result.ok ? (result.changed ? "migrated" : "no-change") : "failed")
+            + ": " + result.message;
+        std::puts(cliLine.toRawUTF8());
+        juce::Logger::writeToLog("[migrate-learned-state] " + result.message);
         juce::JUCEApplicationBase::quit();
         return;
     }
