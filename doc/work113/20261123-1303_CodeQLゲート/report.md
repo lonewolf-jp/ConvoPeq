@@ -45,7 +45,7 @@ workflow 側に `paths-ignore` を書けばもっと短いが、そうしない�
 
 判定規則は `windows-msvc-build.yml` と同一にした。`doc/`、`*.md`、`.memories/`、`.x64dbg-mcp/`、`.zcode/` だけの変更を doc とみなし、**判定に失敗したときは解析する側へ倒す**。`schedule` と `workflow_dispatch` は常に全解析する。
 
-集約ジョブは `CodeQL` という単一の名前で、次のように判定する。
+集約ジョブの名前は `CodeQL gate` である。`CodeQL` にしないのは、SARIF をアップロードすると GitHub Advanced Security 側が同じ `CodeQL` という check を作るためで、同名が 2 つ並ぶと必須チェックの指定が紛らわしくなる。判定は次のとおり。
 
 - 解析が必要（`code=true`、または判定不能）なら、解析が成功していなければ失敗。
 - doc のみで判定が成功していれば、解析のスキップを合格として扱う。
@@ -123,7 +123,7 @@ workflow 全体は 19 秒で完了した（06:24:17 → 06:24:36 UTC）。切替
 
 - **言語の自動追従は無くなった。** default setup はリポジトリの言語構成の変化に自動で追従したが、workflow では matrix を手で直す。言語を追加したときは `.github/workflows/codeql.yml` を更新する。
 - アクションのバージョンは `github/codeql-action/init@v4` / `analyze@v4` に固定した。default setup はバンドルを自動更新していたが、今後はメジャー更新を手で行う（マイナーは `v4` タグが追従する）。
-- CodeQL は**必須チェックにしていない**。必須は `Windows MSVC / Release` の 1 本のまま。将来必須にする場合は `CodeQL` を指定できる（doc のみの PR では Success として報告される）。
+- CodeQL は**必須チェックにしていない**。必須は `Windows MSVC / Release` の 1 本のまま。将来必須にする場合は `CodeQL gate` を指定できる（doc のみの PR でも Success として報告される）。
 - 解析は buildless なので、ビルド時のマクロ定義や include パスに依存する検出は行わない。これは切替前と同じ条件である。
 
 ## 7. 戻し方
