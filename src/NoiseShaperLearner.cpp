@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "InputInspection.h"               // ★ B-05: XML のサイズ・深さ検査
 #include "learner/LearnedStateMigration.h"   // ★ B-15: 形式の世代
+#include "learner/SegmentBufferAllocation.h"   // ★ #265: 確保失敗を例外にしない
 #include "core/ThreadAffinityManager.h"
 #include <JuceHeader.h>
 
@@ -71,7 +72,10 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     candidateFitness = std::move(fitnessBuffer);
 
     // ★ P0-3: AudioSegmentBuffer をヒープに確保（Factory経由）
-    segmentBuffer = AudioSegmentBuffer::create();
+    // ★ #265: create() は失敗時に std::bad_alloc を送出する（B-1）。従来の nullptr 判定は
+    //   到達しないデッドコードで、OOM 時は例外がコンストラクタの外へ抜けていた。
+    //   境界で受けて nullptr に落とし、候補バッファ（nothrow）と同じ失敗時の意味論に揃える。
+    segmentBuffer = convo::learner::createSegmentBufferNoThrow();
     if (!segmentBuffer)
     {
         DBG_LOG("[NoiseShaperLearner] failed to allocate AudioSegmentBuffer");
