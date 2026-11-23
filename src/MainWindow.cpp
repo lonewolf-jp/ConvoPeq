@@ -9,6 +9,7 @@
 #include <cmath>
 #include <limits>
 #include "InputInspection.h"   // ★ B-05/B-06: XML のサイズ・深さ検査
+#include "AsioBlacklistSetup.h"   // ★ B-17: ブラックリストの用意と通知判断
 #include "audioengine/AtomicAccess.h"
 
 namespace
@@ -306,46 +307,49 @@ MainWindow::MainWindow (const juce::String& name)
 
     // ── ASIO Blacklist 初期化 ──
     auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
-    auto blacklistFile = exeDir.getChildFile ("asio_blacklist.txt");
+    const auto blacklistResolution = convo::asio::resolveBlacklistFile (
+        exeDir, juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory));
+    auto blacklistFile = blacklistResolution.file;
 
-    // デフォルトのブラックリストファイルを作成（存在しない場合）
-    // シングルクライアントASIOや不安定なドライバをデフォルトで除外
-    constexpr const char* kDefaultAsioBlacklist =
-        "# ASIO Driver Blacklist\n"
-        "# Add partial driver names to exclude them from the list.\n"
-        "BRAVO-HD\n"
-        "ASIO4ALL\n";
-
-    // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
-    //   作成に失敗する。従来は無言で空リストのまま起動していた。ユーザー領域へ
-    //   フォールバックし、それも失敗したら UI に通知する。
-    bool blacklistReady = blacklistFile.existsAsFile()
-                          || (blacklistFile.replaceWithText (kDefaultAsioBlacklist)
-                              && blacklistFile.existsAsFile());
-
-    if (! blacklistReady)
+    if (blacklistResolution.status == convo::asio::BlacklistFileStatus::readyInUserDirectory)
+    {
+        // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
+        //   作成に失敗する。ユーザー領域へフォールバックしたことを残す。
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist fell back to: "
+                                  + blacklistFile.getFullPathName());
+    }
+    else if (blacklistResolution.status == convo::asio::BlacklistFileStatus::unavailable)
     {
         // ★ C-16: 書込み失敗を無視すると、存在しないファイルを loadFromFile して
         //   「ブラックリストが空」のまま起動する。失敗はログに残す。
         juce::Logger::writeToLog ("[ASIO] blacklist file could not be created: "
                                   + blacklistFile.getFullPathName());
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist unavailable in both locations");
+    }
 
-        // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
-        //   作成に失敗する。ユーザー領域へフォールバックし、それも失敗したら UI に通知する。
-        auto userFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                            .getChildFile ("ConvoPeq")
-                            .getChildFile ("asio_blacklist.txt");
+    // ★ B-17: 用意も読み込みもできなかった場合、除外が効かないまま起動していることを
+    //   利用者へ伝える。従来はログだけだった。自動実行（--cli-* / 証跡モード）では
+    //   ダイアログを出さない（CI とテストを止めないため）。
+    const bool blacklistLoaded = asioBlacklist.loadFromFile (blacklistFile);
 
-        userFile.getParentDirectory().createDirectory();
-        blacklistReady = userFile.existsAsFile()
-                         || (userFile.replaceWithText (kDefaultAsioBlacklist)
-                             && userFile.existsAsFile());
+    if (! blacklistLoaded)
+    {
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist could not be created or read: "
+                                  + blacklistFile.getFullPathName());
 
-        if (blacklistReady)
+        if (convo::asio::shouldShowBlacklistWarning (
+                blacklistLoaded,
+                convo::asio::isAutomationInvocation (juce::JUCEApplicationBase::getCommandLineParameters())))
         {
-            blacklistFile = userFile;
-            juce::Logger::writeToLog ("[MainWindow] ASIO blacklist fell back to: "
-                                      + userFile.getFullPathName());
+            juce::NativeMessageBox::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle ("ASIO blacklist")
+                    .withMessage ("The ASIO driver blacklist could not be created or read:\n"
+                                  + blacklistFile.getFullPathName()
+                                  + "\nUnstable drivers such as ASIO4ALL or BRAVO-HD may appear "
+                                    "in the device list."),
+                nullptr);
         }
     }
 

@@ -1713,6 +1713,36 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 endif()
 
 #------------------------------------------------------------
+# B-17: ASIO ブラックリストの用意（実行ファイル隣接 → ユーザー領域）と通知判断
+#   どちらにも用意できない場合に、無言で起動しないことを固定する。
+#------------------------------------------------------------
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(AsioBlacklistSetupTests)
+    target_sources(AsioBlacklistSetupTests PRIVATE
+        src/tests/AsioBlacklistSetupTests.cpp
+    )
+    target_include_directories(AsioBlacklistSetupTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_include_directories(AsioBlacklistSetupTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(AsioBlacklistSetupTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AsioBlacklistSetupTests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(AsioBlacklistSetupTests PRIVATE
+        juce::juce_core juce::juce_events
+    )
+    add_test(NAME AsioBlacklistSetupTests COMMAND AsioBlacklistSetupTests)
+    juce_generate_juce_header(AsioBlacklistSetupTests)
+endif()
+
+#------------------------------------------------------------
 # B-04 / B-05: 入力ファイルの事前検査（RIFF チャンク境界・XML 上限）
 #   JUCE 本体は改修せず、入口で拒否できることを確認する。
 #------------------------------------------------------------
