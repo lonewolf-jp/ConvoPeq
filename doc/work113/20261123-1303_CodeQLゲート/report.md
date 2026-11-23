@@ -71,7 +71,7 @@ buildless は作業ツリー全体を走査するため、解析対象は切替�
 | `Analyze (actions)` | success（51 秒） |
 | `Analyze (javascript-typescript)` | success（63 秒） |
 | `Analyze (csharp)` | success（85 秒） |
-| `Analyze (c-cpp)` | success（50 分 2 秒） |
+| `Analyze (c-cpp)` | success（52 分 2 秒） |
 | `CodeQL gate` | success |
 
 ほかのチェック（Windows MSVC / Release、Sanitizer CI の ASan・TSan、ISR Verification、ISR Authority Compliance、audit-report-verification、Graphify）もすべて success で、マージした（merge commit `8421fda1`）。
@@ -108,7 +108,7 @@ workflow 全体は 19 秒で完了した（06:24:17 → 06:24:36 UTC）。切替
 
 ### 5.4 main への push
 
-`8421fda1`（workflow のマージ）の push は、コード変更として 4 言語の解析が走った。c-cpp は 76 分（06:23:34 → 07:39:28）で、結果は切替前と同じだった。PR の 50 分より長いのは、既定ブランチの解析だけファイルカバレッジを計算するためで、ログにも `file coverage information is only enabled when analyzing the default branch and protected branches` と記録されている。
+`8421fda1`（workflow のマージ）の push は、コード変更として 4 言語の解析が走った。c-cpp は 76 分（06:23:34 → 07:39:28）で、結果は切替前と同じだった。PR の 52 分より長いのは、既定ブランチの解析だけファイルカバレッジを計算するためで、ログにも `file coverage information is only enabled when analyzing the default branch and protected branches` と記録されている。
 
 | カテゴリ | `8421fda1`（切替後） | `48c452de`（切替前） |
 | --- | ---: | ---: |
