@@ -845,7 +845,7 @@ OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツー�
 
 - **context-mode の版数は 3 か所にある**。npm グローバル、`~/.config/opencode/node_modules`、`~/.config/opencode/opencode.json` の `plugins` 固定値である。**実際に読み込まれるのは 3 番目**で、ここを上げないと `ctx_doctor` の D1 が「更新あり」の WARN のまま残る（2.2.1 のまま動き続けた）。
 - **OpenCode 2.3.2 は `~/.config/opencode/opencode.json` を読む**。`plugins` の固定値を 2.2.2 に変えてプラグインファイルを触ると、その場で `loading plugin id=context-mode@2.2.2` に切り替わった（アプリ再起動は不要）。
-- **headroom の MCP は、exe ロックを外すためにプロセスを止めると自動では戻らない**。同じ手順で止めた context-mode は OpenCode が自動再生成したが、プロジェクト設定で動く headroom は再生成されず、プロジェクト設定の書き直しもグローバル設定の再読込も効かなかった。**OpenChamber（または opencode サーバ）の再起動で戻る**。
+- **headroom の MCP は、exe ロックを外すためにプロセスを止めると自動では戻らない**。同じ手順で止めた context-mode は OpenCode が自動再生成したが、プロジェクト設定で動く headroom は再生成されず、プロジェクト設定の書き直しもグローバル設定の再読込も効かなかった。**OpenChamber を完全終了し、`serve --service` で動く opencode サーバも止めてから起動し直すと戻る**（2026-11-23 実測）。アプリだけを再起動しても、前回のサーバが孤児プロセスとして残っているとそれに繋ぎ直すため戻らない。`Stop-Process` の対象は名前で決め打ちしない（`opencode-cli.exe` と `opencode.exe` の両方があり得る）。`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'serve --service' }` で特定する。
 - **headroom 0.45.0 の MCP stdio 経路に変更は無い**。0.45.0 の `mcp` 修正は Streamable HTTP の Host / Origin 検査で、stdio は対象外である。破壊的変更の記載も無い。
 - **context-mode の MCP エントリには `enabled: true` が残っている**。2.0.16 ではこのキーでエントリが破棄されたが、2.3.2 では `mcp connected server=context-mode tools=9` が記録されており接続している。互換のため触っていない。
 - **`context-mode doctor` は他エージェントの行で FAIL する**（claude-code は 1.x の古いエントリ、codex / gemini / qwen / vscode は未設定）。opencode の行は PASS なので、終了コード 1 は本環境の不具合ではない。
