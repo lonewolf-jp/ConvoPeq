@@ -64,3 +64,12 @@
 改行まで含めて戻せるように、追跡 43 ファイルの作業ツリー版を `tracked_modified_files.zip` として追加した。これを展開すると **398 ファイルすべての SHA-256 が manifest と一致**する（確認済み）。
 
 限界として、`git apply` だけでは追跡ファイルの改行バイトが揃わないため、厳密な復元には `tracked_modified_files.zip` を併用する。
+
+## 7. 統合クローンのローカル設定（2026-11-24）
+
+main には入れない設定を、統合クローン側でも使えるようにした。
+
+- `.opencode/opencode.json`（`.gitignore` の `.opencode/` で除外済み）に graphify の `protocol: "2026-07-28"` を置いた。`opencode.json` は変更していない（main はクリーン）。
+- 参照先は `C:\VSC_Project\integ\ConvoPeq\graphify-out\graph.json`。`graphify update .` で作り直した code-only グラフで、67,033 ノード / 91,779 エッジ / 3,072 コミュニティ、`Built at commit 3a5e2ad4 (matches HEAD)`。
+- 文書ノードは LLM を伴う `/graphify --update` が必要なため、今回は code-only のままにした。
+- 確認: `opencode mcp list` で graphify が connected、`graph_stats` が上記の値を返す。
