@@ -1109,13 +1109,23 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             if (committed)
                 appendHistoryPoint(bestCandidateScore);
 
-            // ★ B-07: iteration は確定済み世代の通し番号。ここだけは optimizerMutex の外で
-            //   公開するため、getState() は「係数は世代 N、iteration は N+1」を観測し得る。
-            //   状態そのもの（mean / 係数 / bestScore）は同一臨界区間で揃うので、これは
-            //   混在ではなく「確定済み世代が 1 つ先に見える」だけの許容範囲とする。
-            convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
-            convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
-            ++generation;
+            // ★ B-07: iteration も確定済み世代の通し番号なので、epoch 照合と同じ臨界区間で
+            //   書く。mutex の外で書くと、復元が公開した iteration を、復元前の世代の
+            //   公開が後から上書きし得る（getState / saveLearnedState に古い世代が残る）。
+            bool generationCounted = false;
+            {
+                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                if (convo::consumeAtomic(optimizerStateEpoch, std::memory_order_relaxed)
+                    == optimizerEpochAtSample)
+                {
+                    convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
+                    convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
+                    generationCounted = true;
+                }
+            }
+            // 復元で無効になった世代は数えない。次の sampling で復元値から取り込み直す。
+            if (generationCounted)
+                ++generation;
 
             // 終了条件の判定
             double targetSeconds = 0.0;

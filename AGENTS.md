@@ -1030,8 +1030,8 @@ OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツー�
 - **`bank.state` は `getAdaptiveNoiseShaperState()` / `setAdaptiveNoiseShaperState()` の 2 経路だけが触り、
   両方が `bank.stateMutex` を取る。** `NoiseShaperLearnerState` は POD なので全体代入で安全。
   C-03 は optimizer、`bank.stateMutex` は係数バンクを守る（守備範囲は重複しない）。
-- `progress.iteration` は `optimizerMutex` の外で公開するため、`getState()` は「係数が世代 N、iteration が
-  N+1」を観測し得る。状態（mean / 係数 / bestScore）は同じ臨界区間で揃うので許容。
+- `progress.iteration` と `totalGenerations` も epoch 照合と同じ臨界区間で公開する。mutex の外で書くと、
+  復元が公開した iteration を復元前の世代が後から上書きし得る。
 - `learned_state.xml` は iteration を保存しない。ファイルだけから復帰すると世代番号は 0 から再開する。
 - 試験: `CONVOPEQ_NS_RESTORE_SYNC_TEST=1 build\Release\AudioEngineHarness.exe`（約 2 秒・opt-in）。
   `CONVOPEQ_NS_STATE_RACE_TEST=1` は従来どおり係数バンクの torn read を見る。

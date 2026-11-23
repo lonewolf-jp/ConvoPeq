@@ -25,6 +25,7 @@ sampling、評価、`optimizer.update()`、結果確定の 4 段すべてで epo
 - `publishGenerationResult()` は epoch 不一致なら `false` を返し、係数も `bestScore` も書かない。
 - 確定後の `latestScore` の公開も、同じ臨界区間で epoch を再確認する。
 - 最後のエンジン書き込み（`storeLearnedCoeffs` と `setAdaptiveNoiseShaperState`）は `callAsync` の中で `optimizerMutex` を取り、epoch を再確認してから行う。
+- `progress.iteration` の公開も同じ臨界区間に入れた。以前は `optimizerMutex` の外で書いていたため、復元が公開した iteration を、復元前の世代の公開が後から上書きし得た。
 
 復元が「後から来たものが勝つ」ことを、P1（後述）で固定した。ただし世代番号だけは例外で、worker のローカル変数が復元値を引き継いでいなかった。3 章で修正する。
 
@@ -53,7 +54,7 @@ C-03 が守るのは学習器の optimizer であり、バンク側はこの mut
 | `src/NoiseShaperLearner.cpp` | 主ループの epoch 変化検出時に、worker が復元値を取り込む（`accumulatedPlaybackSeconds`、`currentPhase`、`generation`） |
 | `src/NoiseShaperLearner.cpp` | `generation` の初期値を `progress.iteration` から取る（再開時に 0 へ戻さない） |
 | `src/NoiseShaperLearner.cpp` | モード切替（worker スレッド上の `setState()`）だけは、呼び出し直後に自分で復元値を取り込む |
-| `src/NoiseShaperLearner.cpp` | `progress.iteration` の公開位置に、許容する観測ゆらぎをコメントで明示 |
+| `src/NoiseShaperLearner.cpp` | `progress.iteration` と `totalGenerations` の公開を epoch 照合と同じ臨界区間へ移し、復元前の世代が復元値を上書きできないようにした |
 | `src/NoiseShaperLearner.h` | テスト用アクセサ `NoiseShaperRestoreSyncTestAccess` を friend に追加（製品コードの経路は不変） |
 | `src/tests/AudioEngineHarness/NoiseShaperRestoreSyncTests.cpp` | 新規。P1〜P3 の 3 試験（opt-in、約 2 秒） |
 | `CMakeLists.txt` | 上記テストを `AudioEngineHarness` に追加 |
@@ -76,7 +77,7 @@ P2 は修正を戻すと必ず落ちる。試験の検出力はこのミュー�
 
 ## 4. 残課題
 
-- `progress.iteration` は確定済み世代の通し番号として `optimizerMutex` の外で公開している。`getState()` は「係数は世代 N、iteration は N+1」を観測し得る。状態そのもの（mean、係数、`bestScore`）は同一臨界区間で揃うため、混在ではなく「確定済み世代が 1 つ先に見える」だけとして許容した。判断はコードのコメントに残した。
+- `progress.iteration` と `totalGenerations` を同じ臨界区間へ移したため、復元前の世代が復元値の iteration を上書きする経路は無くなった。ただし worker が動いていない間（学習停止中や `WaitingForAudio`）は世代が回らないので、復元値の反映は公開値だけになる。
 - `learned_state.xml` は iteration を保存しない。ファイルだけから復帰した場合、世代番号は 0 から再開する（係数、mean、スコアは復元される）。形式の変更（version 3）は今回の範囲外。
 - 復元の適用が世代境界に揃うのは「音声が流れていて世代が回る」間だけである。`WaitingForAudio` の間は worker が世代を作らないため、復元値は公開値にだけ現れ、worker のローカル状態は次の世代まで古いまま残る。公開値は復元済みなので表示・保存は正しく、音声処理に使う係数も `progress` 経由でないため影響しない。
 
