@@ -84,7 +84,7 @@
 
 ## 7. 見つけた問題と対処
 
-1. **headroom の MCP は、更新のためにプロセスを止めると自動では戻らない。** 同じ手順で止めた context-mode は OpenCode が自動再生成した（`mcp connected server=context-mode tools=9`）が、プロジェクト側の設定で動く headroom は再生成されなかった。プロジェクト設定ファイルを同一内容で書き直しても戻らず、グローバル設定の再読込でも戻らなかった。**OpenChamber（または opencode サーバ）の再起動で戻る**。今回は再起動がこのセッション自体を切るため行わず、ハンドシェイクと round-trip で機能を確認した。
+1. **headroom の MCP は、更新のためにプロセスを止めると自動では戻らない。** 同じ手順で止めた context-mode は OpenCode が自動再生成した（`mcp connected server=context-mode tools=9`）が、プロジェクト側の設定で動く headroom は再生成されなかった。プロジェクト設定ファイルを同一内容で書き直しても戻らず、グローバル設定の再読込でも戻らなかった。**アプリの再起動だけでは戻らなかった。** 2026-11-23 17:03 に OpenChamber を再起動したが、前回の opencode サーバ（11/22 10:13 起動）が孤児プロセスとして残り、新しいアプリはそのポートへ繋ぎ直しただけでサーバを作り直さなかった。プロジェクト側 MCP はサーバの起動時にしか生成されないため、headroom は未接続のままだった。17:09 に OpenChamber を完全終了し、`serve --service` の opencode サーバを止めて起動し直すと、新しいサーバ（`C:\Users\user\.bun\install\global\node_modules\@opencode\cli\bin\opencode.exe serve --service`）が立ち、**`mcp connected server=headroom tools=3` が記録されて復帰した**。同時に graphify 11 ツール、context-mode 9 ツールも再接続している。停止対象は名前で決め打ちしない（`opencode-cli.exe` と `opencode.exe` の両方があり得る）。コマンドラインの `serve --service` で特定する。
 2. **context-mode の版数は 3 か所にある。** npm グローバル、`~/.config/opencode/node_modules`、`~/.config/opencode/opencode.json` の `plugins` 固定値である。実際に読み込まれるのは 3 番目で、ここを上げないと `ctx_doctor` の D1 が WARN のまま残る。次回更新時の手順として記録する。
 3. **context-mode の MCP エントリに `enabled: true` がある。** 以前のビルド（2.0.16）ではこのキーでエントリ全体が破棄されたが、現行 2.3.2 では `mcp connected server=context-mode tools=9` が記録されており、接続している。互換のため触っていない。将来 MCP が繋がらない症状が出たら、まずこのキーを疑う。
 4. **`context-mode doctor` は他のエージェントの行で FAIL する**（claude-code は 1.x の古いエントリ、codex / gemini / qwen / vscode は未設定）。これは本環境（OpenChamber）の不具合ではなく、単に他ツールへ未展開なだけである。opencode の行は PASS なので、終了コード 1 は無視してよい。
@@ -92,7 +92,7 @@
 
 ## 8. 未実施・制約
 
-- headroom MCP の**セッション内再接続**は未確認（プロセスの自動再生成が無いため）。次回起動時に `mcp connected server=headroom tools=3` を確認する。
+- headroom MCP の**セッション内再接続**は、サーバを止めて起動し直す手順で復帰を確認した（§7.1）。アプリの再起動だけでは戻らない点に注意する。
 - context-mode の他エージェント（Claude Code / Codex / Gemini / Qwen / VS Code）への展開は未実施。
 - Graphify Cloud のホスト型 MCP はアカウント作成が必要なため未接続。無料枠の 25,000 ノード上限も未検証（数値は CLI のソースとドキュメント記載）。
 - 0.9.115 の AST スキーマ更新に伴う再抽出は、グラフが既に 0.9.115 で作られていたため発生していない。
