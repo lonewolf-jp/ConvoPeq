@@ -140,9 +140,13 @@ jobs:
   # 2) 集約: 単一の安定した check 名を作る
   #    - doc のみ（code=false）: 解析は意図的スキップなので成功
   #    - code あり: 解析が成功していなければ失敗
+  #
+  #    名前を "CodeQL" にしないのは、SARIF のアップロード時に GitHub Advanced
+  #    Security 側が同じ "CodeQL" という check を作るためである。同名の check が
+  #    2 つ並ぶと必須チェックの指定が紛らわしくなるので、"CodeQL gate" にする。
   # ---------------------------------------------------------------------------
   gate:
-    name: CodeQL
+    name: CodeQL gate
     needs: [changes, analyze]
     if: always()
     runs-on: ubuntu-latest
