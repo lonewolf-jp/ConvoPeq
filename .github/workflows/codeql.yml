@@ -1,0 +1,169 @@
+# CodeQL を advanced setup（workflow 方式）で運用する。
+#
+# 目的:
+#   default setup は paths フィルタを持てないため、ドキュメントだけの push でも
+#   c-cpp（実測 57〜71 分）を含む 4 言語の解析が走っていた。変更種別を判定し、
+#   コードに触れていないときは解析ジョブだけをスキップする。
+#
+# 設計上の注意（windows-msvc-build.yml と同じ理由）:
+#   workflow 自体を `paths` / `paths-ignore` で止めてはいけない。止めると check が
+#   Pending のまま残り、将来 CodeQL を必須チェックにしたときに doc のみの PR が
+#   マージ不能になる。job の条件スキップは Success として報告されるため、判定
+#   ジョブ（Detect changed files）と集約ジョブ（CodeQL）を常に走らせ、解析だけを
+#   条件で落とす。判定に失敗したときは解析する側へ倒す（安全側）。
+#
+# default setup との対応:
+#   言語 actions / c-cpp / csharp / javascript-typescript、クエリ suite は default、
+#   脅威モデルは remote（既定）、スケジュールは weekly。default setup は無効化して
+#   あるため、この workflow を削除するだけでは解析は再開しない。戻すときは
+#   `code-scanning/default-setup` を state=configured に戻す。
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 0) 変更種別の判定: ドキュメントだけの変更では解析を省略する
+  #
+  #    required check を将来 CodeQL にしても壊れないよう、このジョブは常に走る。
+  #    判定に失敗した場合は解析する側（code=true）へ倒す。
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changed files
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Classify the change
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scan() { echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          event="${{ github.event_name }}"
+          if [ "$event" = "pull_request" ]; then
+            if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
+              scan
+            fi
+            # pull_request の checkout は merge commit なので、base tip との 2 点
+            # リビジョンが PR の変更そのものになる。
+            range="origin/${{ github.base_ref }}..HEAD"
+          elif [ "$event" = "push" ]; then
+            before="${{ github.event.before }}"
+            case "$before" in
+              ''|0000000000000000000000000000000000000000) scan ;;
+            esac
+            if ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$before" || scan
+            fi
+            range="$before..${{ github.sha }}"
+          else
+            # schedule / workflow_dispatch は全解析する。
+            scan
+          fi
+
+          # -z は非 ASCII のパスを引用しない。tr で NUL 区切りを 1 行 1 パスに戻す。
+          if ! files=$(git -c core.quotepath=false diff --name-only -z "$range" | tr '\0' '\n'); then
+            scan
+          fi
+          if [ -z "$files" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          elif printf '%s\n' "$files" | grep -qvE '^(doc/|.*\.md$|\.memories/|\.x64dbg-mcp/|\.zcode/)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 1) 解析: default setup と同じ 4 言語を同じクエリ suite で回す
+  #    コンパイル言語は autobuild（default setup と同じ挙動）
+  # ---------------------------------------------------------------------------
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: c-cpp
+            build-mode: autobuild
+          - language: csharp
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # ---------------------------------------------------------------------------
+  # 2) 集約: 単一の安定した check 名を作る
+  #    - doc のみ（code=false）: 解析は意図的スキップなので成功
+  #    - code あり: 解析が成功していなければ失敗
+  # ---------------------------------------------------------------------------
+  gate:
+    name: CodeQL
+    needs: [changes, analyze]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="${{ needs.changes.outputs.code }}"
+          echo "changes.result=${{ needs.changes.result }} changes.code=${code:-unknown} analyze.result=${{ needs.analyze.result }}"
+
+          # 解析が走った（= コード変更あり、または判定不能）なら成功を要求する。
+          # 解析が走っていないのは「判定成功かつ code=false」のときだけであり、
+          # その場合に限りスキップを合格として扱う。
+          if [ "$code" = "true" ] || [ "${{ needs.changes.result }}" != "success" ]; then
+            if [ "${{ needs.analyze.result }}" != "success" ]; then
+              echo "::error::the change needed analysis but it did not succeed (${{ needs.analyze.result }})"
+              exit 1
+            fi
+            echo "analysed"
+          else
+            echo "documentation-only change: analysis skipped on purpose"
+          fi
