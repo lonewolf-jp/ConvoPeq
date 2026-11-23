@@ -1014,5 +1014,7 @@ OpenChamber Desktop（`opencode-cli.exe` 2.3.2、Windows 11 x64）で 3 ツー�
 - 日常の作業は `C:\VSC_Project\integ\ConvoPeq`（main）で行う。ビルド・テスト・コミットもこのツリー。
 - `C:\VSC_Project\ConvoPeq` は凍結した保護ツリー（HEAD `4d476d5c`・未コミット 398 エントリ）。読み取り専用で参照し、反映・reset・checkout をしない。
 - 保護ツリーの WIP の復元は、保全ブランチ `wip/preserve-20261123`（`adfb16f6` で凍結）、`%TEMP%\opencode\refl20261124\` の `tracked_changes.patch` / `untracked_files.zip`、Dropbox `/ConvoPeq-reflection-plan-20261124/` から行う。
-- 保護ツリーにだけある設定: `opencode.json` の graphify `protocol` 行。環境依存のため main には入れない。
+- graphify の `protocol` 行は環境依存のため main に入れない。保護ツリーは `opencode.json`、統合クローンは
+  `.opencode/opencode.json`（gitignore 済み）に置く。後者は `integ/ConvoPeq/graphify-out/graph.json`
+  （`graphify update .` で作る code-only グラフ）を指す。
 - 経緯: `doc/work113/20261124-0030_反映計画/report.md`、`doc/work113/20261124-0145_移行記録/report.md`
