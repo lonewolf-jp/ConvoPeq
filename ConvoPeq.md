@@ -1,6 +1,6 @@
 # Project Extract & Source Code: ConvoPeq
 
-> Generated: 2026-11-24 00:06:06
+> Generated: 2026-11-24 10:42:29
 
 ## 📁 Directory Tree (Selected Targets Only)
 
@@ -13,6 +13,7 @@
         ├── AllpassDesigner.cpp
         ├── AllpassDesigner.h
         ├── AsioBlacklist.h
+        ├── AsioBlacklistSetup.h
         ├── audioengine/
         │   ├── AtomicAccess.h
         │   ├── AudioEngine.Cache.cpp
@@ -278,7 +279,8 @@
         ├── LatticeNoiseShaper.h
         ├── learner/
         │   ├── LearnedStateMigration.cpp
-        │   └── LearnedStateMigration.h
+        │   ├── LearnedStateMigration.h
+        │   └── SegmentBufferAllocation.h
         ├── LockFreeAudioRingBuffer.h
         ├── LockFreeRingBuffer.h
         ├── LoudnessMeter.cpp
@@ -320,6 +322,7 @@
         │   ├── AdmissionPackedStateTestAccess.h
         │   ├── AdmissionPackedStateTests.cpp
         │   ├── AllpassDesignerCmaesTests.cpp
+        │   ├── AsioBlacklistSetupTests.cpp
         │   ├── AudioEngineHarness/
         │   │   ├── A2A3aQuarantineTests.cpp
         │   │   ├── AudioEngineHarness.cpp
@@ -334,6 +337,7 @@
         │   │   ├── EngineInstanceCountTests.cpp
         │   │   ├── IRLoadAdmissionTests.cpp
         │   │   ├── N1BypassAudioAnalysis.cpp
+        │   │   ├── NoiseShaperRestoreSyncTests.cpp
         │   │   ├── NoiseShaperStateRaceTests.cpp
         │   │   ├── OdenomCampaignTests.cpp
         │   │   ├── P1PolyphaseGainCharacterization.cpp
@@ -2525,6 +2529,36 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
 endif()
 
 #------------------------------------------------------------
+# B-17: ASIO ブラックリストの用意（実行ファイル隣接 → ユーザー領域）と通知判断
+#   どちらにも用意できない場合に、無言で起動しないことを固定する。
+#------------------------------------------------------------
+if(CONVOPEQ_ENABLE_ISR_TESTS)
+    juce_add_console_app(AsioBlacklistSetupTests)
+    target_sources(AsioBlacklistSetupTests PRIVATE
+        src/tests/AsioBlacklistSetupTests.cpp
+    )
+    target_include_directories(AsioBlacklistSetupTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_include_directories(AsioBlacklistSetupTests SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules
+    )
+    target_compile_definitions(AsioBlacklistSetupTests PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        _UNICODE UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    )
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+        target_compile_options(AsioBlacklistSetupTests PRIVATE /utf-8 /EHsc)
+    endif()
+    target_link_libraries(AsioBlacklistSetupTests PRIVATE
+        juce::juce_core juce::juce_events
+    )
+    add_test(NAME AsioBlacklistSetupTests COMMAND AsioBlacklistSetupTests)
+    juce_generate_juce_header(AsioBlacklistSetupTests)
+endif()
+
+#------------------------------------------------------------
 # B-04 / B-05: 入力ファイルの事前検査（RIFF チャンク境界・XML 上限）
 #   JUCE 本体は改修せず、入口で拒否できることを確認する。
 #------------------------------------------------------------
@@ -3565,6 +3599,8 @@ if(CONVOPEQ_ENABLE_ISR_TESTS)
         src/tests/AudioEngineHarness/IRLoadAdmissionTests.cpp
         # BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
         src/tests/AudioEngineHarness/NoiseShaperStateRaceTests.cpp
+        # B-07: 復元要求と公開値・保存スナップショットの同期（専用テスト・opt-in）
+        src/tests/AudioEngineHarness/NoiseShaperRestoreSyncTests.cpp
         src/tests/AudioEngineHarness/RuntimeParameterGuardTests.cpp
         src/tests/AudioEngineHarness/WorldRetirementMeasurementTests.cpp
         src/tests/AudioEngineHarness/T1Measurement.cpp
@@ -5041,6 +5077,105 @@ public:
 private:
     juce::StringArray blacklist;
 };
+```
+
+### 📄 `src\AsioBlacklistSetup.h`
+
+```
+//============================================================================
+#pragma once
+// AsioBlacklistSetup.h ── ASIO ブラックリストファイルの用意と、失敗時の通知判断
+//
+//   MainWindow のコンストラクタに埋まっていた処理を、テストできる形に切り出した。
+//   実行ファイル隣接を優先し、書けなければユーザー領域へフォールバックする。
+//   どちらも用意できない、または読めない場合は、除外が効かないまま起動している
+//   ことを利用者へ伝える（自動実行では伝えない）。
+//============================================================================
+
+#include <JuceHeader.h>
+
+namespace convo::asio
+{
+
+// 既定のブラックリスト。シングルクライアント ASIO と不安定なドライバを除外する。
+inline constexpr const char* kDefaultAsioBlacklistText =
+    "# ASIO Driver Blacklist\n"
+    "# Add partial driver names to exclude them from the list.\n"
+    "BRAVO-HD\n"
+    "ASIO4ALL\n";
+
+enum class BlacklistFileStatus
+{
+    readyInExecutableDirectory, // 実行ファイル隣接のファイルを使えた
+    readyInUserDirectory,       // 書込不可のためユーザー領域へ退避した
+    unavailable                 // どちらにも用意できなかった
+};
+
+struct BlacklistFileResolution
+{
+    juce::File file;
+    BlacklistFileStatus status = BlacklistFileStatus::unavailable;
+};
+
+// 既存ファイルはそのまま使う。無ければ既定の内容で作る。
+//   親ディレクトリは作らない（呼出側の責務）。存在しないディレクトリの下や、
+//   ファイルを親に指定したパスでは false になる。
+inline bool ensureBlacklistFile (const juce::File& file)
+{
+    if (file.existsAsFile())
+        return true;
+
+    return file.replaceWithText (kDefaultAsioBlacklistText) && file.existsAsFile();
+}
+
+// 実行ファイル隣接を優先し、失敗したらユーザー領域へフォールバックする。
+//   返る file は、失敗時には診断用に実行ファイル隣接のパスを指す。
+inline BlacklistFileResolution resolveBlacklistFile (const juce::File& executableDirectory,
+                                                     const juce::File& userApplicationDirectory)
+{
+    BlacklistFileResolution resolution;
+    resolution.file = executableDirectory.getChildFile ("asio_blacklist.txt");
+
+    if (ensureBlacklistFile (resolution.file))
+    {
+        resolution.status = BlacklistFileStatus::readyInExecutableDirectory;
+        return resolution;
+    }
+
+    auto userFile = userApplicationDirectory
+                        .getChildFile ("ConvoPeq")
+                        .getChildFile ("asio_blacklist.txt");
+    userFile.getParentDirectory().createDirectory();
+
+    if (ensureBlacklistFile (userFile))
+    {
+        resolution.file = userFile;
+        resolution.status = BlacklistFileStatus::readyInUserDirectory;
+        return resolution;
+    }
+
+    resolution.status = BlacklistFileStatus::unavailable;
+    return resolution;
+}
+
+// コマンドラインが自動実行か。GUI 起動では false。
+//   --cli-* は自動実行、--verify-runtime-evidence 系は証跡モードである。
+inline bool isAutomationInvocation (const juce::String& commandLine) noexcept
+{
+    return commandLine.contains ("--cli-")
+        || commandLine.contains ("--verify-runtime-evidence");
+}
+
+// 読み込みに失敗したときに利用者へ知らせるか。
+//   自動実行ではダイアログを出さない（CI とテストを止めるため）。
+inline bool shouldShowBlacklistWarning (bool loadSucceeded,
+                                        bool automationInvocation) noexcept
+{
+    return ! loadSucceeded && ! automationInvocation;
+}
+
+} // namespace convo::asio
+
 ```
 
 ### 📄 `src\audioengine\AtomicAccess.h`
@@ -88208,6 +88343,53 @@ MigrationResult migrateFile (const juce::File& file);
 
 ```
 
+### 📄 `src\learner\SegmentBufferAllocation.h`
+
+```
+//============================================================================
+#pragma once
+// SegmentBufferAllocation.h ── AudioSegmentBuffer::create() の例外を外へ出さない境界
+//
+//   create() は確保に失敗すると std::bad_alloc を送出する（B-1 の契約）。
+//   NoiseShaperLearner のコンストラクタは「確保に失敗したら Status::Error へ落ちて
+//   戻る」設計なので、例外はここで受けて nullptr に変える（#265）。
+//
+//   nothrow 版（makeAlignedArray_nothrow）と意味論を揃えるための境界である。
+//   呼出側は nullptr だけを見ればよい。
+//============================================================================
+
+#include "AudioSegmentBuffer.h"
+
+#include <memory>
+#include <new>
+
+namespace convo::learner
+{
+
+// 確保関数を注入できる形。テストは std::bad_alloc を投げる関数を渡す。
+//   契約: 確保関数は失敗時に std::bad_alloc を送出する（nullptr を返さない）。
+template <typename Factory>
+inline std::unique_ptr<AudioSegmentBuffer> createSegmentBufferNoThrow (Factory&& factory) noexcept
+{
+    try
+    {
+        return factory();
+    }
+    catch (const std::bad_alloc&)
+    {
+        return nullptr;
+    }
+}
+
+inline std::unique_ptr<AudioSegmentBuffer> createSegmentBufferNoThrow() noexcept
+{
+    return createSegmentBufferNoThrow ([] { return AudioSegmentBuffer::create(); });
+}
+
+} // namespace convo::learner
+
+```
+
 ### 📄 `src\LockFreeAudioRingBuffer.h`
 
 ```
@@ -89306,6 +89488,7 @@ private:
 #include <cmath>
 #include <limits>
 #include "InputInspection.h"   // ★ B-05/B-06: XML のサイズ・深さ検査
+#include "AsioBlacklistSetup.h"   // ★ B-17: ブラックリストの用意と通知判断
 #include "audioengine/AtomicAccess.h"
 
 namespace
@@ -89603,46 +89786,49 @@ MainWindow::MainWindow (const juce::String& name)
 
     // ── ASIO Blacklist 初期化 ──
     auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
-    auto blacklistFile = exeDir.getChildFile ("asio_blacklist.txt");
+    const auto blacklistResolution = convo::asio::resolveBlacklistFile (
+        exeDir, juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory));
+    auto blacklistFile = blacklistResolution.file;
 
-    // デフォルトのブラックリストファイルを作成（存在しない場合）
-    // シングルクライアントASIOや不安定なドライバをデフォルトで除外
-    constexpr const char* kDefaultAsioBlacklist =
-        "# ASIO Driver Blacklist\n"
-        "# Add partial driver names to exclude them from the list.\n"
-        "BRAVO-HD\n"
-        "ASIO4ALL\n";
-
-    // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
-    //   作成に失敗する。従来は無言で空リストのまま起動していた。ユーザー領域へ
-    //   フォールバックし、それも失敗したら UI に通知する。
-    bool blacklistReady = blacklistFile.existsAsFile()
-                          || (blacklistFile.replaceWithText (kDefaultAsioBlacklist)
-                              && blacklistFile.existsAsFile());
-
-    if (! blacklistReady)
+    if (blacklistResolution.status == convo::asio::BlacklistFileStatus::readyInUserDirectory)
+    {
+        // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
+        //   作成に失敗する。ユーザー領域へフォールバックしたことを残す。
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist fell back to: "
+                                  + blacklistFile.getFullPathName());
+    }
+    else if (blacklistResolution.status == convo::asio::BlacklistFileStatus::unavailable)
     {
         // ★ C-16: 書込み失敗を無視すると、存在しないファイルを loadFromFile して
         //   「ブラックリストが空」のまま起動する。失敗はログに残す。
         juce::Logger::writeToLog ("[ASIO] blacklist file could not be created: "
                                   + blacklistFile.getFullPathName());
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist unavailable in both locations");
+    }
 
-        // ★ B-13: exe ディレクトリが書込不可（Program Files 配下など）だと既定リストの
-        //   作成に失敗する。ユーザー領域へフォールバックし、それも失敗したら UI に通知する。
-        auto userFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                            .getChildFile ("ConvoPeq")
-                            .getChildFile ("asio_blacklist.txt");
+    // ★ B-17: 用意も読み込みもできなかった場合、除外が効かないまま起動していることを
+    //   利用者へ伝える。従来はログだけだった。自動実行（--cli-* / 証跡モード）では
+    //   ダイアログを出さない（CI とテストを止めないため）。
+    const bool blacklistLoaded = asioBlacklist.loadFromFile (blacklistFile);
 
-        userFile.getParentDirectory().createDirectory();
-        blacklistReady = userFile.existsAsFile()
-                         || (userFile.replaceWithText (kDefaultAsioBlacklist)
-                             && userFile.existsAsFile());
+    if (! blacklistLoaded)
+    {
+        juce::Logger::writeToLog ("[MainWindow] ASIO blacklist could not be created or read: "
+                                  + blacklistFile.getFullPathName());
 
-        if (blacklistReady)
+        if (convo::asio::shouldShowBlacklistWarning (
+                blacklistLoaded,
+                convo::asio::isAutomationInvocation (juce::JUCEApplicationBase::getCommandLineParameters())))
         {
-            blacklistFile = userFile;
-            juce::Logger::writeToLog ("[MainWindow] ASIO blacklist fell back to: "
-                                      + userFile.getFullPathName());
+            juce::NativeMessageBox::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle ("ASIO blacklist")
+                    .withMessage ("The ASIO driver blacklist could not be created or read:\n"
+                                  + blacklistFile.getFullPathName()
+                                  + "\nUnstable drivers such as ASIO4ALL or BRAVO-HD may appear "
+                                    "in the device list."),
+                nullptr);
         }
     }
 
@@ -96768,6 +96954,7 @@ private:
 #include "AudioEngine.h"
 #include "InputInspection.h"               // ★ B-05: XML のサイズ・深さ検査
 #include "learner/LearnedStateMigration.h"   // ★ B-15: 形式の世代
+#include "learner/SegmentBufferAllocation.h"   // ★ #265: 確保失敗を例外にしない
 #include "core/ThreadAffinityManager.h"
 #include <JuceHeader.h>
 
@@ -96837,7 +97024,10 @@ NoiseShaperLearner::NoiseShaperLearner(AudioEngine& engineRef,
     candidateFitness = std::move(fitnessBuffer);
 
     // ★ P0-3: AudioSegmentBuffer をヒープに確保（Factory経由）
-    segmentBuffer = AudioSegmentBuffer::create();
+    // ★ #265: create() は失敗時に std::bad_alloc を送出する（B-1）。従来の nullptr 判定は
+    //   到達しないデッドコードで、OOM 時は例外がコンストラクタの外へ抜けていた。
+    //   境界で受けて nullptr に落とし、候補バッファ（nothrow）と同じ失敗時の意味論に揃える。
+    segmentBuffer = convo::learner::createSegmentBufferNoThrow();
     if (!segmentBuffer)
     {
         DBG_LOG("[NoiseShaperLearner] failed to allocate AudioSegmentBuffer");
@@ -97112,6 +97302,12 @@ void NoiseShaperLearner::handleModeSwitch() noexcept
     if (engine.getAdaptiveNoiseShaperState(bankIndex, newState) && newState.iteration > 0)
     {
         setState(newState);
+        // ★ B-07(a): setState() no longer writes worker-owned fields. This call path IS the
+        //   worker thread, so adopt the restored clock/phase here to keep the mode-switch
+        //   semantics (phase recomputed from the restored elapsed time).
+        accumulatedPlaybackSeconds =
+            convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire);
+        currentPhase = convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire);
     }
     else
     {
@@ -97178,12 +97374,15 @@ void NoiseShaperLearner::setState(const State& inState) noexcept
     convo::fetchAddAtomic(optimizerStateEpoch, std::uint64_t{1}, std::memory_order_acq_rel);
     for (int i = 0; i < kOrder; ++i)
         convo::publishAtomic(bestCoefficients[i], inState.bestCoefficients[i], std::memory_order_release);
-    accumulatedPlaybackSeconds = inState.elapsedPlaybackSeconds;
-    currentPhase = inState.currentPhase;
+    // ★ B-07(a): accumulatedPlaybackSeconds / currentPhase are worker-owned plain fields.
+    //   setState() is also called from the message thread (AudioEngine::Timer recovery), so
+    //   writing them here would race with the worker loop. Publish the restored values and
+    //   let the worker adopt them at the next generation boundary; the public view
+    //   (progress) is already consistent with the restored state at return.
     convo::publishAtomic(progress.iteration, inState.iteration, std::memory_order_release);
     convo::publishAtomic(progress.bestScore, inState.bestScore, std::memory_order_release);
-    convo::publishAtomic(progress.elapsedPlaybackSeconds, accumulatedPlaybackSeconds, std::memory_order_release);
-    convo::publishAtomic(progress.currentPhase, currentPhase, std::memory_order_release);
+    convo::publishAtomic(progress.elapsedPlaybackSeconds, inState.elapsedPlaybackSeconds, std::memory_order_release);
+    convo::publishAtomic(progress.currentPhase, inState.currentPhase, std::memory_order_release);
     convo::publishAtomic(progress.processCount, inState.processCount, std::memory_order_release);
     convo::publishAtomic(progress.totalGenerations, inState.totalGenerations, std::memory_order_release);
 }
@@ -97650,7 +97849,11 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
         // ★ review: local baseline must follow a restore (setState publishes progress.bestScore).
         std::uint64_t trackedOptimizerEpoch =
             convo::consumeAtomic(optimizerStateEpoch, std::memory_order_acquire);
-        int generation = 0;
+        // ★ B-07(c): the generation counter continues from the restored value. Starting at 0
+        //   would publish iteration=1 right after a resume, regressing the generation that
+        //   setState()/getState() carry in the learner state.
+        int generation = static_cast<int>(
+            convo::consumeAtomic(progress.iteration, std::memory_order_acquire));
         DrainStats cumulativeDrainStats {};
         auto lastWaitingDiagnosticsLogTime = std::chrono::steady_clock::now();
 
@@ -97769,6 +97972,14 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
                     // 復元後は復元されたスコアを比較の基準にする（古い baseline を残さない）。
                     trackedOptimizerEpoch = optimizerEpochAtSample;
                     bestScore = convo::consumeAtomic(progress.bestScore, std::memory_order_acquire);
+                    // ★ B-07(a): the restore request only publishes. Worker-owned plain
+                    //   fields (playback clock, phase) and the generation counter are
+                    //   adopted here, at the generation boundary, so the evaluated state
+                    //   and the published values stay in the same generation.
+                    accumulatedPlaybackSeconds =
+                        convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire);
+                    currentPhase = convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire);
+                    generation = static_cast<int>(convo::consumeAtomic(progress.iteration, std::memory_order_acquire));
                 }
                 optimizer.sample(candidatePopulationMatrix());
             }
@@ -97850,9 +98061,23 @@ void NoiseShaperLearner::workerThreadMain(std::stop_token stopToken)
             if (committed)
                 appendHistoryPoint(bestCandidateScore);
 
-            convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
-            convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
-            ++generation;
+            // ★ B-07: iteration も確定済み世代の通し番号なので、epoch 照合と同じ臨界区間で
+            //   書く。mutex の外で書くと、復元が公開した iteration を、復元前の世代の
+            //   公開が後から上書きし得る（getState / saveLearnedState に古い世代が残る）。
+            bool generationCounted = false;
+            {
+                std::lock_guard<std::mutex> optimizerLock(optimizerMutex);
+                if (convo::consumeAtomic(optimizerStateEpoch, std::memory_order_relaxed)
+                    == optimizerEpochAtSample)
+                {
+                    convo::publishAtomic(progress.iteration, generation + 1, std::memory_order_release);
+                    convo::fetchAddAtomic(progress.totalGenerations, 1, std::memory_order_acq_rel);
+                    generationCounted = true;
+                }
+            }
+            // 復元で無効になった世代は数えない。次の sampling で復元値から取り込み直す。
+            if (generationCounted)
+                ++generation;
 
             // 終了条件の判定
             double targetSeconds = 0.0;
@@ -98268,23 +98493,29 @@ void NoiseShaperLearner::precomputeMaskingThresholds(LeveledSegment& leveled, do
 
 bool NoiseShaperLearner::saveLearnedState(const juce::File& file) const
 {
+    // ★ B-07(b): the whole file must come from one generation. Reading the published
+    //   atomics one by one can interleave with setState() and write the CMA mean of one
+    //   generation together with the coefficients / score of another. getState() takes
+    //   optimizerMutex and setState() publishes under the same mutex, so a single snapshot
+    //   is a single generation.
+    State state;
+    getState(state);
+
     juce::XmlElement xml("ConvoPeqLearnedState");
     // ★ B-15: 形式の世代を明示する。version 無しは legacyUnknown として扱われる。
     xml.setAttribute(convo::learnedstate::kVersionAttribute, convo::learnedstate::kCurrentVersion);
     xml.setAttribute(convo::learnedstate::kConversionAttribute, convo::learnedstate::kConversionParcor);
-    xml.setAttribute("bestScore", convo::consumeAtomic(progress.bestScore, std::memory_order_acquire));
+    xml.setAttribute("bestScore", state.bestScore);
     xml.setAttribute("sampleRate", this->sessionSampleRate);
     xml.setAttribute("bitDepth", this->sessionBitDepth);
-    xml.setAttribute("phase", convo::consumeAtomic(progress.currentPhase, std::memory_order_acquire));
-    xml.setAttribute("elapsedPlaybackSeconds", convo::consumeAtomic(progress.elapsedPlaybackSeconds, std::memory_order_acquire));
+    xml.setAttribute("phase", state.currentPhase);
+    xml.setAttribute("elapsedPlaybackSeconds", state.elapsedPlaybackSeconds);
 
     auto* coeffsXml = xml.createNewChildElement("BestCoefficients");
     for (int i = 0; i < kOrder; ++i)
-        coeffsXml->setAttribute("c" + juce::String(i), convo::consumeAtomic(bestCoefficients[i], std::memory_order_acquire));
+        coeffsXml->setAttribute("c" + juce::String(i), state.bestCoefficients[i]);
 
     auto* cmaXml = xml.createNewChildElement("CmaMean");
-    State state;
-    getState(state);
     for (int i = 0; i < kOrder; ++i)
         cmaXml->setAttribute("m" + juce::String(i), state.mean[i]);
 
@@ -98559,6 +98790,19 @@ struct LeveledSegment
     SpectralType type = SpectralType::Broadband;
 };
 
+// ★ B-07: 復元要求と公開値の同期テスト（Issue #278）専用のアクセサ。
+//   private の epoch ゲートを、製品コードを変えずに固定するために使う。
+class NoiseShaperLearner;
+struct NoiseShaperRestoreSyncTestAccess
+{
+    static std::uint64_t epoch(const NoiseShaperLearner& learner) noexcept;
+    static bool publish(NoiseShaperLearner& learner, const double* parcor, double score,
+                        int evaluatedCandidates, std::uint64_t expectedEpoch,
+                        double safetyMargin) noexcept;
+    static double bestCoefficient(const NoiseShaperLearner& learner, int index) noexcept;
+    static double bestScore(const NoiseShaperLearner& learner) noexcept;
+};
+
 class NoiseShaperLearner
 {
 public:
@@ -98670,6 +98914,9 @@ public:
     }
 
 private:
+    // ★ B-07: Issue #278 の同期テスト（NoiseShaperRestoreSyncTests.cpp）だけに開く。
+    friend struct NoiseShaperRestoreSyncTestAccess;
+
     enum class WorkerState : uint8_t
     {
         Idle = 0,
@@ -98780,6 +99027,9 @@ private:
     std::atomic<const char*> errorMessage { nullptr };
 
     double accumulatedPlaybackSeconds = 0.0;           // Worker thread専用（非atomic）
+                                                       // ★ B-07(a): setState() は書かない。
+                                                       //   復元は progress へ publish し、worker が
+                                                       //   世代境界で取り込む。
     double sessionSampleRate = 0.0;
     int sessionBitDepth = 0;
     uint64_t currentSessionId = 0;
@@ -104254,6 +104504,157 @@ int main()
 
 ```
 
+### 📄 `src\tests\AsioBlacklistSetupTests.cpp`
+
+```
+//============================================================================
+// AsioBlacklistSetupTests.cpp ── ASIO ブラックリストの用意と通知判断の回帰
+//
+//   B-17: 実行ファイル隣接に書けない場合のユーザー領域フォールバックと、
+//         それも失敗したときの「無言で起動しない」判断を固定する。
+//         ダイアログ自体は GUI の都合で自動化できないため、判断関数を検証する。
+//============================================================================
+
+#include <JuceHeader.h>
+
+#include "AsioBlacklist.h"
+#include "AsioBlacklistSetup.h"
+
+#include <cstdio>
+
+namespace {
+
+int gFailures = 0;
+
+void check (bool ok, const char* id, const juce::String& detail = {})
+{
+    std::printf ("[%s] %s%s\n",
+                 ok ? "PASS" : "FAIL",
+                 id,
+                 detail.isNotEmpty() ? (" (" + detail + ")").toRawUTF8() : "");
+
+    if (! ok)
+        ++gFailures;
+}
+
+juce::File makeBase (const juce::String& name)
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                   .getChildFile ("convo_asioblacklist_" + name);
+    dir.deleteRecursively();
+    dir.createDirectory();
+    return dir;
+}
+
+} // namespace
+
+int main()
+{
+    // A-1: 実行ファイル隣接に無ければ既定の内容で作る
+    {
+        const auto base = makeBase ("a1");
+        const auto exeDir = base.getChildFile ("exe");
+        const auto userDir = base.getChildFile ("user");
+        exeDir.createDirectory();
+
+        const auto r = convo::asio::resolveBlacklistFile (exeDir, userDir);
+        check (r.status == convo::asio::BlacklistFileStatus::readyInExecutableDirectory,
+               "A-1 status is executable directory", juce::String (static_cast<int> (r.status)));
+        check (r.file.existsAsFile(), "A-1 file exists", r.file.getFullPathName());
+        check (r.file.loadFileAsString().contains ("ASIO4ALL"),
+               "A-1 default content written");
+
+        // A-2: 既存ファイルは上書きしない
+        const auto custom = "# custom\nMyDriver\n";
+        r.file.replaceWithText (custom);
+        const auto r2 = convo::asio::resolveBlacklistFile (exeDir, userDir);
+        check (r2.status == convo::asio::BlacklistFileStatus::readyInExecutableDirectory,
+               "A-2 status is executable directory");
+        // 読み出しは改行を CRLF に正規化するため、内容は行単位で確かめる。
+        const auto preserved = r2.file.loadFileAsString();
+        check (preserved.contains ("MyDriver") && ! preserved.contains ("ASIO4ALL"),
+               "A-2 existing file is preserved", preserved.trim());
+
+
+        AsioBlacklist blacklist;
+        check (blacklist.loadFromFile (r2.file), "A-2 loadFromFile succeeds");
+        check (blacklist.isBlacklisted ("myDriver v2"), "A-2 custom entry is active");
+
+        base.deleteRecursively();
+    }
+
+    // A-3: 実行ファイル隣接に書けなければユーザー領域へ退避する
+    {
+        const auto base = makeBase ("a3");
+        const auto missingExeDir = base.getChildFile ("no_such_exe_dir");
+        const auto userDir = base.getChildFile ("user");
+
+        const auto r = convo::asio::resolveBlacklistFile (missingExeDir, userDir);
+        check (r.status == convo::asio::BlacklistFileStatus::readyInUserDirectory,
+               "A-3 status is user directory", juce::String (static_cast<int> (r.status)));
+        check (r.file.existsAsFile(), "A-3 file exists", r.file.getFullPathName());
+        check (r.file.getParentDirectory() == userDir.getChildFile ("ConvoPeq"),
+               "A-3 file is under the user directory", r.file.getFullPathName());
+        check (! missingExeDir.getChildFile ("asio_blacklist.txt").existsAsFile(),
+               "A-3 executable directory was not created");
+
+        AsioBlacklist blacklist;
+        check (blacklist.loadFromFile (r.file), "A-3 loadFromFile succeeds");
+
+        base.deleteRecursively();
+    }
+
+    // A-4: どちらにも用意できなければ unavailable。パスは診断用に実行ファイル隣接を指す
+    {
+        const auto base = makeBase ("a4");
+        const auto missingExeDir = base.getChildFile ("no_such_exe_dir");
+        const auto blocker = base.getChildFile ("blocker");
+        blocker.replaceWithText ("not a directory");
+
+        const auto r = convo::asio::resolveBlacklistFile (missingExeDir, blocker);
+        check (r.status == convo::asio::BlacklistFileStatus::unavailable,
+               "A-4 status is unavailable", juce::String (static_cast<int> (r.status)));
+        check (r.file == missingExeDir.getChildFile ("asio_blacklist.txt"),
+               "A-4 diagnostic path is the executable directory", r.file.getFullPathName());
+
+        AsioBlacklist blacklist;
+        check (! blacklist.loadFromFile (r.file), "A-4 loadFromFile fails for a missing file");
+
+        base.deleteRecursively();
+    }
+
+    // A-5: 通知の条件
+    {
+        check (convo::asio::shouldShowBlacklistWarning (false, false),
+               "A-5 warn on failure in GUI mode");
+        check (! convo::asio::shouldShowBlacklistWarning (false, true),
+               "A-5 no warning in automation");
+        check (! convo::asio::shouldShowBlacklistWarning (true, false),
+               "A-5 no warning on success");
+        check (! convo::asio::shouldShowBlacklistWarning (true, true),
+               "A-5 no warning on success in automation");
+    }
+
+    // A-6: 自動実行の判定
+    {
+        check (! convo::asio::isAutomationInvocation ("ConvoPeq.exe"),
+               "A-6 plain GUI start is not automation");
+        check (convo::asio::isAutomationInvocation ("ConvoPeq.exe --cli-run --cli-exit-ms 12000"),
+               "A-6 --cli-run is automation");
+        check (convo::asio::isAutomationInvocation ("ConvoPeq.exe --cli-ir=C:/x.wav"),
+               "A-6 --cli- value form is automation");
+        check (convo::asio::isAutomationInvocation ("ConvoPeq.exe --verify-runtime-evidence"),
+               "A-6 evidence mode is automation");
+        check (convo::asio::isAutomationInvocation ("ConvoPeq.exe --verify-runtime-evidence-live"),
+               "A-6 live evidence mode is automation");
+    }
+
+    std::printf ("[SUMMARY] failures=%d\n", gFailures);
+    return gFailures == 0 ? 0 : 1;
+}
+
+```
+
 ### 📄 `src\tests\AudioEngineHarness\A2A3aQuarantineTests.cpp`
 
 ```
@@ -105962,6 +106363,26 @@ void eqDirectLog(const std::string& line)
     std::fflush(stderr);
 }
 
+// ★ #266: snprintf の戻り値は「書いた長さ」ではなく「書こうとした長さ」である。
+//   そのまま加算すると、切り詰め時に残量が size_t でアンダーフローし、境界外書き込みに
+//   なり得る。1 片ずつ組み立て、実際に写した長さだけを足す。
+void appendClamped(char* buffer, size_t capacity, size_t& used, const char* text) noexcept
+{
+    if (buffer == nullptr || capacity == 0 || text == nullptr)
+        return;
+
+    if (used >= capacity - 1)
+        return;
+
+    const size_t len = std::strlen(text);
+    const size_t room = capacity - 1 - used;
+    const size_t copy = (len < room) ? len : room;
+
+    std::memcpy(buffer + used, text, copy);
+    used += copy;
+    buffer[used] = '\0';
+}
+
 } // namespace
 
 // ── B-1-R2-B1: 実 EQProcessor 単体の wet 出力 attribution（test-only・独立測定）──
@@ -107243,19 +107664,24 @@ int runBassBuzzMeasurement(int argc, char* argv[])
 
         // タップダンプ（有意タップの先頭 16 個 + ピーク近傍 ±5）
         {
-            char buf[4096]; int n = 0; int shown = 0;
-            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), "[PROBE] firstTaps:");
+            char buf[4096]; size_t n = 0; int shown = 0; char piece[96];
+            buf[0] = '\0';
+            appendClamped(buf, sizeof(buf), n, "[PROBE] firstTaps:");
             for (size_t i = 0; i < out.size() && shown < 16; ++i)
                 if (std::abs(out[i]) > 1.0e-4)
                 {
-                    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %zu:%.6f", i, static_cast<double>(out[i]));
+                    std::snprintf(piece, sizeof(piece), " %zu:%.6f", i, static_cast<double>(out[i]));
+                    appendClamped(buf, sizeof(buf), n, piece);
                     ++shown;
                 }
-            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " | nearPeak:");
+            appendClamped(buf, sizeof(buf), n, " | nearPeak:");
             if (peakIdx >= 5)
                 for (long long i = peakIdx - 5; i <= peakIdx + 5 && i < static_cast<long long>(out.size()); ++i)
-                    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %lld:%.6f",
-                                       i, static_cast<double>(out[static_cast<size_t>(i)]));
+                {
+                    std::snprintf(piece, sizeof(piece), " %lld:%.6f",
+                                  i, static_cast<double>(out[static_cast<size_t>(i)]));
+                    appendClamped(buf, sizeof(buf), n, piece);
+                }
             std::fprintf(stderr, "%s\n", buf);
         }
         if (!useRealIr)
@@ -114557,6 +114983,279 @@ int runN1BypassAudioAnalysis(const juce::String& outDirIn, const juce::String& m
 
 ```
 
+### 📄 `src\tests\AudioEngineHarness\NoiseShaperRestoreSyncTests.cpp`
+
+```
+//==============================================================================
+// NoiseShaperRestoreSyncTests.cpp — B-07 の復旧要求と公開値の同期（専用テスト）
+//
+// 目的（Issue #278）:
+//   1. 学習中の setState()（復元要求）が世代境界で適用されること。
+//      すなわち、復元前に sampling した世代の結果が、復元後の状態を上書きしないこと。
+//   2. 保存スナップショット（saveLearnedState）に別世代が混入しないこと。
+//   3. 公開側（getState / progress）が復元と同時に読まれても世代混在しないこと。
+//
+// 検証方法:
+//   - P1: 復元前の epoch で publishGenerationResult() を呼び、拒否されること
+//         （係数と bestScore が復元値のまま）を確認する。
+//   - P2: setState() を別スレッドで連続実行しながら saveLearnedState() を繰り返し、
+//         XML の mean / 係数 / bestScore / phase / elapsed が単一世代であることを確認する。
+//   - P3: 同じ競合下で getState() を繰り返し、返る State が単一世代であることを確認する。
+//
+// 世代の識別:
+//   状態 A と B は全フィールドに固有値を書き込む（mean=m, bestCoefficients=c,
+//   bestScore=s, phase=p, elapsed=e, iteration=i）。読み手は mean[0] から世代を決め、
+//   他のフィールドが同じ世代かを照合する。
+//
+// 実行:
+//   AudioEngineHarness（環境変数 CONVOPEQ_NS_RESTORE_SYNC_TEST=1）
+//   通常のテストスイートには含めない（opt-in）。実行時間は約 1.2 秒で固定する。
+//==============================================================================
+
+#include <JuceHeader.h>
+
+#include "AudioEngine.h"
+#include "LockFreeRingBuffer.h"
+#include "NoiseShaperLearner.h"
+#include "NoiseShaperLearnerTypes.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
+
+// ---- NoiseShaperRestoreSyncTestAccess（private の epoch ゲートへ開く定義） ----------
+std::uint64_t NoiseShaperRestoreSyncTestAccess::epoch(const NoiseShaperLearner& learner) noexcept
+{
+    return convo::consumeAtomic(learner.optimizerStateEpoch, std::memory_order_acquire);
+}
+
+bool NoiseShaperRestoreSyncTestAccess::publish(NoiseShaperLearner& learner, const double* parcor,
+                                               double score, int evaluatedCandidates,
+                                               std::uint64_t expectedEpoch,
+                                               double safetyMargin) noexcept
+{
+    return learner.publishGenerationResult(parcor, score, evaluatedCandidates, expectedEpoch,
+                                           safetyMargin);
+}
+
+double NoiseShaperRestoreSyncTestAccess::bestCoefficient(const NoiseShaperLearner& learner,
+                                                        int index) noexcept
+{
+    return convo::consumeAtomic(learner.bestCoefficients[static_cast<size_t> (index)],
+                                std::memory_order_acquire);
+}
+
+double NoiseShaperRestoreSyncTestAccess::bestScore(const NoiseShaperLearner& learner) noexcept
+{
+    return convo::consumeAtomic(learner.progress.bestScore, std::memory_order_acquire);
+}
+
+int runNoiseShaperRestoreSyncTests()
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // 注意: AudioEngine のデストラクタは未 prepare のままでは shutdown を待ち続ける
+    //   （既知事項）。NoiseShaperStateRaceTests と同じくプロセス終了で回収する。
+    auto* engine = new AudioEngine();
+    auto* captureQueue = new LockFreeRingBuffer<AudioBlock, 4096>();
+    auto* learner = new NoiseShaperLearner(*engine, *captureQueue);
+    if (engine == nullptr || learner == nullptr)
+        return 1;
+
+    // ---- 世代 A / B -----------------------------------------------------------
+    //   mean は CMA 空間なので ±50 まで許容（loadLearnedState のクランプと同条件）。
+    convo::NoiseShaperLearnerState stateA;
+    convo::NoiseShaperLearnerState stateB;
+
+    for (int i = 0; i < 9; ++i)
+    {
+        stateA.mean[i] = 2.0;
+        stateA.bestCoefficients[i] = 0.25;
+        stateB.mean[i] = 6.0;
+        stateB.bestCoefficients[i] = 0.75;
+    }
+    for (int i = 0; i < 45; ++i)
+    {
+        stateA.covarianceUpperTriangle[i] = 2.0;
+        stateB.covarianceUpperTriangle[i] = 6.0;
+    }
+    stateA.iteration = 7;
+    stateA.bestScore = 11.0;
+    stateA.currentPhase = 1;
+    stateA.elapsedPlaybackSeconds = 100.0;
+    stateA.processCount = 70;
+    stateA.totalGenerations = 70;
+
+    stateB.iteration = 9;
+    stateB.bestScore = 22.0;
+    stateB.currentPhase = 2;
+    stateB.elapsedPlaybackSeconds = 200.0;
+    stateB.processCount = 90;
+    stateB.totalGenerations = 90;
+
+    auto expectedOf = [&] (double mean0) -> const convo::NoiseShaperLearnerState*
+    {
+        if (mean0 == 2.0) return &stateA;
+        if (mean0 == 6.0) return &stateB;
+        return nullptr;
+    };
+
+    // ---- P1: 復元前の epoch で確定しようとした世代は拒否される ---------------
+    std::printf("NS-RESTORE: P1 stale-epoch publish must be rejected\n");
+    std::fflush(stdout);
+
+    learner->setState(stateA);
+    const std::uint64_t epochBeforeRestore =
+        NoiseShaperRestoreSyncTestAccess::epoch(*learner);
+
+    learner->setState(stateB);   // 復元が epoch を進める
+
+    double parcor[9] = {};
+    for (int i = 0; i < 9; ++i)
+        parcor[i] = 0.5;
+    const bool stalePublished =
+        NoiseShaperRestoreSyncTestAccess::publish(*learner, parcor, 33.0, 4,
+                                                  epochBeforeRestore, 0.85);
+
+    bool p1Ok = (stalePublished == false);
+    if (NoiseShaperRestoreSyncTestAccess::bestCoefficient(*learner, 0) != 0.75
+        || NoiseShaperRestoreSyncTestAccess::bestScore(*learner) != 22.0)
+    {
+        p1Ok = false;
+    }
+    std::printf("NS-RESTORE: P1 stalePublished=%d coeff0=%.3f bestScore=%.3f -> %s\n",
+                stalePublished ? 1 : 0,
+                NoiseShaperRestoreSyncTestAccess::bestCoefficient(*learner, 0),
+                NoiseShaperRestoreSyncTestAccess::bestScore(*learner),
+                p1Ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
+
+    // ---- P2 / P3: 復元と保存・公開の競合 --------------------------------------
+    const auto stateFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                               .getChildFile("convopeq_ns_restore_sync.xml");
+
+    std::atomic<bool> writerDone { false };
+    std::atomic<std::uint64_t> restores { 0 };
+
+    std::thread writer([learner, &writerDone, &restores, &stateA, &stateB]()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            learner->setState(stateA);
+            learner->setState(stateB);
+            restores.fetch_add(2, std::memory_order_relaxed);
+        }
+        writerDone.store(true, std::memory_order_release);
+    });
+
+    std::uint64_t saves = 0;
+    std::uint64_t mixedFiles = 0;
+    std::uint64_t snapshots = 0;
+    std::uint64_t mixedSnapshots = 0;
+
+    while (! writerDone.load(std::memory_order_acquire))
+    {
+        // P2: 保存ファイルは単一世代か
+        if (learner->saveLearnedState(stateFile))
+        {
+            ++saves;
+            const auto xml = juce::XmlDocument::parse(stateFile);
+            bool consistent = (xml != nullptr);
+
+            if (consistent)
+            {
+                const double mean0 = xml->getChildByName("CmaMean") != nullptr
+                                         ? xml->getChildByName("CmaMean")->getDoubleAttribute("m0")
+                                         : -1.0;
+                const auto* expected = expectedOf(mean0);
+                consistent = (expected != nullptr);
+
+                if (consistent && xml->getChildByName("BestCoefficients") != nullptr)
+                {
+                    const auto* coeffs = xml->getChildByName("BestCoefficients");
+                    for (int i = 0; i < 9 && consistent; ++i)
+                    {
+                        consistent = (coeffs->getDoubleAttribute("c" + juce::String(i))
+                                      == expected->bestCoefficients[i]);
+                    }
+                    for (int i = 0; i < 9 && consistent; ++i)
+                    {
+                        consistent = (xml->getChildByName("CmaMean")->getDoubleAttribute("m" + juce::String(i))
+                                      == expected->mean[i]);
+                    }
+                    consistent = consistent
+                                 && (xml->getDoubleAttribute("bestScore") == expected->bestScore)
+                                 && (xml->getIntAttribute("phase") == expected->currentPhase)
+                                 && (xml->getDoubleAttribute("elapsedPlaybackSeconds")
+                                     == expected->elapsedPlaybackSeconds);
+                }
+                else
+                {
+                    consistent = false;
+                }
+            }
+
+            if (! consistent)
+                ++mixedFiles;
+        }
+
+        // P3: 公開スナップショットは単一世代か
+        convo::NoiseShaperLearnerState snapshot;
+        learner->getState(snapshot);
+        ++snapshots;
+
+        const auto* expectedSnapshot = expectedOf(snapshot.mean[0]);
+        bool snapshotConsistent = (expectedSnapshot != nullptr);
+        if (snapshotConsistent)
+        {
+            for (int i = 0; i < 9 && snapshotConsistent; ++i)
+                snapshotConsistent = (snapshot.bestCoefficients[i] == expectedSnapshot->bestCoefficients[i]);
+            snapshotConsistent = snapshotConsistent
+                                 && (snapshot.bestScore == expectedSnapshot->bestScore)
+                                 && (snapshot.currentPhase == expectedSnapshot->currentPhase)
+                                 && (snapshot.elapsedPlaybackSeconds == expectedSnapshot->elapsedPlaybackSeconds)
+                                 && (snapshot.iteration == expectedSnapshot->iteration);
+        }
+
+        if (! snapshotConsistent)
+            ++mixedSnapshots;
+    }
+
+    writer.join();
+    stateFile.deleteFile();
+
+    std::printf("NS-RESTORE: P2 saves=%llu mixedFiles=%llu restores=%llu\n",
+                static_cast<unsigned long long> (saves),
+                static_cast<unsigned long long> (mixedFiles),
+                static_cast<unsigned long long> (restores.load()));
+    std::printf("NS-RESTORE: P3 snapshots=%llu mixedSnapshots=%llu\n",
+                static_cast<unsigned long long> (snapshots),
+                static_cast<unsigned long long> (mixedSnapshots));
+    std::fflush(stdout);
+
+    // ループが実際に競合区間へ入ったことを確認する（0 回なら検出力が無い）。
+    const bool exercised = (saves >= 20 && snapshots >= 20 && restores.load() >= 20);
+    const bool p2Ok = exercised && mixedFiles == 0;
+    const bool p3Ok = exercised && mixedSnapshots == 0;
+
+    if (! p1Ok || ! p2Ok || ! p3Ok)
+    {
+        std::fprintf(stderr, "NS-RESTORE: FAIL (P1=%d P2=%d P3=%d exercised=%d)\n",
+                     p1Ok ? 1 : 0, p2Ok ? 1 : 0, p3Ok ? 1 : 0, exercised ? 1 : 0);
+        std::fflush(stderr);
+        return 1;
+    }
+
+    std::printf("NS-RESTORE: PASS (single generation in file, snapshot and publish gate)\n");
+    std::fflush(stdout);
+    return 0;
+}
+
+```
+
 ### 📄 `src\tests\AudioEngineHarness\NoiseShaperStateRaceTests.cpp`
 
 ```
@@ -120404,6 +121103,9 @@ int runA2A3aQuarantineTests();
 // BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
 int runNoiseShaperStateRaceTests();
 
+// B-07: 復元要求と公開値の同期（専用テスト・opt-in）
+int runNoiseShaperRestoreSyncTests();
+
 //=== U3 (R-107 Stage 3): RT 経路の新規確保プローブ測定 ======================
 //   CONVOPEQ_RT_ALLOC_PROBE=1（プローブ有効）と
 //   CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms>（このモードの実行）で起動する。
@@ -120562,6 +121264,10 @@ int main(int argc, char* argv[])
     // ★ BUG-1: 学習状態 accessor のロック検証（専用ストレステスト・opt-in）。
     if (std::getenv("CONVOPEQ_NS_STATE_RACE_TEST") != nullptr)
         return runNoiseShaperStateRaceTests();
+
+    // ★ B-07: 復元要求（setState）と公開値・保存スナップショットの同期検証（opt-in）。
+    if (std::getenv("CONVOPEQ_NS_RESTORE_SYNC_TEST") != nullptr)
+        return runNoiseShaperRestoreSyncTests();
 
     // ★ 2026-11-08: D12（FrozenRuntimeWorld の release 順序を含む）だけを実行する。
     //   既定スイートが環境依存の測定区間で停止する場合の限定実行用（opt-in）。
@@ -140363,11 +141069,13 @@ bool runWorldRetirementMeasurement(const char* condition)
 //   3. 2 本目の確保で例外 → 1 本目が解放される（B-1 の本命）
 //   4. 反復しても PrivateUsage が増えない
 //   5. 検出器の感度確認（意図的な 1 本リークを検出できること）
+//   6. 学習器の確保境界（std::bad_alloc を nullptr に落とす。例外を外へ出さない）
 //
 // ビルド: カスタム main() + bool testXxx() パターン
 
 #include <JuceHeader.h>
 #include "AudioSegmentBuffer.h"
+#include "learner/SegmentBufferAllocation.h"   // ★ #265: 例外を外へ出さない境界
 
 #include <windows.h>
 #include <psapi.h>
@@ -140619,6 +141327,54 @@ struct ThrowingAllocator
     return true;
 }
 
+// B-17 / #265: 学習器のセグメント確保境界。
+//   NoiseShaperLearner のコンストラクタは「確保に失敗したら Status::Error へ落ちる」
+//   設計だが、create() は std::bad_alloc を送出するため nullptr 判定はデッドコードだった。
+//   境界で受けて nullptr に変える契約（createSegmentBufferNoThrow）を固定する。
+bool testSegmentAllocationNoThrow()
+{
+    const SIZE_T base = privateBytes();
+
+    // 成功経路: 本番の create() を通す（約 58.6 MiB、スコープ終了で解放）
+    bool created = false;
+    {
+        auto buf = convo::learner::createSegmentBufferNoThrow();
+        created = (buf != nullptr);
+    }
+
+    // 失敗経路: 注入した確保関数が std::bad_alloc を投げる。
+    //   noexcept なので、外へ漏れれば terminate してテストごと落ちる。
+    bool escaped = false;
+    bool nulled = false;
+    try
+    {
+        auto buf = convo::learner::createSegmentBufferNoThrow (
+            []() -> std::unique_ptr<AudioSegmentBuffer>
+            {
+                throw std::bad_alloc();
+            });
+        nulled = (buf == nullptr);
+    }
+    catch (...)
+    {
+        escaped = true;
+    }
+
+    const SIZE_T after = privateBytes();
+    const SIZE_T growth = (after > base) ? (after - base) : 0;
+    const bool ok = created && nulled && ! escaped && growth < kLeakThresholdBytes;
+
+    std::printf("[%s] testSegmentAllocationNoThrow created=%d nulled=%d escaped=%d growth=%llu bytes\n",
+                ok ? "PASS" : "FAIL", created ? 1 : 0, nulled ? 1 : 0, escaped ? 1 : 0,
+                static_cast<unsigned long long>(growth));
+    if (! ok)
+    {
+        ++gFailures;
+        return false;
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 //==============================================================================
@@ -140633,6 +141389,7 @@ int main()
     allPassed &= testAllocatorFailureReleasesMemory(1, "B-1-first-alloc");
     allPassed &= testAllocatorFailureReleasesMemory(2, "B-1-second-alloc");
     allPassed &= testNullptrAllocatorFailsClosed();
+    allPassed &= testSegmentAllocationNoThrow();
 
     if (allPassed && gFailures == 0)
     {
