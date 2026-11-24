@@ -1376,6 +1376,9 @@ int runA2A3aQuarantineTests();
 // BUG-1: 学習状態 accessor のロック（専用ストレステスト・opt-in）
 int runNoiseShaperStateRaceTests();
 
+// B-07: 復元要求と公開値の同期（専用テスト・opt-in）
+int runNoiseShaperRestoreSyncTests();
+
 //=== U3 (R-107 Stage 3): RT 経路の新規確保プローブ測定 ======================
 //   CONVOPEQ_RT_ALLOC_PROBE=1（プローブ有効）と
 //   CONVOPEQ_RT_ALLOC_PROBE_RUN=<ms>（このモードの実行）で起動する。
@@ -1534,6 +1537,10 @@ int main(int argc, char* argv[])
     // ★ BUG-1: 学習状態 accessor のロック検証（専用ストレステスト・opt-in）。
     if (std::getenv("CONVOPEQ_NS_STATE_RACE_TEST") != nullptr)
         return runNoiseShaperStateRaceTests();
+
+    // ★ B-07: 復元要求（setState）と公開値・保存スナップショットの同期検証（opt-in）。
+    if (std::getenv("CONVOPEQ_NS_RESTORE_SYNC_TEST") != nullptr)
+        return runNoiseShaperRestoreSyncTests();
 
     // ★ 2026-11-08: D12（FrozenRuntimeWorld の release 順序を含む）だけを実行する。
     //   既定スイートが環境依存の測定区間で停止する場合の限定実行用（opt-in）。

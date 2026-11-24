@@ -56,6 +56,19 @@ struct LeveledSegment
     SpectralType type = SpectralType::Broadband;
 };
 
+// ★ B-07: 復元要求と公開値の同期テスト（Issue #278）専用のアクセサ。
+//   private の epoch ゲートを、製品コードを変えずに固定するために使う。
+class NoiseShaperLearner;
+struct NoiseShaperRestoreSyncTestAccess
+{
+    static std::uint64_t epoch(const NoiseShaperLearner& learner) noexcept;
+    static bool publish(NoiseShaperLearner& learner, const double* parcor, double score,
+                        int evaluatedCandidates, std::uint64_t expectedEpoch,
+                        double safetyMargin) noexcept;
+    static double bestCoefficient(const NoiseShaperLearner& learner, int index) noexcept;
+    static double bestScore(const NoiseShaperLearner& learner) noexcept;
+};
+
 class NoiseShaperLearner
 {
 public:
@@ -167,6 +180,9 @@ public:
     }
 
 private:
+    // ★ B-07: Issue #278 の同期テスト（NoiseShaperRestoreSyncTests.cpp）だけに開く。
+    friend struct NoiseShaperRestoreSyncTestAccess;
+
     enum class WorkerState : uint8_t
     {
         Idle = 0,
@@ -277,6 +293,9 @@ private:
     std::atomic<const char*> errorMessage { nullptr };
 
     double accumulatedPlaybackSeconds = 0.0;           // Worker thread専用（非atomic）
+                                                       // ★ B-07(a): setState() は書かない。
+                                                       //   復元は progress へ publish し、worker が
+                                                       //   世代境界で取り込む。
     double sessionSampleRate = 0.0;
     int sessionBitDepth = 0;
     uint64_t currentSessionId = 0;
